@@ -159,9 +159,9 @@ _IS_ACTIVATION = 'is_activation'  # bool
 # The name is useful in the conversion provider to find the static weight.
 _WEIGHT_NAME = 'weight_name'  # str
 
-# Static calibration for logistic functions whose output ranges are known,
-# e.g. softmax.
-_STATIC_CALIBRATION = 'static_calibration'  # dict[str, float]
+# Fixed range for logistic functions whose output ranges are known, e.g.
+# softmax.
+_FIXED_RANGE = 'fixed_range'  # tuple[float, float]
 
 
 GetRuleAndOpIdFn = Callable[[str], tuple[qconfig.QuantizationRule, str]]
@@ -178,8 +178,8 @@ class QuantizedOp:
   # Which args are considered as the inputs of the op.
   input_idx: Sequence[int] = ()
 
-  # Static calibration for the op output.
-  static_calibration_for_output: dict[str, float] | None = None
+  # Fixed range for the op output.
+  fixed_range_for_output: tuple[float, float] | None = None
 
   def __init__(
       self,
@@ -330,10 +330,8 @@ class QuantizedOp:
   ) -> jax.Array:
     """Fake quantize an output activation, which is delayed to the next op."""
     aux_data.set(array, _IS_ACTIVATION, True)
-    if self.static_calibration_for_output is not None:
-      aux_data.set(
-          array, _STATIC_CALIBRATION, self.static_calibration_for_output
-      )
+    if self.fixed_range_for_output is not None:
+      aux_data.set(array, _FIXED_RANGE, self.fixed_range_for_output)
     # Output is only quantized in SRQ.
     if rule and rule.act_qtype and rule.act_static_scale:
       aux_data.set(array, _FQ_RULE, rule)
@@ -388,7 +386,7 @@ class TransparentOp(QuantizedOp):
           f'Unsupported num of inputs {self.input_idx} for op {self._op_name}.'
       )
     out = self._call_original_op(*args, **kwargs)
-    for key in [_IS_ACTIVATION, _WEIGHT_NAME, _FQ_RULE, _STATIC_CALIBRATION]:
+    for key in [_IS_ACTIVATION, _WEIGHT_NAME, _FQ_RULE, _FIXED_RANGE]:
       value = aux_data.get(args[self.input_idx[0]], key, None)
       if value is not None:
         aux_data.set(out, key, value)
@@ -444,8 +442,8 @@ class FinalOutput(QuantizedOp):
     if self.check_activation and not aux_data.get(x, _IS_ACTIVATION, False):
       raise NotAnActivationError
     _, op_id = self._get_rule_and_op_id_fn(self._op_name)
-    if self.static_calibration_for_output is not None:
-      aux_data.set(x, _STATIC_CALIBRATION, self.static_calibration_for_output)
+    if self.fixed_range_for_output is not None:
+      aux_data.set(x, _FIXED_RANGE, self.fixed_range_for_output)
     # Only FQ the output if the previous op wants.
     return self._fake_quant_act(x, None, op_id)
 
@@ -473,7 +471,7 @@ class Softmax(QuantizedOp):
   input_idx = [0]
   # The converter requires (scale, zero_point) = (1.0 / 256.0, -128). Qwix uses
   # [-128, 127], which maps to [0, 255 / 256] with the above scale/zp.
-  static_calibration_for_output = {'min': 0.0, 'max': 255 / 256}
+  fixed_range_for_output = (0.0, 255 / 256)
 
 
 class Tanh(QuantizedOp):
@@ -482,7 +480,7 @@ class Tanh(QuantizedOp):
   input_idx = [0]
   # The converter requires (scale, zero_point) = (1.0 / 128.0, 0). Qwix uses
   # [-128, 127], which maps to [-1, 127 / 128] with the above scale/zp.
-  static_calibration_for_output = {'min': -1.0, 'max': 127 / 128}
+  fixed_range_for_output = (-1.0, 127 / 128)
 
 
 class UfuncCall(QuantizedOp):
@@ -528,13 +526,10 @@ class Concatenate(QuantizedOp):
     if not any(aux_data.get(x, _IS_ACTIVATION, False) for x in arrays):
       return self._call_original_op(arrays, *args, **kwargs)
 
-    # Forward the static_calibration if all inputs have the same.
-    static_calibration = aux_data.get(arrays[0], _STATIC_CALIBRATION, None)
-    if any(
-        aux_data.get(x, _STATIC_CALIBRATION, None) != static_calibration
-        for x in arrays
-    ):
-      static_calibration = None
+    # Forward the fixed_range if all inputs have the same.
+    fixed_range = aux_data.get(arrays[0], _FIXED_RANGE, None)
+    if any(aux_data.get(x, _FIXED_RANGE, None) != fixed_range for x in arrays):
+      fixed_range = None
 
     # If ourselves is not quantized, fake quantize the inputs if needed.
     # Otherwise, don't insert FQ for the inputs.
@@ -547,8 +542,8 @@ class Concatenate(QuantizedOp):
 
     out = jnp.concatenate(arrays, *args, **kwargs)
 
-    if static_calibration is not None:
-      aux_data.set(out, _STATIC_CALIBRATION, static_calibration)
+    if fixed_range is not None:
+      aux_data.set(out, _FIXED_RANGE, fixed_range)
     return self._fake_quant_output(out, rule)
 
 
@@ -608,7 +603,7 @@ class Silu(QuantizedOp):
     rule, op_id = self._get_rule_and_op_id_fn(self._op_name)
     x = self._fake_quant_act(x, rule, op_id)
     y = jax.nn.sigmoid(x)
-    aux_data.set(y, _STATIC_CALIBRATION, Softmax.static_calibration_for_output)
+    aux_data.set(y, _FIXED_RANGE, Softmax.fixed_range_for_output)
     y = self._fake_quant_act(y, rule, op_id + '_sigmoid')
     return self._fake_quant_output(x * y, rule)
 

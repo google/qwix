@@ -296,16 +296,17 @@ class QatProvider(qconfig.QuantizationProvider):
     # TransposedQArray cannot be dequantized.
     how = dataclasses.replace(how, scale_transpose=None)
 
+    # Check and apply the fixed-range calibration asscociated with the array.
+    fixed_range = aux_data.get(array, 'fixed_range', None)
+    if fixed_range is not None:
+      calibration_method = f'fixed,{fixed_range[0]},{fixed_range[1]}'
+      how = dataclasses.replace(how, calibration_method=calibration_method)
+
     calibration = qarray.calibrate(array, how)
-
-    # Check and apply the static calibration asscociated with the array.
-    static_calibration = aux_data.get(array, 'static_calibration', None)
-    if static_calibration is not None:
-      calibration = jax.tree.map(jnp.full_like, calibration, static_calibration)
-
     if quant_stat_name is not None:
+      is_fixed_range = how.calibration_method.startswith('fixed')
       calibration = self._collect_quant_stat(
-          quant_stat_name, calibration, static_calibration is not None
+          quant_stat_name, calibration, is_fixed_range
       )
     scale, zero_point = qarray.compute_scale_zero_point(calibration, how.qtype)
     q_array = qarray.quantize_with_scale_zero_point(
@@ -317,16 +318,19 @@ class QatProvider(qconfig.QuantizationProvider):
       self,
       name: str,
       calibration: averaging.Calibration,
-      calibration_is_static: bool,
+      calibration_is_fixed_range: bool,
   ) -> averaging.Calibration:
-    """Collects the quantization statistics variables."""
+    """Collects the quantization statistics."""
     aggregator = averaging.SimpleMovingAverage()
     quant_stat = flax_util.get_or_create_variable(
         'quant_stats', name, lambda: aggregator.init(calibration)
     )
 
     if flax_util.should_update_quant_stats():
-      if calibration_is_static:  # don't accumulate static calibration.
+      if calibration_is_fixed_range:
+        # For fixed-range calibration, start from an empty quant_stat to avoid
+        # floating-point accumulation error. Alternatively, we could skip
+        # storing the quant_stat for fixed-range calibration.
         quant_stat.value = aggregator.init(calibration)
       quant_stat.value = aggregator.update(quant_stat.value, calibration)
 

@@ -45,6 +45,7 @@ class OdmlQatProvider(qat.QatProvider):
       rules: Sequence[qconfig.QuantizationRule],
       *,
       disable_per_channel_weights: bool = False,
+      # TODO: Update these two args to fixed_range_for_{inputs,outputs}.
       static_calibration_for_input: dict[str, float] | None = None,
       static_calibration_for_output: dict[str, float] | None = None,
       strict: bool = True,
@@ -62,8 +63,18 @@ class OdmlQatProvider(qat.QatProvider):
       strict: Whether to raise an error if an unknown op is discovered.
     """
     super().__init__(rules)
-    self._static_calibration_for_input = static_calibration_for_input
-    self._static_calibration_for_output = static_calibration_for_output
+    self._fixed_range_for_inputs = None
+    if static_calibration_for_input is not None:
+      self._fixed_range_for_inputs = (
+          static_calibration_for_input['min'],
+          static_calibration_for_input['max'],
+      )
+    self._fixed_range_for_outputs = None
+    if static_calibration_for_output is not None:
+      self._fixed_range_for_outputs = (
+          static_calibration_for_output['min'],
+          static_calibration_for_output['max'],
+      )
     self._strict = strict
     self._ops = odml_ops.get_all_ops()
 
@@ -107,7 +118,7 @@ class OdmlQatProvider(qat.QatProvider):
   ) -> tuple[Any, Any, Any]:
     """Quantize the input of the model."""
     op = odml_ops.ModelInput(
-        static_calibration_for_output=self._static_calibration_for_input,
+        fixed_range_for_output=self._fixed_range_for_inputs,
         get_rule_and_op_id_fn=self._get_current_rule_and_op_id,
         fake_quant_fn=self._fake_quant,
     )
@@ -119,7 +130,7 @@ class OdmlQatProvider(qat.QatProvider):
       method_name = 'final'  # backwards compatibility.
     op = odml_ops.FinalOutput(
         op_full_name=method_name + '_output',
-        static_calibration_for_output=self._static_calibration_for_output,
+        fixed_range_for_output=self._fixed_range_for_outputs,
         get_rule_and_op_id_fn=self._get_current_rule_and_op_id,
         fake_quant_fn=self._fake_quant,
         check_activation=self._strict,
