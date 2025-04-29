@@ -118,6 +118,27 @@ class LoraProvider(ptq.PtqProvider):
   during LoRA training.
   """
 
+  def __init__(self, rules=None, **kwargs):
+    """Initializes the LoraProvider.
+
+    Usage:
+      LoraProvider(rank=4, alpha=0.5)
+    or
+      LoraProvider([
+          LoraRule(module_path='module_path', rank=4, alpha=0.5)
+      ])
+
+    Args:
+      rules: A list of quantization rules.
+      **kwargs: The keyword arguments to create a rule. Only one of rules and
+        kwargs should be provided.
+    """
+    if rules is None:
+      rules = [LoraRule(**kwargs)]
+    elif kwargs:
+      raise ValueError('Only one of rules and kwargs should be provided.')
+    super().__init__(rules=rules)
+
   def dot_general(
       self,
       lhs: jax.Array,

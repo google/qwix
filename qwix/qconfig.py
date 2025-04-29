@@ -97,14 +97,12 @@ class QuantizationProvider(metaclass=abc.ABCMeta):
   injected into the model by using interception.py.
   """
 
-  def __init__(self, rules: QuantizationRule | Sequence[QuantizationRule]):
+  def __init__(self, rules: Sequence[QuantizationRule]):
     """Initialize the provider.
 
     Args:
       rules: The quantization rules in the order of precedence.
     """
-    if isinstance(rules, QuantizationRule):
-      rules = [rules]
     self._rules = [self._init_rule(rule) for rule in rules]
     self._logged_ops = set()
 

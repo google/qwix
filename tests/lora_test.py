@@ -316,13 +316,11 @@ class LoraTest(parameterized.TestCase):
         32, kernel_init=nn.with_partitioning(nn.zeros_init(), ("a", "b"))
     )
     lora_provider = lora.LoraProvider(
-        lora.LoraRule(
-            module_path=".*",
-            rank=3,
-            alpha=6.0,
-            dropout=0.0,
-            weight_qtype=weight_qtype,
-        )
+        module_path=".*",
+        rank=3,
+        alpha=6.0,
+        dropout=0.0,
+        weight_qtype=weight_qtype,
     )
     lora_dense = lora.apply_lora_to_model(dense, lora_provider)
     model_input = jnp.ones((10, 16))
@@ -356,13 +354,7 @@ class LoraTest(parameterized.TestCase):
             nn.zeros_init(), (None, None, "in", "out")
         ),
     )
-    lora_provider = lora.LoraProvider(
-        lora.LoraRule(
-            module_path=".*",
-            rank=3,
-            alpha=1.0,
-        )
-    )
+    lora_provider = lora.LoraProvider(rank=3, alpha=1.0)
     lora_conv = lora.apply_lora_to_model(conv, lora_provider)
     model_input = jnp.ones((1, 8, 8, 16))
     lora_variables = lora_conv.init(jax.random.PRNGKey(0), model_input)
@@ -403,12 +395,10 @@ class LoraTest(parameterized.TestCase):
     self.assertEqual(conv.kernel.value.sharding.spec, conv.kernel.sharding)
 
     lora_provider = lora.LoraProvider(
-        lora.LoraRule(
-            weight_qtype=qtype,
-            act_qtype=qtype,
-            rank=3,
-            alpha=1.0,
-        )
+        weight_qtype=qtype,
+        act_qtype=qtype,
+        rank=3,
+        alpha=1.0,
     )
     model_input = jnp.ones((1, 8, 8, 16))
     lora_conv = lora.apply_lora_to_model(conv, lora_provider, model_input)
