@@ -192,7 +192,9 @@ def unbox(maybe_boxed: Any) -> Any:
       return x
 
   return jax.tree.map(
-      fn, maybe_boxed, is_leaf=lambda x: isinstance(x, nn.meta.AxisMetadata)
+      fn,
+      maybe_boxed,
+      is_leaf=lambda x: isinstance(x, nn.meta.AxisMetadata | nnx.Variable),
   )
 
 
