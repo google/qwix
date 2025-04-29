@@ -61,10 +61,6 @@ class QuantizationRule:
   # and dynamic-range quantization in XLA.
   act_static_scale: bool | None = None
 
-  # DEPRECATED: Use act_calibration_method='minmax' instead.
-  # If set, enable asymmetric quantization for input activations.
-  act_asymmetric: bool = False
-
   # The method to calibrate weights, in format of <method>[,<args>]. Supported
   # methods are:
   #   absmax[,<scale>]: symmetric quantization using maximum absolute value. A
@@ -113,8 +109,7 @@ class QuantizationProvider(metaclass=abc.ABCMeta):
     if rule.act_static_scale is None:
       rule = dataclasses.replace(rule, act_static_scale=False)
     if rule.act_calibration_method is None:
-      default = 'minmax' if rule.act_asymmetric else 'absmax'
-      rule = dataclasses.replace(rule, act_calibration_method=default)
+      rule = dataclasses.replace(rule, act_calibration_method='absmax')
     return rule
 
   @abc.abstractmethod

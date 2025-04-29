@@ -287,8 +287,8 @@ class UNet(nn.Module):
   }
 
   additional_provider_args = dict(
-      static_calibration_for_input={'min': 0, 'max': 1},
-      static_calibration_for_output={'min': 0, 'max': 1},
+      fixed_range_for_inputs=(0, 1),
+      fixed_range_for_outputs=(0, 1),
   )
 
   expected_quant_stats_values = {

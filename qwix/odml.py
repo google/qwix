@@ -45,9 +45,8 @@ class OdmlQatProvider(qat.QatProvider):
       rules: Sequence[qconfig.QuantizationRule],
       *,
       disable_per_channel_weights: bool = False,
-      # TODO: Update these two args to fixed_range_for_{inputs,outputs}.
-      static_calibration_for_input: dict[str, float] | None = None,
-      static_calibration_for_output: dict[str, float] | None = None,
+      fixed_range_for_inputs: tuple[float, float] | None = None,
+      fixed_range_for_outputs: tuple[float, float] | None = None,
       strict: bool = True,
   ):
     """Constructor.
@@ -56,25 +55,15 @@ class OdmlQatProvider(qat.QatProvider):
       rules: The quantization rules.
       disable_per_channel_weights: Whether to disable per-channel quantization
         for weights.
-      static_calibration_for_input: The static calibration for the model input,
-        e.g. {'min': 0, 'max': 1}.
-      static_calibration_for_output: The static calibration for the model
-        output.
+      fixed_range_for_inputs: Use a fixed range when quantizing the model
+        inputs, e.g. (0, 1).
+      fixed_range_for_outputs: Use a fixed range when quantizing the model
+        outputs, e.g. (0, 1).
       strict: Whether to raise an error if an unknown op is discovered.
     """
     super().__init__(rules)
-    self._fixed_range_for_inputs = None
-    if static_calibration_for_input is not None:
-      self._fixed_range_for_inputs = (
-          static_calibration_for_input['min'],
-          static_calibration_for_input['max'],
-      )
-    self._fixed_range_for_outputs = None
-    if static_calibration_for_output is not None:
-      self._fixed_range_for_outputs = (
-          static_calibration_for_output['min'],
-          static_calibration_for_output['max'],
-      )
+    self._fixed_range_for_inputs = fixed_range_for_inputs
+    self._fixed_range_for_outputs = fixed_range_for_outputs
     self._strict = strict
     self._ops = odml_ops.get_all_ops()
 

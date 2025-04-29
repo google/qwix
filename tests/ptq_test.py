@@ -272,15 +272,15 @@ class PtqTest(parameterized.TestCase):
         nnx.to_pure_dict(nnx.state(ptq_einsum)),
     )
 
-  @parameterized.parameters(False, True)
-  def test_nnx_srq(self, act_asymmetric):
+  @parameterized.parameters("absmax", "minmax")
+  def test_nnx_srq(self, act_calibration_method):
     q_rules = [
         qconfig.QuantizationRule(
             module_path=".*",
             weight_qtype=jnp.int8,
             act_qtype=jnp.int8,
             act_static_scale=True,
-            act_asymmetric=act_asymmetric,
+            act_calibration_method=act_calibration_method,
         ),
     ]
 
@@ -297,7 +297,7 @@ class PtqTest(parameterized.TestCase):
 
     self.assertEqual(quant_stat["count"].shape, ())
     self.assertEqual(quant_stat["count"], 1)
-    if act_asymmetric:
+    if act_calibration_method == "minmax":
       self.assertEqual(quant_stat["sum_of_min"].shape, (1, 1))
       self.assertEqual(quant_stat["sum_of_max"].shape, (1, 1))
     else:
@@ -309,7 +309,7 @@ class PtqTest(parameterized.TestCase):
     )
     self.assertIsInstance(ptq_linear.dot_general0_lhs_scale, ptq.WithAux)
     self.assertEqual(ptq_linear.dot_general0_lhs_scale.array.shape, (1, 1))
-    if act_asymmetric:
+    if act_calibration_method == "minmax":
       self.assertEqual(ptq_linear.dot_general0_lhs_zero_point.shape, (1, 1))
 
     # PTQ method 2: manually call quantize_params.
