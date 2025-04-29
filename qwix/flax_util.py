@@ -196,6 +196,46 @@ def unbox(maybe_boxed: Any) -> Any:
   )
 
 
+def update_sharding(
+    spec: Sequence[Any],
+    *,
+    shape: Sequence[int] | None = None,
+    split: Collection[int] | None = None,
+    merge: Collection[int] | None = None,
+    transpose: Sequence[int | None] | None = None,
+) -> tuple[Any, ...]:
+  """Derives the partition spec from an existing spec.
+
+  Args:
+    spec: The existing partition spec.
+    shape: Optional. The shape of the value. If provided, the partition spec
+      will be updated to remove sharding for dimensions of size 1.
+    split: Splits the given spec into (metadata, None).
+    merge: Merge the given spec (metadata, None) into metadata. This is the
+      inverse of split and takes the same arguments.
+    transpose: Transposes the spec.
+
+  Returns:
+    The updated partition spec.
+  """
+  assert bool(split) + bool(merge) + bool(transpose) <= 1
+  if split:
+    spec = [(a, None) if i in split else (a,) for i, a in enumerate(spec)]
+    spec = sum(spec, ())  # flatten the list of tuples.
+  elif merge:
+    for i in merge:
+      spec = spec[: i + 1] + spec[i + 2 :]
+  elif transpose:
+    spec = tuple(spec[i] if i is not None else None for i in transpose)
+
+  if shape:
+    assert len(shape) == len(spec), f'{shape=} {spec=}'
+    # For scales: remove sharding for dimensions of size 1.
+    spec = tuple(None if d == 1 else a for a, d in zip(spec, shape))
+
+  return spec
+
+
 def update_boxed(
     boxed: nn.meta.AxisMetadata | nnx.Variable | jax.Array,
     *,
@@ -223,42 +263,32 @@ def update_boxed(
   Returns:
     The updated metadata, which may be the same as the input.
   """
-  # We use some heuristics here, so let's be cautious.
-  assert isinstance(boxed, nn.meta.AxisMetadata | nnx.Variable | jax.Array)
-  assert bool(split) + bool(merge) + bool(transpose) <= 1
-
   if isinstance(boxed, nn.meta.AxisMetadata):
     if value is not None:
       boxed = boxed.replace_boxed(value)
     shape = boxed.unbox().shape
+    for possible_field in ('names', 'mesh_axes', 'axes_types'):
+      axes = getattr(boxed, possible_field, None)
+      if isinstance(axes, (list, tuple)):
+        axes = update_sharding(
+            axes, shape=shape, split=split, merge=merge, transpose=transpose
+        )
+        boxed = dataclasses.replace(boxed, **{possible_field: axes})
   elif isinstance(boxed, nnx.Variable):
     if value is not None:
       boxed = boxed.replace(value)
     shape = boxed.value.shape
-  else:  # not boxed.
-    return value if value is not None else boxed
-
-  # Update the metadata.
-  for possible_field in ('names', 'mesh_axes', 'axes_types', 'sharding'):
-    axes = getattr(boxed, possible_field, None)
-    if not isinstance(axes, (list, tuple)):
-      continue
-    if split:
-      axes = [(a, None) if i in split else (a,) for i, a in enumerate(axes)]
-      axes = sum(axes, ())  # flatten the list of tuples.
-    elif merge:
-      for i in merge:
-        axes = axes[: i + 1] + axes[i + 2 :]
-    elif transpose:
-      axes = tuple(axes[i] if i is not None else None for i in transpose)
-
-    # For scales: remove sharding for dimensions of size 1.
-    axes = tuple(None if d == 1 else a for a, d in zip(axes, shape))
-
-    if dataclasses.is_dataclass(boxed):  # nn
-      boxed = dataclasses.replace(boxed, **{possible_field: axes})
-    else:  # nnx
-      setattr(boxed, possible_field, axes)
+    axes = boxed.get_metadata().get('sharding', None)
+    if isinstance(axes, (list, tuple)):
+      axes = update_sharding(
+          axes, shape=shape, split=split, merge=merge, transpose=transpose
+      )
+      setattr(boxed, 'sharding', axes)
+  elif isinstance(boxed, jax.Array):  # not boxed.
+    if value is not None:
+      boxed = value
+  else:
+    raise ValueError(f'Unsupported type: {type(boxed)}')
 
   return boxed
 

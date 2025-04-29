@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import functools
 import os
 
 from absl.testing import absltest
@@ -20,7 +21,6 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 from jax import sharding as shd
-import numpy as np
 from qwix import lora
 from qwix import ptq
 
@@ -34,25 +34,31 @@ class LoraTest(parameterized.TestCase):
           einsum_str="BTD,DNH->BTNH",
           lhs_shape=(16, 4, 12),
           rhs_shape=(12, 10, 8),
-          output_shape=(16, 4, 10, 8),
           lora_rank=3,
           expected_lora_einsum_str="BTD,Dr,rNH->BTNH",
+          expected_a_sharding_transpose=(0, None),
+          expected_b_sharding_transpose=(None, 1, 2),
+          expected_output_shape=(16, 4, 10, 8),
       ),
       dict(
           einsum_str="bjir,bnmjr->bimn",
           lhs_shape=(16, 4, 12, 5),
           rhs_shape=(16, 10, 8, 4, 5),
-          output_shape=(16, 12, 8, 10),
           lora_rank=3,
           expected_lora_einsum_str="bjir,bjrA,Anm->bimn",
+          expected_a_sharding_transpose=(0, 3, 4, None),
+          expected_b_sharding_transpose=(None, 1, 2),
+          expected_output_shape=(16, 12, 8, 10),
       ),
       dict(
           einsum_str=" ABD, DNH -> ABNH",
           lhs_shape=(5, 16, 12),
           rhs_shape=(12, 10, 8),
-          output_shape=(5, 16, 10, 8),
           lora_rank=3,
           expected_lora_einsum_str="ABD,Dr,rNH->ABNH",
+          expected_a_sharding_transpose=(0, None),
+          expected_b_sharding_transpose=(None, 1, 2),
+          expected_output_shape=(5, 16, 10, 8),
       ),
   )
   def test_parse_einsum_str_for_lora(
@@ -60,23 +66,34 @@ class LoraTest(parameterized.TestCase):
       einsum_str,
       lhs_shape,
       rhs_shape,
-      output_shape,
       lora_rank,
       expected_lora_einsum_str,
+      expected_a_sharding_transpose,
+      expected_b_sharding_transpose,
+      expected_output_shape,
   ):
-    a_shape, b_shape, lora_einsum_str, _, _ = lora._parse_einsum_str_for_lora(
+    (
+        a_shape,
+        b_shape,
+        lora_einsum_str,
+        a_sharding_transpose,
+        b_sharding_transpose,
+    ) = lora._parse_einsum_str_for_lora(
         lhs_shape, rhs_shape, einsum_str, lora_rank
     )
     self.assertEqual(lora_einsum_str, expected_lora_einsum_str)
     self.assertEqual(a_shape[-1], lora_rank)
     self.assertEqual(b_shape[0], lora_rank)
+    self.assertEqual(a_sharding_transpose, expected_a_sharding_transpose)
+    self.assertEqual(b_sharding_transpose, expected_b_sharding_transpose)
 
-    lhs = jnp.ones(lhs_shape)
-    lora_a = jnp.ones(a_shape)
-    lora_b = jnp.ones(b_shape)
-    res = jnp.einsum(lora_einsum_str, lhs, lora_a, lora_b)
-
-    self.assertEqual(res.shape, output_shape)
+    lhs = jax.ShapeDtypeStruct(lhs_shape, jnp.float32)
+    lora_a = jax.ShapeDtypeStruct(a_shape, jnp.float32)
+    lora_b = jax.ShapeDtypeStruct(b_shape, jnp.float32)
+    res = jax.eval_shape(
+        functools.partial(jnp.einsum, lora_einsum_str), lhs, lora_a, lora_b
+    )
+    self.assertEqual(res.shape, expected_output_shape)
 
   @parameterized.parameters(
       dict(
@@ -102,7 +119,7 @@ class LoraTest(parameterized.TestCase):
       )
 
   @parameterized.parameters(0.0, 1.0)
-  def test_lora_jit_grad_dot_general(self, dropout_rate):
+  def test_lora_dot_general_nnx(self, dropout_rate):
     """Test LoRA on nnx.Linear module."""
     linear = nnx.Linear(12, 10, rngs=nnx.Rngs(0))
     lora_provider = lora.LoraProvider([
@@ -139,13 +156,14 @@ class LoraTest(parameterized.TestCase):
           @ variables["kernel_lora_a"].value
           @ variables["kernel_lora_b"].value
           * 0.5
+          / 3
       )
 
     model_output = lora_linear(model_input)
-    np.testing.assert_array_equal(model_output, expected_model_output)
+    self.assertTrue(jnp.allclose(model_output, expected_model_output))
 
   @parameterized.parameters(0.0, 1.0)
-  def test_lora_jit_grad_einsum(self, dropout_rate):
+  def test_lora_einsum_nnx(self, dropout_rate):
     """Test LoRA on nnx.Einsum module."""
     einsum = nnx.Einsum("btd,dnh->btnh", (12, 8, 10), (8, 10), rngs=nnx.Rngs(0))
     lora_provider = lora.LoraProvider([
@@ -178,183 +196,121 @@ class LoraTest(parameterized.TestCase):
 
     expected_model_output = einsum(model_input)
     if dropout_rate == 0.0:
-      expected_model_output += jnp.einsum(
-          "btd,dr,rnh->btnh",
-          model_input,
-          variables["kernel_lora_a"].value,
-          variables["kernel_lora_b"].value,
+      expected_model_output += (
+          jnp.einsum(
+              "btd,dr,rnh->btnh",
+              model_input,
+              variables["kernel_lora_a"].value,
+              variables["kernel_lora_b"].value,
+          )
+          / 3
       )
 
     model_output = lora_einsum(model_input)
-    np.testing.assert_array_equal(model_output, expected_model_output)
+    self.assertTrue(jnp.allclose(model_output, expected_model_output))
 
-  @parameterized.parameters("nf4", "int4")
-  def test_qlora_jit_grad_einsum(self, weight_qtype):
-    """Test QLoRA on nnx.Einsum module."""
-    einsum = nnx.Einsum("btd,dnh->btnh", (12, 8, 10), (8, 10), rngs=nnx.Rngs(0))
-    qlora_provider = lora.LoraProvider([
+  @parameterized.product(
+      weight_qtype=[None, "nf4", "int4"],
+      apply_sharding_to_base_model=[True, False],
+  )
+  def test_lora_einsum_nnx_sharded(
+      self, weight_qtype, apply_sharding_to_base_model
+  ):
+    """Test QLoRA on nnx.Einsum module param with sharding."""
+    mesh = jax.make_mesh((2, 2), ("fsdp", "tp"))
+    einsum = nnx.Einsum(
+        "btd,dnh->btnh",
+        (16, 8, 10),
+        (8, 10),
+        rngs=nnx.Rngs(0),
+        kernel_init=nnx.with_partitioning(
+            nnx.initializers.lecun_normal(), ("fsdp", "tp", None)
+        ),
+        bias_init=nnx.with_partitioning(nnx.initializers.zeros, ("tp", None)),
+    )
+    if apply_sharding_to_base_model:
+      # Apply sharding on the base model.
+      self._shard_nnx_model(einsum, mesh)
+      self.assertEqual(einsum.kernel.sharding, ("fsdp", "tp", None))
+      self.assertEqual(einsum.kernel.value.sharding.spec, ("fsdp", "tp", None))
+      self.assertEqual(einsum.bias.sharding, ("tp", None))
+      self.assertEqual(einsum.bias.value.sharding.spec, ("tp", None))
+
+    lora_provider = lora.LoraProvider([
         lora.LoraRule(
-            module_path=".*",
             rank=3,
-            alpha=1.0,
-            dropout=0.0,
+            alpha=6.0,
             weight_qtype=weight_qtype,
             tile_size=4,
-            lora_b_initializer=nnx.initializers.ones,
         ),
     ])
-    model_input = jnp.ones((16, 4, 12))
-    qlora_einsum = lora.apply_lora_to_model(einsum, qlora_provider, model_input)
+    input_sharding = shd.NamedSharding(
+        mesh, shd.PartitionSpec("fsdp", None, None)
+    )
+    model_input = jax.device_put(jnp.ones((16, 4, 16)), input_sharding)
+    lora_einsum = lora.apply_lora_to_model(einsum, lora_provider, model_input)
+    self.assertEqual(lora_einsum.kernel_lora_einsum_str, "btd,dr,rnh->btnh")
 
-    nnx.display(qlora_einsum)
-    self.assertEqual(qlora_einsum.kernel_lora_einsum_str, "btd,dr,rnh->btnh")
+    if not apply_sharding_to_base_model:
+      # Apply sharding on the LoRA model. Both should work.
+      self._shard_nnx_model(lora_einsum, mesh)
 
-    @nnx.jit
-    def jit_apply(model, x):
-      def loss_fn(model, x):
-        out = model(x)
-        return jnp.sum(jnp.abs(out))
+    lora_state, base_state = nnx.state(lora_einsum, nnx.LoRAParam, nnx.Param)
 
-      return nnx.grad(loss_fn, argnums=nnx.DiffState(0, nnx.LoRAParam))(
-          model, x
+    self.assertEqual(lora_state.kernel_lora_a.value.shape, (16, 3))
+    self.assertEqual(lora_state.kernel_lora_a.sharding, ("fsdp", None))
+    self.assertEqual(lora_state.kernel_lora_b.value.shape, (3, 8, 10))
+    self.assertEqual(lora_state.kernel_lora_b.sharding, (None, "tp", None))
+    if weight_qtype is None:  # unquantized
+      self.assertEqual(base_state.kernel.sharding, ("fsdp", "tp", None))
+      self.assertEqual(
+          base_state.kernel.value.sharding.spec, base_state.kernel.sharding
+      )
+    elif weight_qtype == "nf4":  # untransposed weights
+      self.assertEqual(base_state.kernel.array.qvalue.value.shape, (16, 8, 10))
+      self.assertEqual(
+          base_state.kernel.array.qvalue.sharding, ("fsdp", "tp", None)
+      )
+      self.assertEqual(base_state.kernel.array.scale.value.shape, (4, 8, 10))
+      self.assertEqual(
+          base_state.kernel.array.scale.sharding, ("fsdp", "tp", None)
+      )
+    elif weight_qtype:  # transposed weights
+      self.assertEqual(  # split as d*nh
+          base_state.kernel.array.qvalue.value.shape, (4, 4, 8, 10)
+      )
+      self.assertEqual(  # split as d*nh
+          base_state.kernel.array.qvalue.sharding, ("fsdp", None, "tp", None)
+      )
+      self.assertEqual(  # transposed as btdnh
+          base_state.kernel.array.scale.value.shape, (1, 1, 4, 8, 10)
+      )
+      self.assertEqual(  # transposed as btdnh
+          base_state.kernel.array.scale.sharding,
+          (None, None, "fsdp", "tp", None),
       )
 
-    jit_apply(qlora_einsum, model_input)
+    # Check that the actual sharding matches the sharding on the metadata,
+    # regardless of whether apply_sharding_to_base_model is True or False.
+    for variable in nnx.iter_graph(lora_einsum):
+      if isinstance(variable, nnx.Variable):
+        self.assertEqual(variable.sharding, variable.value.sharding.spec)
 
-    variables = nnx.variables(qlora_einsum, nnx.LoRAParam)
-    self.assertLen(variables, 2)
-    self.assertIn("kernel_lora_a", variables)
-    self.assertIn("kernel_lora_b", variables)
-
-    # Runs the model again to verify numeric correctness.
-    model_output = qlora_einsum(model_input)
-
-    lora_model_output = einsum(model_input) + jnp.einsum(
-        "btd,dr,rnh->btnh",
-        model_input,
-        variables["kernel_lora_a"].value,
-        variables["kernel_lora_b"].value,
-    )
-
-    rel_mae = (
-        jnp.abs(model_output - lora_model_output).mean()
-        / jnp.abs(lora_model_output).mean()
-    )
-    self.assertLess(rel_mae, 0.1)
-
-  def test_lora_einsum_jit_with_sharding(self):
-    """Test LoRA on nnx.Einsum module with sharding."""
-
-    @nnx.jit
-    def create_sharded_model():
-      einsum = nnx.Einsum(
-          "btd,dnh->btnh",
-          (12, 8, 10),
-          (8, 10),
-          rngs=nnx.Rngs(0),
-          kernel_init=nnx.with_partitioning(
-              nnx.initializers.lecun_normal(), ("fsdp", "tp", None)
-          ),
-          bias_init=nnx.with_partitioning(nnx.initializers.zeros, ("tp", None)),
-      )
-
-      lora_provider = lora.LoraProvider([
-          lora.LoraRule(
-              module_path=".*",
-              rank=3,
-              alpha=6.0,
-              dropout=0.0,
-          ),
-      ])
-      model_input = jnp.ones((16, 4, 12))
-      lora_einsum = lora.apply_lora_to_model(einsum, lora_provider, model_input)
-      state = nnx.state(lora_einsum)
-      pspecs = nnx.get_partition_spec(state)
-      sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
-      nnx.update(lora_einsum, sharded_state)
-      return lora_einsum
-
-    mesh = jax.make_mesh((2, 2), ("fsdp", "tp"))
-    with mesh:
-      sharded_lora_einsum = create_sharded_model()
-
-    self.assertEqual(sharded_lora_einsum.kernel.sharding, ("fsdp", "tp", None))
-    self.assertEqual(sharded_lora_einsum.kernel_lora_a.sharding, ("fsdp", None))
-    self.assertEqual(
-        sharded_lora_einsum.kernel_lora_b.sharding, (None, "tp", None)
-    )
-    self.assertEqual(
-        sharded_lora_einsum.kernel_lora_a.value.sharding.spec,
-        shd.PartitionSpec("fsdp"),
-    )
-    self.assertEqual(
-        sharded_lora_einsum.kernel_lora_b.value.sharding.spec,
-        shd.PartitionSpec(None, "tp"),
-    )
-
-    input_sharding = shd.NamedSharding(mesh, shd.PartitionSpec("fsdp"))
-    model_input = jax.device_put(jnp.ones((16, 4, 12)), input_sharding)
-    with mesh:
-      model_output = sharded_lora_einsum(model_input)
-
-    self.assertEqual(
-        model_output.sharding.spec,
-        shd.PartitionSpec("fsdp", None, "tp"),
-    )
-
-  def test_qlora_einsum_eval_shape_with_sharding(self):
-    """Test QLoRA on nnx.Einsum module param with sharding."""
-
-    def lora_einsum(*model_args, **model_kwargs):
-      einsum = nnx.Einsum(
-          "btd,dnh->btnh",
-          (12, 8, 10),
-          (8, 10),
-          rngs=nnx.Rngs(0),
-          kernel_init=nnx.with_partitioning(
-              nnx.initializers.lecun_normal(), ("fsdp", "tp", None)
-          ),
-          bias_init=nnx.with_partitioning(nnx.initializers.zeros, ("tp", None)),
-      )
-      lora_provider = lora.LoraProvider([
-          lora.LoraRule(
-              module_path=".*",
-              rank=3,
-              alpha=6.0,
-              dropout=0.0,
-              weight_qtype="nf4",
-              tile_size=4,
-          ),
-      ])
-      return lora.apply_lora_to_model(
-          einsum, lora_provider, *model_args, **model_kwargs
-      )
-
-    abs_lora_einsum = nnx.eval_shape(lora_einsum, jnp.ones((16, 4, 12)))
-
-    abs_lora_state, abs_state = nnx.state(
-        abs_lora_einsum, nnx.LoRAParam, nnx.Param
-    )
-
-    self.assertEqual(abs_lora_state.kernel_lora_a.sharding, ("fsdp", None))
-    self.assertEqual(
-        abs_state.kernel.array.qvalue.sharding, ("fsdp", "tp", None)
-    )
-    self.assertEqual(
-        abs_state.kernel.array.scale.sharding, ("fsdp", "tp", None)
-    )
+    model_output = lora_einsum(model_input)
+    self.assertTrue(model_output.shape, (16, 4, 8, 10))
+    self.assertTrue(model_output.sharding.spec, ("fsdp", None, "tp", None))
 
   @parameterized.named_parameters(
       dict(
-          testcase_name="without_quantization",
+          testcase_name="no_quant",
           weight_qtype=None,
       ),
       dict(
-          testcase_name="with_quantization",
+          testcase_name="int8",
           weight_qtype="int8",
       ),
   )
-  def test_lora_with_nn(self, weight_qtype):
+  def test_lora_dot_general_nn(self, weight_qtype):
     """Test LoRA on nn.Dense module."""
     dense = nn.Dense(
         32, kernel_init=nn.with_partitioning(nn.zeros_init(), ("a", "b"))
@@ -390,6 +346,89 @@ class LoraTest(parameterized.TestCase):
     self.assertIsInstance(lora_b, nn.Partitioned)
     self.assertEqual(lora_b.unbox().shape, (3, 32))
     self.assertEqual(lora_b.names, (None, "b"))
+
+  def test_lora_conv_nn(self):
+    """Test LoRA on nn.Conv module."""
+    conv = nn.Conv(
+        features=32,
+        kernel_size=(3, 3),
+        kernel_init=nn.with_partitioning(
+            nn.zeros_init(), (None, None, "in", "out")
+        ),
+    )
+    lora_provider = lora.LoraProvider(
+        lora.LoraRule(
+            module_path=".*",
+            rank=3,
+            alpha=1.0,
+        )
+    )
+    lora_conv = lora.apply_lora_to_model(conv, lora_provider)
+    model_input = jnp.ones((1, 8, 8, 16))
+    lora_variables = lora_conv.init(jax.random.PRNGKey(0), model_input)
+    lora_a = lora_variables["params"]["kernel_lora_a"]
+    lora_b = lora_variables["params"]["kernel_lora_b"]
+    self.assertIsInstance(lora_a, nn.Partitioned)
+    self.assertEqual(lora_a.unbox().shape, (3, 3, 16, 3))
+    self.assertEqual(lora_a.names, (None, None, "in", None))
+    self.assertIsInstance(lora_b, nn.Partitioned)
+    self.assertEqual(lora_b.unbox().shape, (3, 32))
+    self.assertEqual(lora_b.names, (None, "out"))
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="no_quant",
+          qtype=None,
+      ),
+      dict(
+          testcase_name="int8",
+          qtype="int8",  # Qwix PTQ requires act_qtype == weight_qtype.
+      ),
+  )
+  def test_lora_conv_nnx(self, qtype):
+    """Test LoRA on nnx.Conv module."""
+    conv = nnx.Conv(
+        in_features=16,
+        out_features=32,
+        kernel_size=(3, 3),
+        kernel_init=nnx.with_partitioning(
+            nnx.initializers.zeros, (None, None, "in", "out")
+        ),
+        rngs=nnx.Rngs(0),
+    )
+    # Shard the module on a 2x2 mesh.
+    self._shard_nnx_model(conv, jax.make_mesh((2, 2), ("in", "out")))
+    # Check the sharding of both the metadata and the actual jax.Array.
+    self.assertEqual(conv.kernel.sharding, (None, None, "in", "out"))
+    self.assertEqual(conv.kernel.value.sharding.spec, conv.kernel.sharding)
+
+    lora_provider = lora.LoraProvider(
+        lora.LoraRule(
+            weight_qtype=qtype,
+            act_qtype=qtype,
+            rank=3,
+            alpha=1.0,
+        )
+    )
+    model_input = jnp.ones((1, 8, 8, 16))
+    lora_conv = lora.apply_lora_to_model(conv, lora_provider, model_input)
+    lora_a = lora_conv.kernel_lora_a
+    lora_b = lora_conv.kernel_lora_b
+    self.assertIsInstance(lora_a, nnx.LoRAParam)
+    self.assertEqual(lora_a.shape, (3, 3, 16, 3))
+    self.assertEqual(lora_a.sharding, (None, None, "in", None))
+    self.assertEqual(lora_a.value.sharding.spec, (None, None, "in", None))
+    self.assertIsInstance(lora_b, nnx.LoRAParam)
+    self.assertEqual(lora_b.shape, (3, 32))
+    self.assertEqual(lora_b.sharding, (None, "out"))
+    self.assertEqual(lora_b.value.sharding.spec, (None, "out"))
+
+  def _shard_nnx_model(self, model: nnx.Module, mesh: jax.sharding.Mesh):
+    """Shards the model in-place with the given mesh."""
+    unsharded_state = nnx.state(model)
+    sharding = nnx.get_named_sharding(unsharded_state, mesh)
+    sharded_state = jax.device_put(unsharded_state, sharding)
+    nnx.update(model, sharded_state)
 
 
 if __name__ == "__main__":

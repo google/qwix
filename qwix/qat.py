@@ -163,10 +163,13 @@ class QatProvider(qconfig.QuantizationProvider):
       rhs: jax.Array,
       window_strides: Sequence[int],
       padding: str | Sequence[tuple[int, int]],
+      lhs_dilation: Sequence[int] | None = None,
+      rhs_dilation: Sequence[int] | None = None,
       dimension_numbers: jax.lax.ConvGeneralDilatedDimensionNumbers = None,
+      feature_group_count: int = 1,
+      batch_group_count: int = 1,
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
-      **kwargs,
   ) -> jax.Array:
     """QAT conv_general_dilated."""
     rule, op_id = self._get_current_rule_and_op_id('conv_general_dilated')
@@ -176,10 +179,13 @@ class QatProvider(qconfig.QuantizationProvider):
           rhs,
           window_strides,
           padding,
+          lhs_dilation=lhs_dilation,
+          rhs_dilation=rhs_dilation,
           dimension_numbers=dimension_numbers,
+          feature_group_count=feature_group_count,
+          batch_group_count=batch_group_count,
           precision=precision,
           preferred_element_type=preferred_element_type,
-          **kwargs,
       )
     if rule.tile_size:
       raise ValueError('subchannel is not supported for conv_general_dilated.')
@@ -215,8 +221,13 @@ class QatProvider(qconfig.QuantizationProvider):
         rhs,
         window_strides,
         padding,
+        lhs_dilation=lhs_dilation,
+        rhs_dilation=rhs_dilation,
         dimension_numbers=dimension_numbers,
-        **kwargs,
+        feature_group_count=feature_group_count,
+        batch_group_count=batch_group_count,
+        precision=precision,
+        preferred_element_type=preferred_element_type,
     )
 
   def nn_param(

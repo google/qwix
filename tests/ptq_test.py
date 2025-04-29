@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -23,6 +24,8 @@ from qwix import model as qwix_model
 from qwix import ptq
 from qwix import qat
 from qwix import qconfig
+
+os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 
 
 class PtqTest(parameterized.TestCase):
@@ -187,6 +190,86 @@ class PtqTest(parameterized.TestCase):
         lambda kp, x, y: self.assertTrue(jnp.allclose(x, y), f"{kp} {x} {y}"),
         nnx.state(abs_ptq_linear),
         nnx.state(ptq_linear),
+    )
+
+  def test_nnx_einsum_sharding_ptq(self):
+    mesh = jax.make_mesh((2, 2), ("fsdp", "tp"))
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*", weight_qtype=jnp.int8, tile_size=4
+        ),
+    ]
+
+    model_input = jnp.ones((10, 1, 16))
+    fp_einsum = nnx.Einsum(
+        "btd,dnh->btnh",
+        (16, 8, 10),
+        (8, 10),
+        rngs=nnx.Rngs(0),
+        kernel_init=nnx.with_partitioning(
+            nnx.initializers.lecun_normal(), ("fsdp", "tp", None)
+        ),
+        bias_init=nnx.with_partitioning(nnx.initializers.zeros, ("tp", None)),
+    )
+
+    # Shard the fp_einsum model in-place.
+    unsharded_state = nnx.state(fp_einsum)
+    sharding = nnx.get_named_sharding(unsharded_state, mesh)
+    sharded_state = jax.device_put(unsharded_state, sharding)
+    nnx.update(fp_einsum, sharded_state)
+    self.assertEqual(fp_einsum.kernel.sharding, ("fsdp", "tp", None))
+    self.assertEqual(fp_einsum.kernel.value.sharding.spec, ("fsdp", "tp", None))
+    self.assertEqual(fp_einsum.bias.sharding, ("tp", None))
+    self.assertEqual(fp_einsum.bias.value.sharding.spec, ("tp", None))
+
+    # PTQ method 1: use quantize_model to convert both the model and params.
+    ptq_einsum = qwix_model.quantize_model(
+        fp_einsum,
+        ptq.PtqProvider(q_rules),
+        model_input,
+    )
+
+    def get_canonical_pspec(x: jax.Array):
+      """The sharding.spec may be shorter than the ndim."""
+      return x.sharding.spec + (None,) * (x.ndim - len(x.sharding.spec))
+
+    # Test PTQ param structure.
+    qw = ptq_einsum.kernel
+    self.assertIsInstance(qw, ptq.WithAux)
+    self.assertEqual(qw.weight_name, "kernel")
+    qw = qw.array
+    self.assertEqual(qw.qvalue.dtype, jnp.int8)
+    self.assertEqual(qw.qvalue.shape, (4, 4, 8, 10))  # split from (12, 5)
+    self.assertEqual(qw.qvalue.sharding, ("fsdp", None, "tp", None))
+    self.assertEqual(get_canonical_pspec(qw.qvalue.value), qw.qvalue.sharding)
+    self.assertEqual(qw.scale.shape, (1, 1, 4, 8, 10))  # transposed
+    self.assertEqual(qw.scale.sharding, (None, None, "fsdp", "tp", None))
+    self.assertEqual(get_canonical_pspec(qw.scale.value), qw.scale.sharding)
+
+    # PTQ method 2: call quantize_model in eval_shape and quantize_params.
+    abs_ptq_einsum = nnx.eval_shape(
+        lambda: qwix_model.quantize_model(
+            fp_einsum,
+            ptq.PtqProvider(q_rules),
+            model_input,
+        ),
+    )
+    # Test manual quantize_params.
+    orig_params = nnx.state(fp_einsum, nnx.Param)
+    orig_params = nnx.to_pure_dict(orig_params)
+    quantized_params = ptq.quantize_params(orig_params, abs_ptq_einsum)
+    # quantized_params can be updated to abs_ptq_einsum.
+    nnx.update(abs_ptq_einsum, quantized_params)
+    # Ensure that the model can be called.
+    abs_ptq_einsum(model_input)
+
+    # The two methods should produce the same sharding.
+    jax.tree.map_with_path(
+        lambda kp, x, y: self.assertEqual(
+            x.sharding, y.sharding, f"{kp} {x.sharding} {y.sharding}"
+        ),
+        nnx.to_pure_dict(nnx.state(abs_ptq_einsum)),
+        nnx.to_pure_dict(nnx.state(ptq_einsum)),
     )
 
   @parameterized.parameters(False, True)

@@ -126,7 +126,7 @@ class LoraProvider(ptq.PtqProvider):
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
   ) -> jax.Array:
-    """QAT dot_general."""
+    """LoRA dot_general."""
     res = super().dot_general(
         lhs, rhs, dimension_numbers, precision, preferred_element_type
     )
@@ -137,24 +137,24 @@ class LoraProvider(ptq.PtqProvider):
     if not isinstance(rule, LoraRule):
       return res
 
-    if isinstance(rhs, ptq.WithAux):
+    if isinstance(rhs, ptq.WithAux):  # rhs is quantized.
       weight_name = rhs.weight_name
       rhs_shape = qarray.get_original_shape(rhs.array)
     else:
       weight_name = aux_data.get(rhs, 'weight_name', None)
       rhs_shape = rhs.shape
 
-    if weight_name is None:
+    if weight_name is None:  # rhs is not a weight.
       return res
 
-    # TODO: support arbitrary dimension numbers.
+    # We only support ...a,ab->...b for now.
     assert (
         len(rhs_shape) == 2
-        and list(dimension_numbers[0][1]) == [0]
+        and tuple(dimension_numbers[0][1]) == (0,)
         and not dimension_numbers[1][1]
     ), f'Unsupported: {rhs_shape=} {dimension_numbers=}'
 
-    rhs_lora_a, rhs_lora_b, dropout_layer = _get_or_create_lora_params(
+    lora_a, lora_b, dropout_layer = _get_or_create_lora_params(
         name=weight_name,
         rule=rule,
         a_shape=(rhs_shape[0], rule.rank),
@@ -169,7 +169,7 @@ class LoraProvider(ptq.PtqProvider):
       # NOTE: this is wrong because it always uses the same rng.
       lhs = dropout_layer(lhs, rngs=nnx.Rngs(0))
 
-    return res + lhs @ rhs_lora_a @ rhs_lora_b * rule.alpha
+    return res + lhs @ lora_a @ lora_b * (rule.alpha / rule.rank)
 
   def einsum(
       self,
@@ -177,7 +177,7 @@ class LoraProvider(ptq.PtqProvider):
       *operands: jax.Array | ptq.WithAux[qarray.QArray],
       **kwargs,
   ) -> jax.Array:
-    """QAT einsum."""
+    """LoRA einsum."""
     res = super().einsum(einsum_str, *operands, **kwargs)
 
     rule, _ = self._get_current_rule_and_op_id('einsum', repeated_call=True)
@@ -188,14 +188,14 @@ class LoraProvider(ptq.PtqProvider):
       raise ValueError(f'Unsupported einsum format: {einsum_str=} {operands=}')
     lhs, rhs = operands
 
-    if isinstance(rhs, ptq.WithAux):
+    if isinstance(rhs, ptq.WithAux):  # rhs is quantized.
       weight_name = rhs.weight_name
       rhs_shape = qarray.get_original_shape(rhs.array)
     else:
       weight_name = aux_data.get(rhs, 'weight_name', None)
       rhs_shape = rhs.shape
 
-    if weight_name is None:
+    if weight_name is None:  # rhs is not a weight.
       return res
 
     (
@@ -210,7 +210,7 @@ class LoraProvider(ptq.PtqProvider):
     module = flax_util.get_current_module()
     setattr(module, weight_name + '_lora_einsum_str', lora_einsum_str)
 
-    rhs_lora_a, rhs_lora_b, dropout_layer = _get_or_create_lora_params(
+    lora_a, lora_b, dropout_layer = _get_or_create_lora_params(
         name=weight_name,
         rule=rule,
         a_shape=a_shape,
@@ -226,9 +226,90 @@ class LoraProvider(ptq.PtqProvider):
       lhs = dropout_layer(lhs, rngs=nnx.Rngs(0))
 
     return res + (
-        jax.numpy.einsum(lora_einsum_str, lhs, rhs_lora_a, rhs_lora_b, **kwargs)
-        * rule.alpha
+        jax.numpy.einsum(lora_einsum_str, lhs, lora_a, lora_b, **kwargs)
+        * (rule.alpha / rule.rank)
     )
+
+  def conv_general_dilated(
+      self,
+      lhs: jax.Array,
+      rhs: jax.Array | ptq.WithAux[qarray.QArray],
+      window_strides: Sequence[int],
+      padding: str | Sequence[tuple[int, int]],
+      lhs_dilation: Sequence[int] | None = None,
+      rhs_dilation: Sequence[int] | None = None,
+      dimension_numbers: jax.lax.ConvGeneralDilatedDimensionNumbers = None,
+      feature_group_count: int = 1,
+      batch_group_count: int = 1,
+      precision: jax.lax.PrecisionLike = None,
+      preferred_element_type: jax.typing.DTypeLike | None = None,
+  ) -> jax.Array:
+    """LoRA conv_general_dilated."""
+    res = super().conv_general_dilated(
+        lhs,
+        rhs,
+        window_strides,
+        padding,
+        lhs_dilation=lhs_dilation,
+        rhs_dilation=rhs_dilation,
+        dimension_numbers=dimension_numbers,
+        feature_group_count=feature_group_count,
+        batch_group_count=batch_group_count,
+        precision=precision,
+        preferred_element_type=preferred_element_type,
+    )
+
+    rule, _ = self._get_current_rule_and_op_id(
+        'conv_general_dilated', repeated_call=True
+    )
+    if not isinstance(rule, LoraRule):
+      return res
+
+    if isinstance(rhs, ptq.WithAux):  # rhs is quantized.
+      weight_name = rhs.weight_name
+      rhs_shape = qarray.get_original_shape(rhs.array)
+    else:
+      # Assert that rhs is a weight.
+      weight_name = aux_data.get(rhs, 'weight_name')
+      rhs_shape = rhs.shape
+
+    dimension_numbers = jax.lax.conv_dimension_numbers(
+        lhs.shape, rhs_shape, dimension_numbers
+    )
+    # Assert that the out feature is the last dimension of rhs and out.
+    assert (
+        dimension_numbers.rhs_spec[0] == len(rhs_shape) - 1
+        and dimension_numbers.out_spec[1] == len(lhs.shape) - 1
+    ), f'Unsupported: {dimension_numbers=}'
+
+    lora_a, lora_b, dropout_layer = _get_or_create_lora_params(
+        name=weight_name,
+        rule=rule,
+        a_shape=(*rhs_shape[:-1], rule.rank),
+        b_shape=(rule.rank, rhs_shape[-1]),
+        a_sharding_transpose=(*range(len(rhs_shape) - 1), None),
+        b_sharding_transpose=(None, len(rhs_shape) - 1),
+    )
+
+    if dropout_layer is not None:
+      # TODO: Use nnx.Rngs(0) for now. Need to check `deterministic`
+      # to decide whether to provide a rng.
+      # NOTE: this is wrong because it always uses the same rng.
+      lhs = dropout_layer(lhs, rngs=nnx.Rngs(0))
+
+    return res + jax.lax.conv_general_dilated(
+        lhs,
+        lora_a,
+        window_strides,
+        padding,
+        lhs_dilation=lhs_dilation,
+        rhs_dilation=rhs_dilation,
+        dimension_numbers=dimension_numbers,
+        feature_group_count=feature_group_count,
+        batch_group_count=batch_group_count,
+        precision=precision,
+        preferred_element_type=preferred_element_type,
+    ) @ lora_b * (rule.alpha / rule.rank)
 
 
 def _get_or_create_lora_params(
@@ -271,20 +352,40 @@ def _get_or_create_lora_params(
   if lora_a is not None and lora_b is not None:
     return flax_util.unbox(lora_a), flax_util.unbox(lora_b), dropout_layer
 
+  def get_canonical_pspec(x):
+    """Returns the canonical sharding.spec if x contains a concrete array."""
+    x = flax_util.unbox(x)
+    sharding = getattr(x, 'sharding', None)
+    if not isinstance(sharding, jax.sharding.NamedSharding):
+      return None
+    # The sharding.spec may be shorter than the ndim.
+    padded_pspec = sharding.spec + (None,) * (x.ndim - len(sharding.spec))
+    return sharding.with_spec(padded_pspec)
+
+  # Get the dtype, boxed param, and (optional) sharding from the original param.
   if isinstance(param, ptq.WithAux):
     lora_dtype = flax_util.unbox(param.array.scale).dtype
     boxed = param.array.qvalue
+    sharding = get_canonical_pspec(boxed)
     if isinstance(param.array, qarray.TransposedQArray):
-      # Restore to the original sharding.
-      tiled_axes = qarray.get_tiled_axes(flax_util.unbox(param.array))
-      boxed = flax_util.update_boxed(boxed, merge=set(tiled_axes))
+      # Restore to the original shape and sharding.
+      qvalue = flax_util.unbox(boxed).reshape(param.array.original_shape)
+      tiled_axes = set(qarray.get_tiled_axes(flax_util.unbox(param.array)))
+      boxed = flax_util.update_boxed(boxed, value=qvalue, merge=tiled_axes)
+      if sharding is not None:
+        pspec = flax_util.update_sharding(sharding.spec, merge=tiled_axes)
+        sharding = sharding.with_spec(pspec)
   else:  # base model is not quantized.
     lora_dtype = flax_util.unbox(param).dtype
     boxed = param
+    sharding = get_canonical_pspec(boxed)
 
   def init(initializer, shape, transpose):
     # TODO: use the actual rng.
     value = initializer(jax.random.key(0), shape, lora_dtype)
+    if sharding is not None:
+      lora_pspec = flax_util.update_sharding(sharding.spec, transpose=transpose)
+      value = jax.device_put(value, sharding.with_spec(lora_pspec))
     value = flax_util.update_boxed(boxed, value=value, transpose=transpose)
     if isinstance(value, nnx.Variable):
       return nnx.VariableMetadata(value.value, metadata=value.get_metadata())
