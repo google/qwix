@@ -43,7 +43,7 @@ def get_symmetric_bound(qtype: jax.typing.DTypeLike) -> float:
   match qtype:
     case 'nf4':
       return 1.0
-    case 'int2' | 'int3' | 'int5' | 'int6' | 'int7':
+    case 'int3' | 'int5' | 'int6' | 'int7':
       # The bound is extended to qmax + 0.5 so that we have a better utilization
       # of the whole range. This is more important for fewer bits of int.
       return 2 ** (int(qtype[3:]) - 1) - 0.5
@@ -63,7 +63,7 @@ def convert_to(x: jax.Array, qtype: jax.typing.DTypeLike) -> jax.Array:
   match qtype:
     case 'nf4':
       return fp_to_nf4(x)
-    case 'int2' | 'int3' | 'int5' | 'int6' | 'int7':
+    case 'int3' | 'int5' | 'int6' | 'int7':
       bits = int(qtype[3:])
       qmin = -(2 ** (bits - 1))
       qmax = 2 ** (bits - 1) - 1
