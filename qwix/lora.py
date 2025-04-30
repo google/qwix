@@ -122,7 +122,7 @@ class LoraProvider(ptq.PtqProvider):
     """Initializes the LoraProvider.
 
     Usage:
-      LoraProvider(rank=4, alpha=0.5)
+      LoraProvider(module_path='module_path', rank=4, alpha=0.5)
     or
       LoraProvider([
           LoraRule(module_path='module_path', rank=4, alpha=0.5)
