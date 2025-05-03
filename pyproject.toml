@@ -19,7 +19,6 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-  "absl-py",
   "jax",
   "jaxlib",
   "flax",
@@ -27,3 +26,10 @@ dependencies = [
 
 [project.urls]
 Source = "https://github.com/google/qwix"
+
+[build-system]
+requires = ["setuptools >= 77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+exclude = ["integration_tests"]

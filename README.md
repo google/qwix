@@ -37,8 +37,12 @@ targets (LiteRT).
 
 ## Usage
 
-Qwix doesn't provide a PyPI package yet. To use Qwix, you need to download
-the source code from GitHub directly.
+Qwix doesn't provide a PyPI package yet. To use Qwix, you need to install from
+GitHub directly.
+
+```sh
+pip install git+https://github.com/google/qwix
+```
 
 ### Model definition
 
