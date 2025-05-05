@@ -128,6 +128,7 @@ def _fast_dot_general(
     lhs: qarray.MaybeQArray,
     rhs: qarray.MaybeQArray,
     dimension_numbers: jax.lax.DotDimensionNumbers,
+    out_sharding: jax.sharding.NamedSharding | None = None,
 ) -> jax.Array:
   """Dot general in optimized path by computing in quantized types first then dequantize."""
   if isinstance(lhs, qarray.QArray):
@@ -194,6 +195,7 @@ def _fast_dot_general(
       rhs_value,
       dimension_numbers=dimension_numbers,
       preferred_element_type=acc_type,
+      out_sharding=out_sharding,
   )
 
   if lhs_zero_point is not None:
@@ -203,6 +205,7 @@ def _fast_dot_general(
         rhs_value,
         dimension_numbers=dimension_numbers,
         preferred_element_type=acc_type,
+        out_sharding=out_sharding,
     )
 
   if lhs_scale is not None:
@@ -218,6 +221,7 @@ def _slow_dot_general(
     lhs: qarray.MaybeQArray,
     rhs: qarray.MaybeQArray,
     dimension_numbers: jax.lax.DotDimensionNumbers,
+    out_sharding: jax.sharding.NamedSharding | None = None,
 ) -> jax.Array:
   """Dot general in slow path by dequantizing first then computing in floating-point types."""
   if isinstance(lhs, qarray.QArray):
@@ -228,13 +232,16 @@ def _slow_dot_general(
     rhs_value = qarray.dequantize(rhs)
   else:
     rhs_value = rhs
-  return jax.lax.dot_general(lhs_value, rhs_value, dimension_numbers)
+  return jax.lax.dot_general(
+      lhs_value, rhs_value, dimension_numbers, out_sharding=out_sharding
+  )
 
 
 def dot_general(
     lhs: qarray.MaybeQArray,
     rhs: qarray.MaybeQArray,
     dimension_numbers: jax.lax.DotDimensionNumbers,
+    out_sharding: jax.sharding.NamedSharding | None = None,
 ) -> jax.Array:
   """Quantized jax.lax.dot_general.
 
@@ -242,6 +249,7 @@ def dot_general(
     lhs: The left-hand side, either a jax.Array or QArray.
     rhs: The right-hand side, either a jax.Array or QArray.
     dimension_numbers: The dimension numbers passed to dot_general.
+    out_sharding: Sharding for output tensors.
 
   Returns:
     a floating-point jax.Array.
@@ -258,6 +266,10 @@ def dot_general(
     can_optimize = False
 
   if can_optimize:
-    return _fast_dot_general(lhs, rhs, dimension_numbers)
+    return _fast_dot_general(
+        lhs, rhs, dimension_numbers, out_sharding=out_sharding
+    )
   else:
-    return _slow_dot_general(lhs, rhs, dimension_numbers)
+    return _slow_dot_general(
+        lhs, rhs, dimension_numbers, out_sharding=out_sharding
+    )

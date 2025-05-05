@@ -83,6 +83,7 @@ class PtqProvider(qconfig.QuantizationProvider):
       dimension_numbers: jax.lax.DotDimensionNumbers,
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
+      out_sharding: jax.sharding.NamedSharding | None = None,
   ) -> jax.Array:
     rule, op_id = self._get_current_rule_and_op_id('dot_general')
     if rule is None or rule.weight_qtype is None:
@@ -92,6 +93,7 @@ class PtqProvider(qconfig.QuantizationProvider):
           dimension_numbers,
           precision=precision,
           preferred_element_type=preferred_element_type,
+          out_sharding=out_sharding,
       )
 
     rhs_shape = (
@@ -137,7 +139,9 @@ class PtqProvider(qconfig.QuantizationProvider):
           batch_axes=rule.act_batch_axes if rule.act_static_scale else (),
       )
       lhs = _quantize_act(lhs, lhs_how, rule, op_id + '_lhs')
-    return dot_general.dot_general(lhs, rhs, dimension_numbers)
+    return dot_general.dot_general(
+        lhs, rhs, dimension_numbers, out_sharding=out_sharding
+    )
 
   def einsum(
       self,

@@ -146,10 +146,16 @@ class LoraProvider(ptq.PtqProvider):
       dimension_numbers: jax.lax.DotDimensionNumbers,
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
+      out_sharding: jax.sharding.NamedSharding | None = None,
   ) -> jax.Array:
     """LoRA dot_general."""
     res = super().dot_general(
-        lhs, rhs, dimension_numbers, precision, preferred_element_type
+        lhs,
+        rhs,
+        dimension_numbers,
+        precision,
+        preferred_element_type,
+        out_sharding=out_sharding,
     )
 
     rule, _ = self._get_current_rule_and_op_id(
