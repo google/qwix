@@ -29,7 +29,7 @@ targets (LiteRT).
 *   Supported Jax ops and their quantization granularity:
     *   XLA:
         *   `conv_general_dilated`: per-channel.
-        *   `dot_general` and `einsum`: per-channel and subchannel.
+        *   `dot_general` and `einsum`: per-channel and sub-channel.
     *   LiteRT:
         *   `conv`, `matmul`, and `fully_connected`: per-channel.
         *   Other ops available in LiteRT: per-tensor.
@@ -151,7 +151,21 @@ ptq_params = qwix.quantize_params(fp_params, abs_ptq_params)
 quantized_model_output = ptq_model.apply({'params': ptq_params}, model_input)
 ```
 
-## Credits
+## Relation with AQT
 
-The development of Qwix was based on the design of
-[AQT](http://github.com/google/aqt).
+The design of Qwix was inspired by [AQT](https://github.com/google/aqt) and
+borrowed many great ideas from it. Here's a brief list of the similarities and
+the differences.
+
+*   Qwix's `QArray` is similar to AQT's `QTensor`, both supporting sub-channel
+    quantization.
+*   The PTQ mode in Qwix has a similar behavior and slightly better performance
+    than the serving mode in AQT, due to the `TransposedQArray` design.
+*   AQT has quantized training support (quantized forwards and quantized
+    backwards), while Qwix's QAT is based on fake quantization, which doesn't
+    improve the training performance.
+*   AQT provides drop-in replacements for `einsum` and `dot_general`, each of
+    these having to be configured separately. Qwix provides addtional mechanisms
+    to integrate with a whole model implicitly.
+*   Applying static-range quantization is easier in Qwix as it has more in-depth
+    support with Flax.
