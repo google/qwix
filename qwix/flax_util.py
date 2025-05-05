@@ -226,7 +226,7 @@ def update_sharding(
     spec = sum(spec, ())  # flatten the list of tuples.
   elif merge:
     for i in merge:
-      spec = spec[: i + 1] + spec[i + 2 :]
+      spec = spec[: i + 1] + spec[i + 2 :]  # pytype: disable=unsupported-operands
   elif transpose:
     spec = tuple(spec[i] if i is not None else None for i in transpose)
 
