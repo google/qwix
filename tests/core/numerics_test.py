@@ -39,6 +39,10 @@ class NumericsTest(absltest.TestCase):
         numerics.convert_to(jnp.array([1.2, 3.5, 8, -1300]), jnp.int4),
         jnp.array([1, 4, 7, -8], jnp.int4),
     )
+    self._assert_equal(
+        numerics.convert_to(jnp.array([1.2, 3.5, 8, -1300]), jnp.int2),
+        jnp.array([1, 1, 1, -2], jnp.int2),
+    )
 
   def test_inf(self):
     self._assert_equal(
@@ -52,7 +56,15 @@ class NumericsTest(absltest.TestCase):
         numerics.convert_to(jnp.array([1.2, 3.5, 129, -1300]), "int6"),
         jnp.array([1, 4, 31, -32], jnp.int8),
     )
-    # jnp.int4 and "int4" should be the same.
+    # jnp.int* and "int*" should be the same.
+    self._assert_equal(
+        numerics.get_symmetric_bound("int2"),
+        numerics.get_symmetric_bound(jnp.int2),
+    )
+    self._assert_equal(
+        numerics.convert_to(jnp.array([1.2, 3.5, 129, -1300]), "int2"),
+        numerics.convert_to(jnp.array([1.2, 3.5, 129, -1300]), jnp.int2),
+    )
     self._assert_equal(
         numerics.get_symmetric_bound("int4"),
         numerics.get_symmetric_bound(jnp.int4),
