@@ -199,7 +199,7 @@ def _fast_dot_general(
   )
 
   if lhs_zero_point is not None:
-    # TODO: This value can be constant folded in SRQ scenarios.
+    # TODO(zhuyunx): This value can be constant folded in SRQ scenarios.
     res -= jax.lax.dot_general(
         jnp.broadcast_to(lhs_zero_point, lhs_value.shape),
         rhs_value,

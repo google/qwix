@@ -207,7 +207,7 @@ def _fast_einsum(
       einsum_str, lhs_value, rhs_value, preferred_element_type=acc_type
   )
   if lhs_zero_point is not None:
-    # TODO: This value can be constant folded in SRQ scenarios.
+    # TODO(zhuyunx): This value can be constant folded in SRQ scenarios.
     res -= jnp.einsum(
         einsum_str,
         jnp.broadcast_to(lhs_zero_point, lhs_value.shape),

@@ -126,7 +126,7 @@ def conv_general_dilated(
       preferred_element_type=acc_type,
   )
   if lhs_zero_point is not None:
-    # TODO: This value can be constant folded in SRQ scenarios.
+    # TODO(zhuyunx): This value can be constant folded in SRQ scenarios.
     res -= jax.lax.conv_general_dilated(
         jnp.broadcast_to(lhs_zero_point, lhs_value.shape),
         rhs_value,

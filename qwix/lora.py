@@ -191,7 +191,7 @@ class LoraProvider(ptq.PtqProvider):
     )
 
     if dropout_layer is not None:
-      # TODO: Use nnx.Rngs(0) for now. Need to check `deterministic`
+      # TODO(zhuyunx): Use nnx.Rngs(0) for now. Need to check `deterministic`
       # to decide whether to provide a rng.
       # NOTE: this is wrong because it always uses the same rng.
       lhs = dropout_layer(lhs, rngs=nnx.Rngs(0))
@@ -247,7 +247,7 @@ class LoraProvider(ptq.PtqProvider):
     )
 
     if dropout_layer is not None:
-      # TODO: Use nnx.Rngs(0) for now. Need to check `deterministic`
+      # TODO(zhuyunx): Use nnx.Rngs(0) for now. Need to check `deterministic`
       # to decide whether to provide a rng.
       # NOTE: this is wrong because it always uses the same rng.
       lhs = dropout_layer(lhs, rngs=nnx.Rngs(0))
@@ -319,7 +319,7 @@ class LoraProvider(ptq.PtqProvider):
     )
 
     if dropout_layer is not None:
-      # TODO: Use nnx.Rngs(0) for now. Need to check `deterministic`
+      # TODO(zhuyunx): Use nnx.Rngs(0) for now. Need to check `deterministic`
       # to decide whether to provide a rng.
       # NOTE: this is wrong because it always uses the same rng.
       lhs = dropout_layer(lhs, rngs=nnx.Rngs(0))
@@ -408,7 +408,7 @@ def _get_or_create_lora_params(
     sharding = get_canonical_pspec(boxed)
 
   def init(initializer, shape, transpose):
-    # TODO: use the actual rng.
+    # TODO(dangyi): use the actual rng.
     value = initializer(jax.random.key(0), shape, lora_dtype)
     if sharding is not None:
       lora_pspec = flax_util.update_sharding(sharding.spec, transpose=transpose)
