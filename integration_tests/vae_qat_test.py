@@ -20,7 +20,6 @@ from absl.testing import absltest
 from flax import nnx
 import jax
 import jax.numpy as jnp
-import ml_collections
 import numpy as np
 import optax
 from qwix import flax_util
@@ -138,9 +137,9 @@ def get_datasets():
   return train_ds, test_ds
 
 
-def train_and_evaluate(model: VAE, config: ml_collections.ConfigDict):
-  np.random.seed(42)
-
+def train_and_evaluate(
+    model: VAE, *, epochs: int, batch_size: int, rng: jax.Array
+):
   train_ds, test_ds = get_datasets()
   # binarise data and remove the channel axis.
   x_train = (train_ds['image'][..., 0] > 0.98).astype(jnp.float32)
@@ -149,17 +148,22 @@ def train_and_evaluate(model: VAE, config: ml_collections.ConfigDict):
   logging.info('X_train: %s %s', x_train.shape, x_train.dtype)
   logging.info('X_test: %s %s', x_test.shape, x_test.dtype)
 
+  steps_per_epoch = x_train.shape[0] // batch_size
   optimizer = nnx.Optimizer(model, optax.adam(1e-3))
   train_loss = None
-  for epoch in range(config.epochs):
+  for epoch in range(epochs):
+    rng, input_rng = jax.random.split(rng)
+    perms = jax.random.permutation(input_rng, x_train.shape[0])
+    perms = perms[: steps_per_epoch * batch_size]  # skip incomplete batch
+    perms = perms.reshape((steps_per_epoch, batch_size))
+
     # Enables quant_stats update for training.
     model.set_attributes(
         disable_quant_stats_update=False, raise_if_not_found=False
     )
     losses = []
-    for _ in range(config.steps_per_epoch):
-      idxs = np.random.randint(0, len(x_train), size=(config.batch_size,))
-      x_batch = x_train[idxs]
+    for perm in perms:
+      x_batch = x_train[perm, ...]
 
       loss = train_step(model, optimizer, x_batch)
       losses.append(np.asarray(loss))
@@ -215,14 +219,13 @@ class VaeQatTest(absltest.TestCase):
         vae, qat.QatProvider(q_rules), model_input
     )
 
-    config = ml_collections.ConfigDict()
-    config.epochs = 20
-    config.steps_per_epoch = 100
-    config.batch_size = batch_size
-
     # QAT should generate slightly worse model compared to FP.
-    fp_loss = train_and_evaluate(vae, config)
-    qat_loss = train_and_evaluate(qat_vae, config)
+    fp_loss = train_and_evaluate(
+        vae, epochs=5, batch_size=batch_size, rng=jax.random.key(0)
+    )
+    qat_loss = train_and_evaluate(
+        qat_vae, epochs=5, batch_size=batch_size, rng=jax.random.key(0)
+    )
 
     fp_params = nnx.variables(vae, nnx.Param)
     qat_params = nnx.variables(qat_vae, nnx.Param)
@@ -281,14 +284,13 @@ class VaeQatTest(absltest.TestCase):
         model_input,
     )
 
-    config = ml_collections.ConfigDict()
-    config.epochs = 20
-    config.steps_per_epoch = 100
-    config.batch_size = batch_size
-
     # QAT with SRQ.
-    fp_loss = train_and_evaluate(vae, config)
-    qat_loss = train_and_evaluate(qat_vae, config)
+    fp_loss = train_and_evaluate(
+        vae, epochs=5, batch_size=batch_size, rng=jax.random.key(0)
+    )
+    qat_loss = train_and_evaluate(
+        qat_vae, epochs=5, batch_size=batch_size, rng=jax.random.key(0)
+    )
 
     fp_params = nnx.variables(vae, nnx.Param)
     qat_quant_stats = nnx.variables(qat_vae, flax_util.QuantStat)

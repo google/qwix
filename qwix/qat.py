@@ -323,7 +323,15 @@ class QatProvider(qconfig.QuantizationProvider):
     q_array = qarray.quantize_with_scale_zero_point(
         array, how, scale, zero_point
     )
-    return array + jax.lax.stop_gradient(qarray.dequantize(q_array) - array)
+    dq_array = qarray.dequantize(q_array)
+    if 'absmax' in calibration:
+      clipped_array = jnp.clip(
+          array, -calibration['absmax'], calibration['absmax']
+      )
+    else:
+      clipped_array = jnp.clip(array, calibration['min'], calibration['max'])
+    # Use the value of dq_array but the gradient of clipped_array.
+    return clipped_array + jax.lax.stop_gradient(dq_array - clipped_array)
 
   def _collect_quant_stat(
       self,
