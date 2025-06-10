@@ -82,6 +82,7 @@ def get_all_ops():
       'flax.linen.LayerNorm.__call__': quantize(1, op_name='norm_op'),
       'flax.linen.avg_pool': OnlyInputOp,
       'flax.linen.gelu': quantize(0),
+      'flax.linen.leaky_relu': quantize(0),
       'flax.linen.max_pool': OnlyInputOp,
       'flax.linen.silu': Silu,
       'flax.linen.softmax': Softmax,
@@ -104,6 +105,7 @@ def get_all_ops():
       'jax.numpy.cos': NoQuantOp,
       'jax.numpy.einsum': DotEinsumConv,
       'jax.numpy.floor': OnlyOutputOp,
+      'jax.numpy.linalg.norm': quantize(0),
       'jax.numpy.mean': quantize(0),
       'jax.numpy.pad': OnlyOutputOp,
       'jax.numpy.repeat': quantize(0),  # not fully supported by the converter.
