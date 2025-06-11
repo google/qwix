@@ -105,7 +105,10 @@ def get_all_ops():
       'jax.numpy.cos': NoQuantOp,
       'jax.numpy.einsum': DotEinsumConv,
       'jax.numpy.floor': OnlyOutputOp,
-      'jax.numpy.linalg.norm': quantize(0),
+      # Only L2 norm is supported in TFLite. The rule here is only correct when
+      # the output of jnp.linalg.norm is fed to a div directly, e.g.
+      #   x = x / jnp.linalg.norm(x, axis=-1, keepdims=True)
+      'jax.numpy.linalg.norm': OnlyInputOp,
       'jax.numpy.mean': quantize(0),
       'jax.numpy.pad': OnlyOutputOp,
       'jax.numpy.repeat': quantize(0),  # not fully supported by the converter.
