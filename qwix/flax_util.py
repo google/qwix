@@ -67,22 +67,22 @@ def get_current_module() -> nn.Module | nnx.Module:
   raise ValueError('Current module is not known.')
 
 
-def get_current_module_path() -> str:
+def get_current_module_path() -> tuple[str, ...]:
   """Returns the path of the current module, or raises an error if current module is not known.
 
   Args: None.
 
   Returns:
-    String representing a unique path to the current module from the root module
-    that is quantized.
+    A tuple representing a unique path to the current module from the root
+    module.
   """
   module = get_current_module()
   match module:
     case nn.Module():
-      return '/'.join(module.path)
+      return module.path
     case nnx.Module():
       # Paths of nnx modules are set when they are quantized.
-      return '/'.join([str(path) for path in module.qwix_path])
+      return module.qwix_path
 
 
 def get_or_create_variable(

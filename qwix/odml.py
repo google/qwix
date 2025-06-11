@@ -18,12 +18,12 @@ import functools
 from typing import Any, Sequence, Type
 
 import flax
-from flax import linen as nn
 import jax
 from jax import numpy as jnp
 import numpy as np
 from qwix import aux_data
 from qwix import averaging
+from qwix import flax_util
 from qwix import odml_ops
 from qwix import qat
 from qwix import qconfig
@@ -106,6 +106,9 @@ class OdmlQatProvider(qat.QatProvider):
       self, model: Any, model_args: Any, model_kwargs: Any
   ) -> tuple[Any, Any, Any]:
     """Quantize the input of the model."""
+    model, model_args, model_kwargs = super().process_model_inputs(
+        model, model_args, model_kwargs
+    )
     op = odml_ops.ModelInput(
         fixed_range_for_output=self._fixed_range_for_inputs,
         get_rule_and_op_id_fn=self._get_current_rule_and_op_id,
@@ -184,8 +187,8 @@ class OdmlConversionProvider(OdmlQatProvider):
       # Check if the array is a weight or an activation.
       weight_name = aux_data.get(array, 'weight_name', None)
       if weight_name is not None:  # Weights.
-        mdl: nn.Module = nn.module._context.module_stack[-1]  # pylint: disable=protected-access
-        weight = self._flatten_params[mdl.path + (weight_name,)]
+        mdl_path = flax_util.get_current_module_path()
+        weight = self._flatten_params[mdl_path + (weight_name,)]
         calibration = qarray.calibrate(weight, how)
         scale, zp = qarray.compute_scale_zero_point(calibration, how.qtype)
       elif quant_stat_name is not None:  # Static-range activations.
@@ -214,7 +217,7 @@ class OdmlConversionProvider(OdmlQatProvider):
     """Statically compute the scale and zero point for weights or activations."""
     # Look up the quant_stat for the activation.
     obj = self._quant_stats
-    for key in nn.module._context.module_stack[-1].path:  # pylint: disable=protected-access
+    for key in flax_util.get_current_module_path():
       obj = obj[key]
     quant_stat = obj[quant_stat_name]
 

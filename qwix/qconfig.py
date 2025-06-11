@@ -144,7 +144,7 @@ class QuantizationProvider(metaclass=abc.ABCMeta):
       A tuple of the quantization rule and a unique op id for the given op.
     """
     # Lookup the rule.
-    module_path = flax_util.get_current_module_path()
+    module_path = '/'.join(map(str, flax_util.get_current_module_path()))
     rule_idx = None
     for idx, rule in enumerate(self._rules):
       if re.fullmatch(rule.module_path, module_path) and (

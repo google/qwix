@@ -15,6 +15,7 @@
 
 from collections.abc import Collection
 import functools
+import inspect
 from typing import Any, TypeVar
 
 from flax import linen as nn
@@ -170,6 +171,9 @@ def quantize_nnx_model(
           getattr(model_class, call_method),
           provider.get_intercept_map,
           input_transform=functools.partial(_input_transform, provider),
+          output_transform=functools.partial(
+              _output_transform_nnx, provider, call_method
+          ),
       ),
   }
   model.__class__ = type(model_class.__name__, (model_class,), new_fields)
@@ -195,3 +199,15 @@ def _input_transform(provider: qconfig.QuantizationProvider, args, kwargs):
   model, *args = args
   model, args, kwargs = provider.process_model_inputs(model, args, kwargs)
   return (model, *args), kwargs
+
+
+def _output_transform_nnx(
+    provider: qconfig.QuantizationProvider, method_name: str, output: Any
+):
+  # Create a frame with a variable named `self` pointing to the model so that
+  # flax_util.get_current_module() can work inside the output transform.
+  # We cannot use the model in quantize_nnx_model because users may choose to
+  # clone the model.
+  args = inspect.currentframe().f_back.f_locals["args"]  # pytype: disable=attribute-error
+  self = args[0]  # pylint: disable=unused-variable
+  return provider.process_model_output(method_name, output)
