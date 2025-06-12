@@ -1,0 +1,6 @@
+# docs/requirements.txt
+
+# Sphinx and theme
+furo
+sphinx
+sphinx-tabs
