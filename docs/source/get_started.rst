@@ -181,4 +181,4 @@ Qwix ships with the following providers.
 * :doc:`LoRA/QLoRA provider <lora>`
 
 It's also possible to implement your own provider by subclassing existing ones,
-which is perfect for researchers to :doc:`explore novel quantization algorithms <extend>`.
+which is perfect for researchers to explore novel quantization algorithms.

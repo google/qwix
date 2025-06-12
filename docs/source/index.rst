@@ -18,7 +18,6 @@ Introduction to Qwix
    ptq
    odml
    lora
-   extend
 
 Why Qwix
 --------

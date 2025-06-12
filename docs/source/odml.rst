@@ -93,8 +93,8 @@ ODML quantization with Qwix
 ---------------------------
 
 ODML quantization in Qwix is implemented by ``OdmlQatProvider`` and
-``OdmlConversionProvider``. **Asymmetric
-:ref:`static-range quantization <srq>`** is enabled by default for ODML
+``OdmlConversionProvider``. **Asymmetric**
+:ref:`static-range quantization <srq>` is enabled by default for ODML
 targets.
 
 .. code-block:: python
