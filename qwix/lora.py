@@ -387,7 +387,7 @@ def _get_or_create_lora_params(
       return None
     # The sharding.spec may be shorter than the ndim.
     padded_pspec = sharding.spec + (None,) * (x.ndim - len(sharding.spec))
-    return sharding.with_spec(padded_pspec)
+    return sharding.update(spec=padded_pspec)
 
   # Get the dtype, boxed param, and (optional) sharding from the original param.
   if isinstance(param, ptq.WithAux):
@@ -401,7 +401,7 @@ def _get_or_create_lora_params(
       boxed = flax_util.update_boxed(boxed, value=qvalue, merge=tiled_axes)
       if sharding is not None:
         pspec = flax_util.update_sharding(sharding.spec, merge=tiled_axes)
-        sharding = sharding.with_spec(pspec)
+        sharding = sharding.update(spec=pspec)
   else:  # base model is not quantized.
     lora_dtype = flax_util.unbox(param).dtype
     boxed = param
@@ -412,7 +412,7 @@ def _get_or_create_lora_params(
     value = initializer(jax.random.key(0), shape, lora_dtype)
     if sharding is not None:
       lora_pspec = flax_util.update_sharding(sharding.spec, transpose=transpose)
-      value = jax.device_put(value, sharding.with_spec(lora_pspec))
+      value = jax.device_put(value, sharding.update(spec=lora_pspec))
     value = flax_util.update_boxed(boxed, value=value, transpose=transpose)
     if isinstance(value, nnx.Variable):
       return nnx.VariableMetadata(value.value, metadata=value.get_metadata())
