@@ -20,9 +20,11 @@ from flax import linen as nn
 from flax import nnx
 import flax.linen.dtypes
 import jax
+from jax.experimental import pallas as pl
 from qwix import aux_data
 from qwix import averaging
 from qwix import flax_util
+from qwix import interception
 from qwix import qconfig
 from qwix.core import conv_general
 from qwix.core import dot_general
@@ -317,6 +319,12 @@ class PtqProvider(qconfig.QuantizationProvider):
         'jax.lax.dot_general': self.dot_general,
         'jax.numpy.einsum': self.einsum,
         'flax.linen.Module.param': self.nn_param,
+        # Disable interception for ops in pallas_call.
+        'jax.experimental.pallas.pallas_call': (
+            lambda *args, **kwargs: interception.disable_interceptions(
+                pl.pallas_call(*args, **kwargs)
+            )
+        ),
         'flax.linen.dtypes.promote_dtype': self.promote_dtype,
         'flax.nnx.nn.dtypes.promote_dtype': self.promote_dtype,
     }
