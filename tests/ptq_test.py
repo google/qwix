@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import functools
 import os
 
 from absl.testing import absltest
@@ -19,6 +20,7 @@ from flax import linen as nn
 from flax import nnx
 import jax
 from jax import numpy as jnp
+from jax.experimental import pallas as pl
 from qwix import flax_util
 from qwix import model as qwix_model
 from qwix import ptq
@@ -335,6 +337,37 @@ class PtqTest(parameterized.TestCase):
         nnx.state(abs_ptq_linear),
         nnx.state(ptq_linear),
     )
+
+  def test_pallas_call(self):
+    """pallas_call should not be intercepted."""
+
+    class Model(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        w1 = self.param("w1", nn.initializers.ones, (x.shape[-1], 1))
+        w2 = self.param("w2", nn.initializers.ones, (1, x.shape[-1]))
+        out_shape = jax.ShapeDtypeStruct(x.shape, x.dtype)
+
+        @functools.partial(pl.pallas_call, out_shape=out_shape, interpret=True)
+        def pallas_dot(x, y, out):
+          out[...] = jax.lax.dot(x[...], y[...])
+
+        return pallas_dot(jax.lax.dot(x, w1), w2)
+
+    model = Model()
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*",
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+            tile_size=4,  # will trigger an error if pallas_dot is intercepted.
+        )
+    ]
+    ptq_model = qwix_model.quantize_model(model, ptq.PtqProvider(q_rules))
+    variables = ptq_model.init(jax.random.key(0), jnp.ones((16, 32)))
+    self.assertIsInstance(variables["params"]["w1"], ptq.WithAux)
+    self.assertIsInstance(variables["params"]["w2"], jax.Array)
 
 
 if __name__ == "__main__":

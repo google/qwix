@@ -230,3 +230,23 @@ def _copy_fn(fn: types.FunctionType) -> types.FunctionType:
     if hasattr(fn, field):
       setattr(fn_copy, field, getattr(fn, field))
   return fn_copy
+
+
+def disable_interceptions(fn):
+  """Return the function with interceptions disabled when called."""
+
+  @functools.wraps(fn)
+  def wrapper(*args, **kwargs):
+    this_thread = threading.get_ident()
+    enabled_interceptors = []
+    for key, enabled in _intercepted_threads.copy().items():
+      if key[0] == this_thread and enabled:
+        enabled_interceptors.append(key)
+        _intercepted_threads[key] = False
+    try:
+      return fn(*args, **kwargs)
+    finally:
+      for key in enabled_interceptors:
+        _intercepted_threads[key] = True
+
+  return wrapper

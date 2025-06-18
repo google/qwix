@@ -22,9 +22,11 @@ from flax import nnx
 import flax.linen.dtypes
 import jax
 from jax import numpy as jnp
+from jax.experimental import pallas as pl
 from qwix import aux_data
 from qwix import averaging
 from qwix import flax_util
+from qwix import interception
 from qwix import qconfig
 from qwix.core import conv_general
 from qwix.core import dot_general
@@ -264,6 +266,12 @@ class QatProvider(qconfig.QuantizationProvider):
         'jax.lax.conv_general_dilated': self.conv_general_dilated,
         'jax.lax.dot_general': self.dot_general,
         'jax.numpy.einsum': self.einsum,
+        # Disable interception for ops in pallas_call.
+        'jax.experimental.pallas.pallas_call': (
+            lambda *args, **kwargs: interception.disable_interceptions(
+                pl.pallas_call(*args, **kwargs)
+            )
+        ),
         'flax.linen.Module.param': self.nn_param,
         'flax.linen.dtypes.promote_dtype': self.promote_dtype,
         'flax.nnx.nn.dtypes.promote_dtype': self.promote_dtype,
