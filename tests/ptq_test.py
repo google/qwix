@@ -80,6 +80,10 @@ class PtqTest(parameterized.TestCase):
     # Ensure that the model can be called.
     ptq_dense.apply({"params": quantized_params}, model_input)
 
+    # nn model shouldn't allow implicit quantization.
+    with self.assertRaises(ValueError):
+      ptq_dense.apply({"params": orig_params}, model_input)
+
   @parameterized.parameters("absmax", "minmax", "rms,7")
   def test_nn_srq(self, act_calibration_method):
     dense = nn.Dense(features=5)
@@ -153,7 +157,8 @@ class PtqTest(parameterized.TestCase):
             nnx.initializers.lecun_normal(), ("contraction", "remaining")
         ),
     )
-    # PTQ method 1: use quantize_model to convert both the model and params.
+    # Weight quantization method 1: use quantize_model to convert both the
+    # model and params, i.e., implicit quantization.
     ptq_linear = qwix_model.quantize_model(
         fp_linear,
         ptq.PtqProvider(q_rules),
@@ -170,7 +175,8 @@ class PtqTest(parameterized.TestCase):
     self.assertEqual(qw.scale.shape, (3, 1, 5))  # transposed
     self.assertEqual(qw.scale.sharding, ("contraction", None, "remaining"))
 
-    # PTQ method 2: call quantize_model in eval_shape and quantize_params.
+    # Weight quantization method 2: call quantize_model in eval_shape and
+    # quantize_params.
     abs_ptq_linear = nnx.eval_shape(
         lambda: qwix_model.quantize_model(
             fp_linear,

@@ -407,6 +407,10 @@ def _create_quantized_param(
 
   module = flax_util.get_current_module()
   if isinstance(module, nn.Module):
+    if not module.is_initializing():
+      raise ValueError(
+          "It seems you're feeding an unquantized param to a quantized model."
+      )
     param = module.get_variable('params', weight_name)
     boxed = jax.tree.map_with_path(functools.partial(with_box, param), unboxed)
     module.put_variable('params', weight_name, boxed)
