@@ -21,6 +21,7 @@ from flax import nnx
 import flax.linen.dtypes
 import jax
 from jax.experimental import pallas as pl
+import numpy as np
 from qwix import aux_data
 from qwix import averaging
 from qwix import flax_util
@@ -312,11 +313,42 @@ class PtqProvider(qconfig.QuantizationProvider):
         aux_data.set(x, 'weight_name', name)
     return [x if x is not None else y for x, y in zip(array_args, args)]
 
+  def dot(
+      self,
+      a,
+      b,
+      precision: jax.lax.PrecisionLike = None,
+      preferred_element_type: jax.typing.DTypeLike | None = None,
+      out_sharding=None,
+  ):
+    """Intercepts jax.numpy.dot."""
+    a_ndim = np.ndim(a)
+    if isinstance(b, WithAux):
+      b_ndim = len(qarray.get_original_shape(b.array))
+    else:
+      b_ndim = np.ndim(b)
+    if a_ndim == 0 or b_ndim == 0:
+      contract_dims = ((), ())
+    else:
+      if b_ndim == 1:
+        contract_dims = ((a_ndim - 1,), (0,))
+      else:
+        contract_dims = ((a_ndim - 1,), (b_ndim - 2,))
+    return self.dot_general(
+        a,
+        b,
+        dimension_numbers=(contract_dims, ((), ())),
+        precision=precision,
+        preferred_element_type=preferred_element_type,
+        out_sharding=out_sharding,
+    )
+
   def get_intercept_map(self):
     """Used for interception."""
     return {
         'jax.lax.conv_general_dilated': self.conv_general_dilated,
         'jax.lax.dot_general': self.dot_general,
+        'jax.numpy.dot': self.dot,
         'jax.numpy.einsum': self.einsum,
         'flax.linen.Module.param': self.nn_param,
         # Disable interception for ops in pallas_call.

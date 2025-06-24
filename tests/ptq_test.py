@@ -344,7 +344,7 @@ class PtqTest(parameterized.TestCase):
         nnx.state(ptq_linear),
     )
 
-  def test_pallas_call(self):
+  def test_dot_pallas_call(self):
     """pallas_call should not be intercepted."""
 
     class Model(nn.Module):
@@ -359,7 +359,7 @@ class PtqTest(parameterized.TestCase):
         def pallas_dot(x, y, out):
           out[...] = jax.lax.dot(x[...], y[...])
 
-        return pallas_dot(jax.lax.dot(x, w1), w2)
+        return pallas_dot(jax.numpy.dot(x, w1), w2)
 
     model = Model()
     q_rules = [
@@ -374,6 +374,7 @@ class PtqTest(parameterized.TestCase):
     variables = ptq_model.init(jax.random.key(0), jnp.ones((16, 32)))
     self.assertIsInstance(variables["params"]["w1"], ptq.WithAux)
     self.assertIsInstance(variables["params"]["w2"], jax.Array)
+    ptq_model.apply(variables, jnp.ones((16, 32)))
 
 
 if __name__ == "__main__":
