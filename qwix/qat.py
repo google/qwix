@@ -44,6 +44,8 @@ class QatProvider(qconfig.QuantizationProvider):
       dimension_numbers: jax.lax.DotDimensionNumbers,
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
+      *,
+      out_sharding=None,
   ) -> jax.Array:
     """QAT dot_general."""
     rule, op_id = self._get_current_rule_and_op_id('dot_general')
@@ -54,6 +56,7 @@ class QatProvider(qconfig.QuantizationProvider):
           dimension_numbers,
           precision=precision,
           preferred_element_type=preferred_element_type,
+          out_sharding=out_sharding,
       )
 
     get_how_to_quantize = functools.partial(
@@ -95,7 +98,9 @@ class QatProvider(qconfig.QuantizationProvider):
       quant_stat_name = op_id + '_lhs' if rule.act_static_scale else None
       lhs = self._fake_quant(lhs, lhs_how, quant_stat_name)
 
-    return jax.lax.dot_general(lhs, rhs, dimension_numbers)
+    return jax.lax.dot_general(
+        lhs, rhs, dimension_numbers, out_sharding=out_sharding
+    )
 
   def einsum(
       self,
@@ -104,6 +109,7 @@ class QatProvider(qconfig.QuantizationProvider):
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
       _dot_general: Callable[..., jax.Array] = jax.lax.dot_general,  # pylint: disable=invalid-name
+      out_sharding=None,
   ) -> jax.Array:
     """QAT einsum."""
     rule, op_id = self._get_current_rule_and_op_id('einsum')
@@ -114,6 +120,7 @@ class QatProvider(qconfig.QuantizationProvider):
           precision=precision,
           preferred_element_type=preferred_element_type,
           _dot_general=_dot_general,
+          out_sharding=out_sharding,
       )
     if not isinstance(einsum_str, str) or len(operands) != 2:
       raise ValueError(f'Unsupported einsum format: {einsum_str=} {operands=}')
@@ -157,7 +164,7 @@ class QatProvider(qconfig.QuantizationProvider):
       quant_stat_name = op_id + '_lhs' if rule.act_static_scale else None
       lhs = self._fake_quant(lhs, lhs_how, quant_stat_name)
 
-    return jnp.einsum(einsum_str, lhs, rhs)
+    return jnp.einsum(einsum_str, lhs, rhs, out_sharding=out_sharding)
 
   def conv_general_dilated(
       self,
@@ -332,14 +339,9 @@ class QatProvider(qconfig.QuantizationProvider):
         array, how, scale, zero_point
     )
     dq_array = qarray.dequantize(q_array)
-    if 'absmax' in calibration:
-      clipped_array = jnp.clip(
-          array, -calibration['absmax'], calibration['absmax']
-      )
-    else:
-      clipped_array = jnp.clip(array, calibration['min'], calibration['max'])
-    # Use the value of dq_array but the gradient of clipped_array.
-    return clipped_array + jax.lax.stop_gradient(dq_array - clipped_array)
+    # Use a straight through estimator as the gradient of the dq_array.
+    ste_array = qarray.clip_to_calibration(array, calibration, how.tiled_axes)
+    return ste_array + jax.lax.stop_gradient(dq_array - ste_array)
 
   def _collect_quant_stat(
       self,
