@@ -362,3 +362,20 @@ def dequantize(array: QArray) -> jax.Array:
     zero_point = split_axis(array.zero_point, {a: 1 for a in tiled_axes})
     qvalue -= zero_point.astype(scale.dtype)
   return (qvalue * scale).reshape(original_shape)
+
+
+def clip_to_calibration(
+    array: jax.Array,
+    calibration: Mapping[str, jax.Array],
+    tiled_axes: Mapping[int, int],
+) -> jax.Array:
+  """Clips an array to the calibration range."""
+  original_shape = array.shape
+  array = split_axis(array, tiled_axes)
+  if 'min' in calibration and 'max' in calibration:
+    array = jnp.clip(array, calibration['min'], calibration['max'])
+  elif 'absmax' in calibration:
+    array = jnp.clip(array, -calibration['absmax'], calibration['absmax'])
+  else:
+    raise ValueError(f'Unsupported calibration: {calibration}')
+  return array.reshape(original_shape)

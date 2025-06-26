@@ -86,6 +86,7 @@ class PtqProvider(qconfig.QuantizationProvider):
       dimension_numbers: jax.lax.DotDimensionNumbers,
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
+      *,
       out_sharding: jax.sharding.NamedSharding | None = None,
   ) -> jax.Array:
     rule, op_id = self._get_current_rule_and_op_id('dot_general')
@@ -153,6 +154,7 @@ class PtqProvider(qconfig.QuantizationProvider):
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
       _dot_general: Callable[..., jax.Array] = jax.lax.dot_general,  # pylint: disable=invalid-name
+      out_sharding=None,
   ) -> jax.Array:
     rule, op_id = self._get_current_rule_and_op_id('einsum')
     if rule is None or rule.weight_qtype is None:
@@ -162,6 +164,7 @@ class PtqProvider(qconfig.QuantizationProvider):
           precision=precision,
           preferred_element_type=preferred_element_type,
           _dot_general=_dot_general,
+          out_sharding=out_sharding,
       )
     if not isinstance(einsum_str, str) or len(operands) != 2:
       raise ValueError(f'Unsupported einsum format: {einsum_str=} {operands=}')
