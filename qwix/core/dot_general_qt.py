@@ -14,36 +14,24 @@
 """Quantized jax.lax.dot_general with quantized backpropagation support."""
 
 from collections.abc import Collection
-from typing import Any
+import dataclasses
+import functools
 
-import flax
 import jax
-import numpy as onp
+import numpy as np
 from qwix.core import dot_general
 from qwix.core import qarray
 
-dataclass = flax.struct.dataclass
-field = flax.struct.field
 
+@dataclasses.dataclass(slots=True, frozen=True, kw_only=True)
+class DotGeneralQtConfig:
+  """Configuration for dot_general_qt."""
 
-@dataclass(slots=True, frozen=True, kw_only=True)
-class HowToQuantizeQt:
-  """A dataclass for holding quantization config."""
-
-  qtype: jax.typing.DTypeLike = field(pytree_node=False)
-  calibration_method: str = field(pytree_node=False)
-  tile_size: int | None
-
-
-@dataclass(slots=True, frozen=True, kw_only=True)
-class DotGeneralResidual:
-  """A dataclass for holding residual data for dot_general_qt custom VJP."""
-
-  fwd_lhs: jax.Array
-  fwd_rhs: jax.Array
-  fwd_dimension_numbers: jax.lax.DotDimensionNumbers = field(pytree_node=False)
-  back_how: HowToQuantizeQt | None = field(pytree_node=False)
-  out_sharding: jax.sharding.NamedSharding | None = field(pytree_node=False)
+  lhs_qtype: jax.typing.DTypeLike | None = None
+  rhs_qtype: jax.typing.DTypeLike | None = None
+  bwd_qtype: jax.typing.DTypeLike | None = None
+  tile_size: int | None = None
+  calibration_method: str = 'absmax'
 
 
 def _get_remaining_axes(
@@ -99,8 +87,8 @@ def _update_dimension_numbers_for_backward_internal(
     g_ba, _, g_ca = _ranges_like(x_ba, x_ra, y_ra)
   dims = ((g_ca, y_ra), (g_ba, y_ba))
 
-  x_ca_sorted_by_y = tuple(onp.take(x_ca, onp.argsort(y_ca)))
-  out_transpose_axes = tuple(onp.argsort(tuple(x_ba) + x_ra + x_ca_sorted_by_y))
+  x_ca_sorted_by_y = tuple(np.take(x_ca, np.argsort(y_ca)))
+  out_transpose_axes = tuple(np.argsort(tuple(x_ba) + x_ra + x_ca_sorted_by_y))
   return dims, out_transpose_axes
 
 
@@ -108,120 +96,103 @@ def dot_general_qt_fwd(
     lhs: jax.Array,
     rhs: jax.Array,
     dimension_numbers: jax.lax.DotDimensionNumbers,
-    lhs_how: HowToQuantizeQt | None,
-    rhs_how: HowToQuantizeQt | None,
-    back_how: HowToQuantizeQt | None,
-    out_sharding: jax.sharding.NamedSharding | None,
+    config: DotGeneralQtConfig,
 ):
   """Forward pass for dot_general_qt custom VJP."""
-  lhs_how_full = None
-  if lhs_how:
-    lhs_how_full = dot_general.get_how_to_quantize(
+  ndims = (lhs.ndim, rhs.ndim)
+  if config.lhs_qtype:
+    lhs_how = dot_general.get_how_to_quantize(
         dimension_numbers=dimension_numbers,
-        ndims=(lhs.ndim, rhs.ndim),
+        ndims=ndims,
         for_lhs=True,
-        qtype=lhs_how.qtype,
-        tile_size=lhs_how.tile_size,
-        calibration_method=lhs_how.calibration_method,
+        qtype=config.lhs_qtype,
+        tile_size=config.tile_size,
+        calibration_method=config.calibration_method,
         batch_axes=(),
     )
-  rhs_how_full = None
-  if rhs_how:
-    rhs_how_full = dot_general.get_how_to_quantize(
+    lhs_how = dataclasses.replace(lhs_how, scale_transpose=None)
+    lhs = qarray.quantize(lhs, lhs_how)
+  if config.rhs_qtype:
+    rhs_how = dot_general.get_how_to_quantize(
         dimension_numbers=dimension_numbers,
-        ndims=(lhs.ndim, rhs.ndim),
+        ndims=ndims,
         for_lhs=False,
-        qtype=rhs_how.qtype,
-        tile_size=rhs_how.tile_size,
-        calibration_method=rhs_how.calibration_method,
+        qtype=config.rhs_qtype,
+        tile_size=config.tile_size,
+        calibration_method=config.calibration_method,
         batch_axes=(),
     )
-
-  lhs_quantized = qarray.quantize(lhs, lhs_how_full) if lhs_how_full else lhs
-  rhs_quantized = qarray.quantize(rhs, rhs_how_full) if rhs_how_full else rhs
-  primal_out = dot_general.dot_general(
-      lhs_quantized, rhs_quantized, dimension_numbers, out_sharding
-  )
-
-  res = DotGeneralResidual(
-      fwd_lhs=lhs,
-      fwd_rhs=rhs,
-      fwd_dimension_numbers=dimension_numbers,
-      back_how=back_how,
-      out_sharding=out_sharding,
-  )
-  return (primal_out, res)
+    rhs_how = dataclasses.replace(rhs_how, scale_transpose=None)
+    rhs = qarray.quantize(rhs, rhs_how)
+  primal_out = dot_general.dot_general(lhs, rhs, dimension_numbers)
+  return primal_out, (lhs, rhs)
 
 
-def dot_general_qt_bwd(res: DotGeneralResidual, g: Any):
+def dot_general_qt_bwd(
+    dimension_numbers: jax.lax.DotDimensionNumbers,
+    config: DotGeneralQtConfig,
+    res: tuple[qarray.MaybeQArray, qarray.MaybeQArray],
+    g: jax.Array,
+):
   """Backward pass for dot_general_qt custom VJP."""
-  fwd_lhs, fwd_rhs, back_how, fwd_dnums, out_sharding = (
-      res.fwd_lhs,
-      res.fwd_rhs,
-      res.back_how,
-      res.fwd_dimension_numbers,
-      res.out_sharding,
-  )
 
   def _compute_gradient_for_operand(
-      other_fwd_operand: jax.Array,
+      y: jax.Array,
       y_is_fwd_lhs: bool,
   ):
     """Compute dot_general for gradient and other_fwd_operand."""
     grad_dnums, transpose_axes = (
         _update_dimension_numbers_for_backward_internal(
-            fwd_dnums, y_is_fwd_lhs, g.ndim, other_fwd_operand.ndim
+            dimension_numbers, y_is_fwd_lhs, g.ndim, y.ndim
         )
     )
-
-    bwd_lhs_input, bwd_rhs_input = g, other_fwd_operand
-    if back_how:
-      back_lhs_how = dot_general.get_how_to_quantize(
+    if config.bwd_qtype:
+      g_how = dot_general.get_how_to_quantize(
           dimension_numbers=grad_dnums,
-          ndims=(g.ndim, other_fwd_operand.ndim),
+          ndims=(g.ndim, y.ndim),
           for_lhs=True,
-          qtype=back_how.qtype,
-          tile_size=back_how.tile_size,
-          calibration_method=back_how.calibration_method,
+          qtype=config.bwd_qtype,
+          tile_size=config.tile_size,
+          calibration_method=config.calibration_method,
           batch_axes=(),
       )
-      back_rhs_how = dot_general.get_how_to_quantize(
+      q_g = qarray.quantize(g, g_how)
+      y_how = dot_general.get_how_to_quantize(
           dimension_numbers=grad_dnums,
-          ndims=(g.ndim, other_fwd_operand.ndim),
+          ndims=(g.ndim, y.ndim),
           for_lhs=False,
-          qtype=back_how.qtype,
-          tile_size=back_how.tile_size,
-          calibration_method=back_how.calibration_method,
+          qtype=config.bwd_qtype,
+          tile_size=config.tile_size,
+          calibration_method=config.calibration_method,
           batch_axes=(),
       )
-      bwd_lhs_input = qarray.quantize(g, back_lhs_how)
-      bwd_rhs_input = qarray.quantize(other_fwd_operand, back_rhs_how)
-
-    grad_res = dot_general.dot_general(
-        bwd_lhs_input, bwd_rhs_input, grad_dnums, out_sharding
-    )
+      q_y = qarray.quantize(y, y_how)
+      grad_res = dot_general.dot_general(q_g, q_y, grad_dnums)
+    else:
+      grad_res = jax.lax.dot_general(g, y, grad_dnums)
     return jax.lax.transpose(grad_res, transpose_axes)
 
-  dlhs = _compute_gradient_for_operand(fwd_rhs, False)
-  drhs = _compute_gradient_for_operand(fwd_lhs, True)
+  lhs, rhs = res
+  # lhs/rhs are quantized with different channelwise axes when in the forward
+  # pass, so they need to be dequantized first.
+  lhs = qarray.dequantize(lhs) if isinstance(lhs, qarray.QArray) else lhs
+  rhs = qarray.dequantize(rhs) if isinstance(rhs, qarray.QArray) else rhs
 
-  return (dlhs, drhs, None, None, None, None, None)
+  dlhs = _compute_gradient_for_operand(rhs, False)
+  drhs = _compute_gradient_for_operand(lhs, True)
+
+  return dlhs, drhs
 
 
-@jax.custom_vjp
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3))
 def dot_general_qt(
     lhs: jax.Array,
     rhs: jax.Array,
     dimension_numbers: jax.lax.DotDimensionNumbers,
-    lhs_how: HowToQuantizeQt | None = None,
-    rhs_how: HowToQuantizeQt | None = None,
-    back_how: HowToQuantizeQt | None = None,
-    out_sharding: jax.sharding.NamedSharding | None = None,
+    config: DotGeneralQtConfig,
 ) -> jax.Array:
   """Quantized dot_general using a simple, hashable config dataclass."""
-  result, _ = dot_general_qt_fwd(
-      lhs, rhs, dimension_numbers, lhs_how, rhs_how, back_how, out_sharding
-  )
+  result, _ = dot_general_qt_fwd(lhs, rhs, dimension_numbers, config)
   return result
 
 
