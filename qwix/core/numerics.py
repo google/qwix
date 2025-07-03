@@ -45,14 +45,16 @@ def get_symmetric_bound(qtype: jax.typing.DTypeLike) -> float:
       return 1.0
     case 'int2' | 'int3' | 'int5' | 'int6' | 'int7':
       # The bound is extended to qmax + 0.5 so that we have a better utilization
-      # of the whole range. This is more important for fewer bits of int.
+      # of the qmax bucket. This is more important for fewer bits of int.
       return 2 ** (int(qtype[3:]) - 1) - 0.5
     case _:  # builtin dtypes
       # Prevent common misconfigurations, e.g., use bf16 as qtype.
       if jax.dtypes.canonicalize_dtype(qtype).itemsize > 1:
         raise ValueError(f'Cannot use {qtype} as qtype.')
       try:
-        return float(jnp.finfo(qtype).max)
+        # Extend the finfo.max bucket for a better utilization.
+        finfo = jnp.finfo(qtype)
+        return (float(finfo.max) + 2**finfo.maxexp) / 2
       except ValueError:
         # See the comment above for why we add 0.5.
         return jnp.iinfo(qtype).max + 0.5
@@ -76,12 +78,14 @@ def convert_to(x: jax.Array, qtype: jax.typing.DTypeLike) -> jax.Array:
       return jnp.round(x).clip(qmin, qmax).astype(qtype)
     case _:  # builtin dtypes
       try:
-        jnp.finfo(qtype)
+        finfo = jnp.finfo(qtype)
       except ValueError:
-        # dtype is an integer type. This will also do clipping automatically.
+        # dtype is an integer type. We need to round manually but clipping can
+        # be handled by "astype".
         return jnp.round(x).astype(qtype)
-      # dtype is a floating point type. No rounding needed.
-      return x.astype(qtype)
+      # dtype is a floating point type. No rounding needed, but we need to
+      # clip to the range to avoid inf or nan (e.g. for e4m3fn).
+      return x.clip(float(finfo.min), float(finfo.max)).astype(qtype)
 
 
 def convert_from(x: jax.Array, qtype: jax.typing.DTypeLike) -> jax.Array:
@@ -90,7 +94,7 @@ def convert_from(x: jax.Array, qtype: jax.typing.DTypeLike) -> jax.Array:
     case 'nf4':
       return nf4_to_fp(x)
     case _:
-      # For other types, no extra conversion is needed. The dtype will be
+      # For native types, no extra conversion is needed. The dtype will be
       # converted during unquantization.
       return x
 
