@@ -50,6 +50,10 @@ class QuantizationRule:
   # If set, quantize the activations to the given type.
   act_qtype: jax.typing.DTypeLike | None = None
 
+  # In quantized training, quantize both the residuals and the gradients to the
+  # given type.
+  bwd_qtype: jax.typing.DTypeLike | None = None
+
   # If set, enable subchannel for the contraction axis with the given tile size.
   tile_size: int | None = None
 
