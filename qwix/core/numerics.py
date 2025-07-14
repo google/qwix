@@ -17,6 +17,11 @@ import jax
 from jax import numpy as jnp
 
 
+def should_quantize(dtype: jax.typing.DTypeLike) -> bool:
+  """Returns True if the dtype should be quantized."""
+  return jnp.dtype(dtype) in [jnp.bfloat16, jnp.float32]
+
+
 def can_dequant_on_output(qtype: jax.typing.DTypeLike) -> bool:
   """qtypes that cannot be optimized by computing in quantized types first then dequantize."""
   return qtype not in ['nf4']
@@ -52,9 +57,8 @@ def get_symmetric_bound(qtype: jax.typing.DTypeLike) -> float:
       if jax.dtypes.canonicalize_dtype(qtype).itemsize > 1:
         raise ValueError(f'Cannot use {qtype} as qtype.')
       try:
-        # Extend the finfo.max bucket for a better utilization.
-        finfo = jnp.finfo(qtype)
-        return (float(finfo.max) + 2**finfo.maxexp) / 2
+        # TODO(dangyi): Extend the finfo.max bucket for a better utilization.
+        return float(jnp.finfo(qtype).max)
       except ValueError:
         # See the comment above for why we add 0.5.
         return jnp.iinfo(qtype).max + 0.5

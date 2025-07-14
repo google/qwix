@@ -199,9 +199,12 @@ def _fast_einsum(
 
   if all(x.dtype.name.startswith('int') for x in (lhs_value, rhs_value)):
     acc_type = jnp.int32
+  elif lhs_scale is not None:
+    acc_type = lhs_scale.dtype
+  elif rhs_scale is not None:
+    acc_type = rhs_scale.dtype
   else:
-    # Determine whether to use bfloat16 or float32.
-    acc_type = rhs_value.dtype if rhs_scale is None else rhs_scale.dtype
+    acc_type = None  # let jnp.einsum decide.
 
   res = jnp.einsum(
       einsum_str, lhs_value, rhs_value, preferred_element_type=acc_type

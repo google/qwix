@@ -20,6 +20,7 @@ import functools
 import jax
 import numpy as np
 from qwix.core import dot_general
+from qwix.core import numerics
 from qwix.core import qarray
 
 
@@ -32,6 +33,8 @@ class DotGeneralQtConfig:
   bwd_qtype: jax.typing.DTypeLike | None = None
   tile_size: int | None = None
   calibration_method: str = 'absmax'
+  disable_channelwise_axes: bool = False
+  use_original_residuals: bool = False
 
 
 def _get_remaining_axes(
@@ -100,7 +103,10 @@ def dot_general_qt_fwd(
 ):
   """Forward pass for dot_general_qt custom VJP."""
   ndims = (lhs.ndim, rhs.ndim)
-  if config.lhs_qtype:
+  res_lhs, res_rhs = lhs, rhs
+
+  # Quantize lhs and rhs.
+  if config.lhs_qtype and numerics.should_quantize(lhs.dtype):
     lhs_how = dot_general.get_how_to_quantize(
         dimension_numbers=dimension_numbers,
         ndims=ndims,
@@ -111,8 +117,13 @@ def dot_general_qt_fwd(
         batch_axes=(),
     )
     lhs_how = dataclasses.replace(lhs_how, scale_transpose=None)
+    if config.disable_channelwise_axes:
+      lhs_how = dataclasses.replace(lhs_how, channelwise_axes=[])
     lhs = qarray.quantize(lhs, lhs_how)
-  if config.rhs_qtype:
+    if not config.use_original_residuals:
+      res_lhs = lhs
+
+  if config.rhs_qtype and numerics.should_quantize(rhs.dtype):
     rhs_how = dot_general.get_how_to_quantize(
         dimension_numbers=dimension_numbers,
         ndims=ndims,
@@ -123,9 +134,14 @@ def dot_general_qt_fwd(
         batch_axes=(),
     )
     rhs_how = dataclasses.replace(rhs_how, scale_transpose=None)
+    if config.disable_channelwise_axes:
+      rhs_how = dataclasses.replace(rhs_how, channelwise_axes=[])
     rhs = qarray.quantize(rhs, rhs_how)
+    if not config.use_original_residuals:
+      res_rhs = rhs
+
   primal_out = dot_general.dot_general(lhs, rhs, dimension_numbers)
-  return primal_out, (lhs, rhs)
+  return primal_out, (res_lhs, res_rhs)
 
 
 def dot_general_qt_bwd(
@@ -156,7 +172,11 @@ def dot_general_qt_bwd(
           calibration_method=config.calibration_method,
           batch_axes=(),
       )
-      q_g = qarray.quantize(g, g_how)
+      if config.disable_channelwise_axes:
+        g_how = dataclasses.replace(g_how, channelwise_axes=[])
+      q_g = (
+          qarray.quantize(g, g_how) if numerics.should_quantize(g.dtype) else g
+      )
       y_how = dot_general.get_how_to_quantize(
           dimension_numbers=grad_dnums,
           ndims=(g.ndim, y.ndim),
@@ -166,7 +186,11 @@ def dot_general_qt_bwd(
           calibration_method=config.calibration_method,
           batch_axes=(),
       )
-      q_y = qarray.quantize(y, y_how)
+      if config.disable_channelwise_axes:
+        y_how = dataclasses.replace(y_how, channelwise_axes=[])
+      q_y = (
+          qarray.quantize(y, y_how) if numerics.should_quantize(y.dtype) else y
+      )
       grad_res = dot_general.dot_general(q_g, q_y, grad_dnums)
     else:
       grad_res = jax.lax.dot_general(g, y, grad_dnums)
