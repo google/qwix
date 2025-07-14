@@ -74,12 +74,11 @@ class CNN(nn.Module):
       'final_output0',
   }
 
-  # Dense_0 is not fused correctly.
   expected_ops_summary = {
-      'quantize_op_count': 2,
-      'dequantize_op_count': 3,
-      'fp_op_count': 2,
-      'int_op_count': 6,
+      'quantize_op_count': 1,
+      'dequantize_op_count': 1,
+      'fp_op_count': 0,
+      'int_op_count': 7,
   }
 
 
@@ -211,13 +210,11 @@ class DenseConcatenateResidual(nn.Module):
       'final_output0',
   }
 
-  # The first Dense layer is not fused correctly, leaving 2 fp ops, 2 extra
-  # dequantize ops, and 1 extra quantize op.
   expected_ops_summary = {
-      'quantize_op_count': 2,
-      'dequantize_op_count': 3,
-      'fp_op_count': 2,
-      'int_op_count': 3,
+      'quantize_op_count': 1,
+      'dequantize_op_count': 1,
+      'fp_op_count': 0,
+      'int_op_count': 4,
   }
 
 
@@ -444,7 +441,9 @@ class OdmlTest(parameterized.TestCase):
         odml_model.apply,
         qat_variables,
         (model_input,),
-        _litert_converter_flags={'_experimental_strict_qdq': True},
+        _litert_converter_flags={
+            '_experimental_strict_qdq': True,
+        },
     )
     self._save_edge_model(edge_model)
 
