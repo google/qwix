@@ -186,9 +186,12 @@ def _fast_dot_general(
 
   if all(x.dtype.name.startswith('int') for x in (lhs_value, rhs_value)):
     acc_type = jnp.int32
+  elif lhs_scale is not None:
+    acc_type = lhs_scale.dtype
+  elif rhs_scale is not None:
+    acc_type = rhs_scale.dtype
   else:
-    # Determine whether to use bfloat16 or float32.
-    acc_type = rhs_value.dtype if rhs_scale is None else rhs_scale.dtype
+    acc_type = None  # let jax.lax.dot_general decide.
 
   res = jax.lax.dot_general(
       lhs_value,

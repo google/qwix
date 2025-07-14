@@ -305,6 +305,8 @@ def quantize_with_scale_zero_point(
   Returns:
     The quantized array.
   """
+  if not numerics.should_quantize(array.dtype):
+    raise ValueError(f'Refuse to quantize: {array.dtype}')
   original_shape = array.shape
   array = split_axis(array, how.tiled_axes)
   # Ensure that the scale has the same dtype as the fp array, because
