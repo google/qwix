@@ -15,9 +15,11 @@
 
 import dataclasses
 import functools
-from typing import Any, Sequence, Type
+from typing import Any, Callable, Sequence, Type
 
 import flax
+from flax import linen as nn
+from flax import nnx
 import jax
 from jax import numpy as jnp
 import numpy as np
@@ -25,12 +27,11 @@ from qwix import aux_data
 from qwix import averaging
 from qwix import flax_util
 from qwix import odml_ops
-from qwix import qat
 from qwix import qconfig
 from qwix.core import qarray
 
 
-class OdmlQatProvider(qat.QatProvider):
+class OdmlQatProvider(qconfig.QuantizationProvider):
   """QAT provider for ODML.
 
   Compared with the regular QAT provider, this provider
@@ -88,9 +89,27 @@ class OdmlQatProvider(qat.QatProvider):
       rule = dataclasses.replace(rule, act_calibration_method='minmax')
     return super()._init_rule(rule)
 
+  def nn_param(
+      self,
+      module: nn.Module,
+      name: str,
+      init_fn: Callable[..., Any],
+      *init_args,
+      unbox: bool = True,
+      **init_kwargs,
+  ) -> jax.Array | nn.meta.AxisMetadata[jax.Array]:
+    """Intercepts nn.Module.param to associate weight_name aux_data."""
+    ret = nn.Module.param(
+        module, name, init_fn, *init_args, unbox=unbox, **init_kwargs
+    )
+    # Clear the previous aux_data such as fq_array.
+    aux_data.clear(ret if unbox else ret.unbox())
+    # weight_name is used to distinguish weights from activations.
+    aux_data.set(ret if unbox else ret.unbox(), 'weight_name', name)
+    return ret
+
   def get_intercept_map(self):
     """Used for interception."""
-    # Only use the parent's nn_param. Others are handled by ourselves.
     intercept_map = {'flax.linen.Module.param': self.nn_param}
     # Compile the policy into the intercept map.
     for name, op in self._ops.items():
@@ -106,9 +125,18 @@ class OdmlQatProvider(qat.QatProvider):
       self, model: Any, model_args: Any, model_kwargs: Any
   ) -> tuple[Any, Any, Any]:
     """Quantize the input of the model."""
-    model, model_args, model_kwargs = super().process_model_inputs(
-        model, model_args, model_kwargs
-    )
+    # Set weight_name for nnx models. Linen models are handled in nn_param.
+    if isinstance(model, nnx.Module):
+      for path, node in nnx.iter_graph(model):
+        if isinstance(node, nnx.Module):
+          aux_data.clear(node)  # clear the op_count.
+        elif isinstance(node, nnx.Param):
+          # Clear the previous aux_data such as fq_array.
+          aux_data.clear(node.value)
+          # weight_name is used to distinguish weights from activations.
+          aux_data.set(node.value, 'weight_name', path[-1])
+
+    # Quantize the model inputs if needed.
     op = odml_ops.ModelInput(
         fixed_range_for_output=self._fixed_range_for_inputs,
         get_rule_and_op_id_fn=self._get_current_rule_and_op_id,
@@ -120,6 +148,7 @@ class OdmlQatProvider(qat.QatProvider):
     """Quantize the output of the model."""
     if method_name == '__call__':
       method_name = 'final'  # backwards compatibility.
+    # Quantize the model output if needed.
     op = odml_ops.FinalOutput(
         op_full_name=method_name + '_output',
         fixed_range_for_output=self._fixed_range_for_outputs,
@@ -128,6 +157,73 @@ class OdmlQatProvider(qat.QatProvider):
         check_activation=self._strict,
     )
     return jax.tree.map(op, model_output)
+
+  def _fake_quant(
+      self,
+      array: jax.Array,
+      how: qarray.HowToQuantize,
+      quant_stat_name: str | None = None,
+  ) -> jax.Array:
+    """Apply fake quantization to array.
+
+    This function can be used on both activations and weights. Gradient will be
+    passed through.
+
+    Args:
+      array: The array to quantize.
+      how: How to quantize the array.
+      quant_stat_name: The name for the quantization statistics. If set, the
+        quantization statistics will be collected and the scale will be computed
+        from the statistics.
+
+    Returns:
+      The fake quantized array.
+    """
+    # TransposedQArray cannot be dequantized.
+    how = dataclasses.replace(how, scale_transpose=None)
+
+    # Check and apply the fixed-range calibration asscociated with the array.
+    fixed_range = aux_data.get(array, 'fixed_range', None)
+    if fixed_range is not None:
+      calibration_method = f'fixed,{fixed_range[0]},{fixed_range[1]}'
+      how = dataclasses.replace(how, calibration_method=calibration_method)
+
+    calibration = qarray.calibrate(array, how)
+    if quant_stat_name is not None:
+      is_fixed_range = how.calibration_method.startswith('fixed')
+      calibration = self._collect_quant_stat(
+          quant_stat_name, calibration, is_fixed_range
+      )
+    scale, zero_point = qarray.compute_scale_zero_point(calibration, how.qtype)
+    q_array = qarray.quantize_with_scale_zero_point(
+        array, how, scale, zero_point
+    )
+    dq_array = qarray.dequantize(q_array)
+    # Use a straight through estimator as the gradient of the dq_array.
+    ste_array = qarray.clip_to_calibration(array, calibration, how.tiled_axes)
+    return ste_array + jax.lax.stop_gradient(dq_array - ste_array)
+
+  def _collect_quant_stat(
+      self,
+      name: str,
+      calibration: averaging.Calibration,
+      calibration_is_fixed_range: bool,
+  ) -> averaging.Calibration:
+    """Collects the quantization statistics."""
+    aggregator = averaging.SimpleMovingAverage()
+    quant_stat = flax_util.get_or_create_variable(
+        'quant_stats', name, lambda: aggregator.init(calibration)
+    )
+
+    if flax_util.should_update_quant_stats():
+      if calibration_is_fixed_range:
+        # For fixed-range calibration, start from an empty quant_stat to avoid
+        # floating-point accumulation error. Alternatively, we could skip
+        # storing the quant_stat for fixed-range calibration.
+        quant_stat.value = aggregator.init(calibration)
+      quant_stat.value = aggregator.update(quant_stat.value, calibration)
+
+    return aggregator.get_calibration(quant_stat.value, calibration)
 
 
 class OdmlConversionProvider(OdmlQatProvider):
