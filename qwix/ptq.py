@@ -294,7 +294,7 @@ class PtqProvider(qconfig.QuantizationProvider):
     )
 
   def nn_param(self, module: nn.Module, name: str, *args, **kwargs):
-    """Intercepts nn.Module.param."""
+    """Intercepts nn.Module.param to associate weight_name aux_data."""
     # Don't check the shape if the param is already quantized.
     existing_param = module.get_variable('params', name)
     if isinstance(existing_param, WithAux):
@@ -368,6 +368,7 @@ class PtqProvider(qconfig.QuantizationProvider):
       self, model: nn.Module | nnx.Module, model_args: Any, model_kwargs: Any
   ) -> tuple[nn.Module | nnx.Module, Any, Any]:
     """Processes the nnx.Module instance before it is called."""
+    # Set weight_name for nnx models. Linen models are handled in nn_param.
     if isinstance(model, nnx.Module):
       for path, node in nnx.iter_graph(model):
         if isinstance(node, nnx.Module):
