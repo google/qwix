@@ -384,6 +384,13 @@ class TransparentOp(QuantizedOp):
   """
 
   input_idx = [0]  # default to a unary op.
+  forwarded_aux_data = (
+      _IS_ACTIVATION,
+      _WEIGHT_NAME,
+      _FQ_RULE,
+      _FIXED_RANGE,
+      _ALLOW_FUSION,
+  )
 
   def __call__(self, *args, **kwargs):
     if len(self.input_idx) > 1:
@@ -391,7 +398,7 @@ class TransparentOp(QuantizedOp):
           f'Unsupported num of inputs {self.input_idx} for op {self._op_name}.'
       )
     out = self._call_original_op(*args, **kwargs)
-    for key in [_IS_ACTIVATION, _WEIGHT_NAME, _FQ_RULE, _FIXED_RANGE]:
+    for key in self.forwarded_aux_data:
       value = aux_data.get(args[self.input_idx[0]], key, None)
       if value is not None:
         aux_data.set(out, key, value)
