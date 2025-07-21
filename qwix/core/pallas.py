@@ -187,7 +187,9 @@ def _transform_block_specs_for_tpu(
     flatten_kernel_args = treedef.flatten_up_to(kernel_args)
     for i, kernel_arg in enumerate(flatten_kernel_args):
       if i in reverse_transposes:
-        flatten_kernel_args[i] = kernel_arg.transpose(reverse_transposes[i])
+        flatten_kernel_args[i] = kernel_arg[...].transpose(
+            reverse_transposes[i]
+        )
       elif i in reverse_reshapes:
         # Note: reshape on MemoryRef may return corrupted data!
         flatten_kernel_args[i] = kernel_arg[...].reshape(reverse_reshapes[i])

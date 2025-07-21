@@ -141,11 +141,6 @@ class PallasTest(parameterized.TestCase):
           tiled_axes={0: 128, 1: 128},
       ),
       dict(
-          testcase_name="channelwise_and_blockwise",
-          input_shape=(256, 256),
-          tiled_axes={0: 1, 1: 128},
-      ),
-      dict(
           testcase_name="blockwise_and_channelwise",
           input_shape=(256, 256),
           tiled_axes={0: 128, 1: 1},
@@ -155,15 +150,22 @@ class PallasTest(parameterized.TestCase):
           input_shape=(4, 256, 256),
           tiled_axes={1: 1, 2: 128},
       ),
+      dict(
+          # This test case triggers transpose codepath.
+          testcase_name="transpose",
+          input_shape=(128, 2048),
+          tiled_axes={0: 1, 1: 128},
+          bs=(128, 1024),
+      ),
   )
-  def test_pallas_dequantize(self, input_shape, tiled_axes):
+  def test_pallas_dequantize(self, input_shape, tiled_axes, bs=(128, 128)):
     """Comprehensive tests for the pallas_call function."""
 
     def dequantize_kernel(q_ref, out_ref):
       out_ref[...] = qarray.dequantize(jax.tree.map(lambda x: x[...], q_ref))
 
     def dequantize_pallas(q: qarray.QArray):
-      block_shape = (1,) * (q.qvalue.ndim - 2) + (128, 128)
+      block_shape = (1,) * (q.qvalue.ndim - 2) + bs
 
       return pallas.pallas_call(
           dequantize_kernel,
@@ -195,6 +197,9 @@ class PallasTest(parameterized.TestCase):
 
       x = jax.tree.map(lambda x: x[...], x_ref)
       y = jax.tree.map(lambda x: x[...], y_ref)
+      # NOTE: Qwix's dot_general is not generally supported inside pallas
+      # kernels, as the reshape and transpose operations will trigger errors
+      # when block sizes != subchannel tiled sizes.
       acc_ref[...] += dot_general.dot_general(x, y, (((1,), (0,)), ((), ())))
 
       @pl.when(pl.program_id(2) == nsteps - 1)
