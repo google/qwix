@@ -92,10 +92,7 @@ class Transformer(nn.Module):
   hidden_dim: int = 32
   vocab_size: int = 100
   embedding_dim: int = 16
-
-  # Enabling bias will cause more fp ops because the converter fails to fuse
-  # fully_connected + add.
-  use_bias: bool = False
+  use_bias: bool = True
 
   @nn.compact
   def __call__(self, input_ids):
@@ -119,8 +116,6 @@ class Transformer(nn.Module):
     return jax.random.randint(
         jax.random.key(0), (1, 100), minval=0, maxval=100, dtype=jnp.int32
     )
-
-  additional_provider_args = dict(disable_per_channel_weights=True)
 
   expected_quant_stats_keys = {
       'Embed_0/take0',

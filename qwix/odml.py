@@ -269,6 +269,32 @@ class OdmlConversionProvider(OdmlQatProvider):
     self._flatten_params = flax.traverse_util.flatten_dict(params)
     self._quant_stats = quant_stats
 
+  def get_intercept_map(self):
+    intercept_map = super().get_intercept_map()
+    # Override dot_general to flatten N-D weights to 2-D.
+    intercept_map['jax.lax.dot_general'] = functools.partial(
+        self._flatten_dot_general,
+        _dot_general=intercept_map['jax.lax.dot_general'],
+        _reshape=intercept_map['jax.lax.reshape'],
+    )
+    return intercept_map
+
+  def _flatten_dot_general(self, *args, _dot_general, _reshape, **kwargs):
+    """Flatten N-D weights to 2-D to support channelwise quantization."""
+    # This special handling is needed because tflite doesn't support multiple
+    # quantization_dimensions.
+    if (
+        aux_data.get(args[1], 'weight_name', None) is not None
+        and args[1].ndim > 2
+        and tuple(args[2][0][1]) == (0,)
+    ):
+      args = list(args)
+      dout = args[1].shape[1:]
+      args[1] = _reshape(args[1], (args[1].shape[0], np.prod(dout)))
+      out = _dot_general(*args, **kwargs)
+      return _reshape(out, out.shape[:-1] + dout)
+    return _dot_general(*args, **kwargs)
+
   def _fake_quant(
       self,
       array: jax.Array,
@@ -285,6 +311,8 @@ class OdmlConversionProvider(OdmlQatProvider):
       if weight_name is not None:  # Weights.
         mdl_path = flax_util.get_current_module_path()
         weight = self._flatten_params[mdl_path + (weight_name,)]
+        if array.shape != weight.shape:  # when _flatten_dot_general is used.
+          weight = weight.reshape(array.shape)
         calibration = qarray.calibrate(weight, how)
         scale, zp = qarray.compute_scale_zero_point(calibration, how.qtype)
       elif quant_stat_name is not None:  # Static-range activations.
