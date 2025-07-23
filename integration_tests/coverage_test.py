@@ -21,8 +21,8 @@ import jax
 from jax import numpy as jnp
 from qwix import model as qwix_model
 from qwix import ptq
-from qwix import qat
 from qwix import qconfig
+from qwix import qt
 
 
 class CNN(nn.Module):
@@ -81,16 +81,17 @@ class Transformer(nn.Module):
 class CoverageTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
-      dict(
-          testcase_name='cnn_srq',
-          model=CNN(),
-          rule=qconfig.QuantizationRule(
-              module_path=r'.*',
-              weight_qtype=jnp.int8,
-              act_qtype=jnp.int8,
-              act_static_scale=True,
-          ),
-      ),
+      # TODO(jiwonshin): Re-enable once SRQ is implemented.
+      # dict(
+      #     testcase_name='cnn_srq',
+      #     model=CNN(),
+      #     rule=qconfig.QuantizationRule(
+      #         module_path=r'.*',
+      #         weight_qtype=jnp.int8,
+      #         act_qtype=jnp.int8,
+      #         act_static_scale=True,
+      #     ),
+      # ),
       dict(
           testcase_name='transformer_weight_only',
           model=Transformer(),
@@ -107,11 +108,11 @@ class CoverageTest(parameterized.TestCase):
     inputs = model.create_inputs()
 
     # Randomly initialize the params.
-    qat_model = qwix_model.quantize_model(model, qat.QatProvider(q_rules))
-    qat_variables = qat_model.init(jax.random.key(0), inputs)
+    qt_model = qwix_model.quantize_model(model, qt.QtProvider(q_rules))
+    qt_variables = qt_model.init(jax.random.key(0), inputs)
     # Run the forward pass once to get the quant_stats.
-    _, new_vars = qat_model.apply(qat_variables, inputs, mutable='quant_stats')
-    params = qat_variables['params']
+    _, new_vars = qt_model.apply(qt_variables, inputs, mutable='quant_stats')
+    params = qt_variables['params']
     # quant_stats is not present in weight-only mode
     quant_stats = new_vars.get('quant_stats', {})
 

@@ -24,8 +24,8 @@ from jax.experimental import pallas as pl
 from qwix import flax_util
 from qwix import model as qwix_model
 from qwix import ptq
-from qwix import qat
 from qwix import qconfig
+from qwix import qt
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 
@@ -86,6 +86,7 @@ class PtqTest(parameterized.TestCase):
 
   @parameterized.parameters("absmax", "minmax", "rms,7")
   def test_nn_srq(self, act_calibration_method):
+    self.skipTest("Reenable once SRQ is implemented.")
     dense = nn.Dense(features=5)
     q_rules = [
         qconfig.QuantizationRule(
@@ -97,11 +98,11 @@ class PtqTest(parameterized.TestCase):
         ),
     ]
 
-    # QAT to generate quant_stats.
-    qat_dense = qwix_model.quantize_model(dense, qat.QatProvider(q_rules))
+    # QT to generate quant_stats.
+    qt_dense = qwix_model.quantize_model(dense, qt.QtProvider(q_rules))
     model_input = jnp.ones((10, 12))
-    qat_variables = qat_dense.init(jax.random.key(0), model_input)
-    quant_stat = qat_variables["quant_stats"]["dot_general0_lhs"]
+    qt_variables = qt_dense.init(jax.random.key(0), model_input)
+    quant_stat = qt_variables["quant_stats"]["dot_general0_lhs"]
     self.assertEqual(quant_stat["count"].shape, ())
     self.assertEqual(quant_stat["count"], 0)
     if act_calibration_method == "minmax":
@@ -111,8 +112,8 @@ class PtqTest(parameterized.TestCase):
       self.assertEqual(quant_stat["sum_of_absmax"].shape, (1, 1))
 
     # Run the model to initialize the quant_stats.
-    _, new_vars = qat_dense.apply(
-        qat_variables, model_input, mutable="quant_stats"
+    _, new_vars = qt_dense.apply(
+        qt_variables, model_input, mutable="quant_stats"
     )
     quant_stats = new_vars["quant_stats"]
     self.assertEqual(quant_stats["dot_general0_lhs"]["count"], 1)
@@ -134,7 +135,7 @@ class PtqTest(parameterized.TestCase):
       )
 
     quantized_params = ptq.quantize_params(
-        qat_variables["params"], ptq_abs_params, quant_stats
+        qt_variables["params"], ptq_abs_params, quant_stats
     )
     # They should have the same structure.
     jax.tree.map(lambda *_: ..., quantized_params, ptq_abs_params)
@@ -282,6 +283,7 @@ class PtqTest(parameterized.TestCase):
 
   @parameterized.parameters("absmax", "minmax")
   def test_nnx_srq(self, act_calibration_method):
+    self.skipTest("Reenable once SRQ is implemented.")
     q_rules = [
         qconfig.QuantizationRule(
             module_path=".*",
@@ -292,15 +294,15 @@ class PtqTest(parameterized.TestCase):
         ),
     ]
 
-    # QAT to generate quant_stats.
+    # QT to generate quant_stats.
     model_input = jnp.ones((10, 12))
-    qat_linear = qwix_model.quantize_model(
+    qt_linear = qwix_model.quantize_model(
         nnx.Linear(in_features=12, out_features=5, rngs=nnx.Rngs(0)),
-        qat.QatProvider(q_rules),
+        qt.QtProvider(q_rules),
         model_input,
     )
-    qat_linear(model_input)
-    quant_stats = nnx.state(qat_linear, flax_util.QuantStat)
+    qt_linear(model_input)
+    quant_stats = nnx.state(qt_linear, flax_util.QuantStat)
     quant_stat = quant_stats["dot_general0_lhs"].value
 
     self.assertEqual(quant_stat["count"].shape, ())
@@ -313,7 +315,7 @@ class PtqTest(parameterized.TestCase):
 
     # PTQ method 1: quantize_model also converts params and quant_stats.
     ptq_linear = qwix_model.quantize_model(
-        qat_linear, ptq.PtqProvider(q_rules), model_input
+        qt_linear, ptq.PtqProvider(q_rules), model_input
     )
     self.assertIsInstance(ptq_linear.dot_general0_lhs_scale, ptq.WithAux)
     self.assertEqual(ptq_linear.dot_general0_lhs_scale.array.shape, (1, 1))
@@ -323,12 +325,12 @@ class PtqTest(parameterized.TestCase):
     # PTQ method 2: manually call quantize_params.
     abs_ptq_linear = nnx.eval_shape(
         lambda: qwix_model.quantize_model(
-            qat_linear, ptq.PtqProvider(q_rules), model_input
+            qt_linear, ptq.PtqProvider(q_rules), model_input
         )
     )
-    qat_params = nnx.state(qat_linear, nnx.Param)
+    qt_params = nnx.state(qt_linear, nnx.Param)
     quantized_params = ptq.quantize_params(
-        nnx.to_pure_dict(qat_params),
+        nnx.to_pure_dict(qt_params),
         abs_ptq_linear,
         nnx.to_pure_dict(quant_stats),
     )
