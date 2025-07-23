@@ -49,6 +49,9 @@ class QArray:
   zero_point: jax.Array | None
   qtype: jax.typing.DTypeLike = flax.struct.field(pytree_node=False)
 
+  # Array-like methods.
+  shape = property(lambda self: self.qvalue.shape)
+
 
 @dataclasses.dataclass(slots=True, frozen=True, kw_only=True)
 class HowToQuantize:

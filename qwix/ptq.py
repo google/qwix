@@ -59,6 +59,7 @@ class WithAux(Generic[ArrayTypeVar]):
 
   # This allows us to appear like nnx.Variable.
   value = property(flax_util.unbox)
+  shape = property(lambda self: self.array.shape)
 
 
 class PtqProvider(qconfig.QuantizationProvider):
@@ -100,13 +101,10 @@ class PtqProvider(qconfig.QuantizationProvider):
           out_sharding=out_sharding,
       )
 
-    rhs_shape = (
-        rhs.array.qvalue.shape if isinstance(rhs, WithAux) else rhs.shape
-    )
     get_how_to_quantize = functools.partial(
         dot_general.get_how_to_quantize,
         dimension_numbers=dimension_numbers,
-        ndims=(len(lhs.shape), len(rhs_shape)),
+        ndims=(len(lhs.shape), len(rhs.shape)),
     )
 
     # Prepare rhs.
@@ -168,13 +166,10 @@ class PtqProvider(qconfig.QuantizationProvider):
       raise ValueError(f'Unsupported einsum format: {einsum_str=} {operands=}')
 
     lhs, rhs = operands
-    rhs_shape = (
-        rhs.array.qvalue.shape if isinstance(rhs, WithAux) else rhs.shape
-    )
     get_how_to_quantize = functools.partial(
         einsum.get_how_to_quantize,
         einsum_str=einsum_str,
-        ndims=(len(lhs.shape), len(rhs_shape)),
+        ndims=(len(lhs.shape), len(rhs.shape)),
     )
 
     # Prepare rhs.
@@ -240,11 +235,8 @@ class PtqProvider(qconfig.QuantizationProvider):
           precision=precision,
           preferred_element_type=preferred_element_type,
       )
-    rhs_shape = (
-        rhs.array.qvalue.shape if isinstance(rhs, WithAux) else rhs.shape
-    )
     dimension_numbers = jax.lax.conv_dimension_numbers(
-        lhs.shape, rhs_shape, dimension_numbers
+        lhs.shape, rhs.shape, dimension_numbers
     )
 
     # Prepare rhs.
