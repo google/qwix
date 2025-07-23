@@ -179,9 +179,6 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
     Returns:
       The fake quantized array.
     """
-    # TransposedQArray cannot be dequantized.
-    how = dataclasses.replace(how, scale_transpose=None)
-
     # Check and apply the fixed-range calibration asscociated with the array.
     fixed_range = aux_data.get(array, 'fixed_range', None)
     if fixed_range is not None:
@@ -302,7 +299,6 @@ class OdmlConversionProvider(OdmlQatProvider):
       quant_stat_name: str | None = None,
   ) -> jax.Array:
     assert not how.tiled_axes, 'Tiled axes are not supported in ODML.'
-    how = dataclasses.replace(how, scale_transpose=None)
 
     # Make the scale and zero point statically computed.
     with jax.ensure_compile_time_eval():

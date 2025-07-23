@@ -266,7 +266,7 @@ class LoraTest(parameterized.TestCase):
       self.assertEqual(
           base_state.kernel.value.sharding.spec, base_state.kernel.sharding
       )
-    elif weight_qtype == "nf4":  # untransposed weights
+    else:  # quantized weights
       self.assertEqual(base_state.kernel.array.qvalue.value.shape, (16, 8, 10))
       self.assertEqual(
           base_state.kernel.array.qvalue.sharding, ("fsdp", "tp", None)
@@ -274,20 +274,6 @@ class LoraTest(parameterized.TestCase):
       self.assertEqual(base_state.kernel.array.scale.value.shape, (4, 8, 10))
       self.assertEqual(
           base_state.kernel.array.scale.sharding, ("fsdp", "tp", None)
-      )
-    elif weight_qtype:  # transposed weights
-      self.assertEqual(  # split as d*nh
-          base_state.kernel.array.qvalue.value.shape, (4, 4, 8, 10)
-      )
-      self.assertEqual(  # split as d*nh
-          base_state.kernel.array.qvalue.sharding, ("fsdp", None, "tp", None)
-      )
-      self.assertEqual(  # transposed as btdnh
-          base_state.kernel.array.scale.value.shape, (1, 1, 4, 8, 10)
-      )
-      self.assertEqual(  # transposed as btdnh
-          base_state.kernel.array.scale.sharding,
-          (None, None, "fsdp", "tp", None),
       )
 
     # Check that the actual sharding matches the sharding on the metadata,

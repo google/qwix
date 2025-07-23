@@ -166,7 +166,7 @@ class LoraProvider(ptq.PtqProvider):
 
     if isinstance(rhs, ptq.WithAux):  # rhs is quantized.
       weight_name = rhs.weight_name
-      rhs_shape = qarray.get_original_shape(rhs.array)
+      rhs_shape = rhs.array.qvalue.shape
     else:
       weight_name = aux_data.get(rhs, 'weight_name', None)
       rhs_shape = rhs.shape
@@ -217,7 +217,7 @@ class LoraProvider(ptq.PtqProvider):
 
     if isinstance(rhs, ptq.WithAux):  # rhs is quantized.
       weight_name = rhs.weight_name
-      rhs_shape = qarray.get_original_shape(rhs.array)
+      rhs_shape = rhs.array.qvalue.shape
     else:
       weight_name = aux_data.get(rhs, 'weight_name', None)
       rhs_shape = rhs.shape
@@ -294,7 +294,7 @@ class LoraProvider(ptq.PtqProvider):
 
     if isinstance(rhs, ptq.WithAux):  # rhs is quantized.
       weight_name = rhs.weight_name
-      rhs_shape = qarray.get_original_shape(rhs.array)
+      rhs_shape = rhs.array.qvalue.shape
     else:
       # Assert that rhs is a weight.
       weight_name = aux_data.get(rhs, 'weight_name')
@@ -394,14 +394,6 @@ def _get_or_create_lora_params(
     lora_dtype = flax_util.unbox(param.array.scale).dtype
     boxed = param.array.qvalue
     sharding = get_canonical_pspec(boxed)
-    if isinstance(param.array, qarray.TransposedQArray):
-      # Restore to the original shape and sharding.
-      qvalue = flax_util.unbox(boxed).reshape(param.array.original_shape)
-      tiled_axes = set(qarray.get_tiled_axes(flax_util.unbox(param.array)))
-      boxed = flax_util.update_boxed(boxed, value=qvalue, merge=tiled_axes)
-      if sharding is not None:
-        pspec = flax_util.update_sharding(sharding.spec, merge=tiled_axes)
-        sharding = sharding.update(spec=pspec)
   else:  # base model is not quantized.
     lora_dtype = flax_util.unbox(param).dtype
     boxed = param

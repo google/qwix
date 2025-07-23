@@ -84,19 +84,12 @@ def get_how_to_quantize(
       channelwise_axes.append(axis)
     elif tile_size:
       tiled_axes[axis] = tile_size
-  if tile_size:
-    info = _apply_subchannel(info)
-
-  scale_transpose = None
-  if numerics.can_dequant_on_output(qtype):
-    scale_transpose = _get_transpose(subs, info.out)
 
   return qarray.HowToQuantize(
       qtype=qtype,
       channelwise_axes=channelwise_axes,
       tiled_axes=tiled_axes,
       batch_axes=batch_axes,
-      scale_transpose=scale_transpose,
       calibration_method=calibration_method,
   )
 
@@ -162,12 +155,8 @@ def _fast_einsum(
       raise ValueError(f'{lhs_tile_size=} != {rhs_tile_size=}')
 
   tile_size = lhs_tile_size or rhs_tile_size
-  lhs_ndim = len(lhs_value.shape) - (
-      1 if isinstance(lhs, qarray.TransposedQArray) and lhs_tile_size else 0
-  )
-  rhs_ndim = len(rhs_value.shape) - (
-      1 if isinstance(rhs, qarray.TransposedQArray) and rhs_tile_size else 0
-  )
+  lhs_ndim = len(lhs_value.shape)
+  rhs_ndim = len(rhs_value.shape)
   info = get_einsum_info(einsum_str, (lhs_ndim, rhs_ndim))
 
   tiled_sum_axis = None
@@ -179,21 +168,19 @@ def _fast_einsum(
     einsum_out = tiled_info.out
     tiled_sum_axis = tiled_info.out.index(contraction)
     einsum_str = tiled_info.lhs + ',' + tiled_info.rhs + '->' + tiled_info.out
-    # Split lhs/rhs_value if not already split.
-    if not isinstance(lhs, qarray.TransposedQArray):
-      lhs_ca = info.lhs.index(contraction)
-      lhs_value = qarray.split_axis(lhs_value, {lhs_ca: tile_size})
-      if lhs_zero_point is not None:
-        lhs_zero_point = qarray.split_axis(lhs_zero_point, {lhs_ca: 1})
-    if not isinstance(rhs, qarray.TransposedQArray):
-      rhs_ca = info.rhs.index(contraction)
-      rhs_value = qarray.split_axis(rhs_value, {rhs_ca: tile_size})
+    # Split lhs/rhs_value.
+    lhs_ca = info.lhs.index(contraction)
+    lhs_value = qarray.split_axis(lhs_value, {lhs_ca: tile_size})
+    if lhs_zero_point is not None:
+      lhs_zero_point = qarray.split_axis(lhs_zero_point, {lhs_ca: 1})
+    rhs_ca = info.rhs.index(contraction)
+    rhs_value = qarray.split_axis(rhs_value, {rhs_ca: tile_size})
 
-  # Transpose lhs/rhs_scale if not already transposed.
-  if lhs_scale is not None and not isinstance(lhs, qarray.TransposedQArray):
+  # Transpose lhs/rhs_scale.
+  if lhs_scale is not None:
     transpose = _get_transpose(info.lhs, einsum_out)
     lhs_scale = qarray.transpose_array(lhs_scale, transpose)
-  if rhs_scale is not None and not isinstance(rhs, qarray.TransposedQArray):
+  if rhs_scale is not None:
     transpose = _get_transpose(info.rhs, einsum_out)
     rhs_scale = qarray.transpose_array(rhs_scale, transpose)
 

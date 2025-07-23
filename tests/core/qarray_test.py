@@ -93,7 +93,6 @@ class QArrayTest(parameterized.TestCase):
         qtype=qtype,
         channelwise_axes=channelwise_axes,
         tiled_axes=tiled_axes,
-        scale_transpose=None,
         calibration_method=calibration_method,
         batch_axes=(),
     )
@@ -166,7 +165,6 @@ class QArrayTest(parameterized.TestCase):
         qtype=qtype,
         channelwise_axes=channelwise_axes,
         tiled_axes=tiled_axes,
-        scale_transpose=None,
         calibration_method='absmax',
         batch_axes=(),
     )
@@ -223,7 +221,6 @@ class QArrayTest(parameterized.TestCase):
         qtype=jnp.int8,
         channelwise_axes=[],
         tiled_axes={},
-        scale_transpose=None,
         calibration_method='minmax',
         batch_axes=(),
     )
@@ -255,7 +252,6 @@ class QArrayTest(parameterized.TestCase):
         qtype=jnp.int8,
         channelwise_axes=[],
         tiled_axes={},
-        scale_transpose=None,
         calibration_method='absmax',
         batch_axes=(),
     )
@@ -267,7 +263,6 @@ class QArrayTest(parameterized.TestCase):
         qtype=jnp.int8,
         channelwise_axes=[],
         tiled_axes={},
-        scale_transpose=None,
         calibration_method='absmax',
         batch_axes=(0,),
     )
@@ -285,15 +280,6 @@ class QArrayTest(parameterized.TestCase):
         scale=jnp.ones((10, 8, 2)),
         zero_point=None,
         qtype=jnp.int8,
-    )
-    self.assertEqual(qarray.get_tiled_axes(array), {1: 32, 2: 8})
-
-    array = qarray.TransposedQArray(
-        qvalue=jnp.ones((10, 8, 32, 2, 8)),
-        scale=jnp.ones((10, 1, 8, 2)),  # doesn't matter.
-        zero_point=None,
-        qtype=jnp.int8,
-        original_shape=(10, 256, 16),
     )
     self.assertEqual(qarray.get_tiled_axes(array), {1: 32, 2: 8})
 
@@ -330,7 +316,6 @@ class QArrayTest(parameterized.TestCase):
         qtype=jnp.int8,
         channelwise_axes=[],
         tiled_axes={},
-        scale_transpose=None,
         calibration_method=calibration_method,
         batch_axes=(),
     )

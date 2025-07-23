@@ -101,9 +101,7 @@ class PtqProvider(qconfig.QuantizationProvider):
       )
 
     rhs_shape = (
-        qarray.get_original_shape(rhs.array)
-        if isinstance(rhs, WithAux)
-        else rhs.shape
+        rhs.array.qvalue.shape if isinstance(rhs, WithAux) else rhs.shape
     )
     get_how_to_quantize = functools.partial(
         dot_general.get_how_to_quantize,
@@ -171,9 +169,7 @@ class PtqProvider(qconfig.QuantizationProvider):
 
     lhs, rhs = operands
     rhs_shape = (
-        qarray.get_original_shape(rhs.array)
-        if isinstance(rhs, WithAux)
-        else rhs.shape
+        rhs.array.qvalue.shape if isinstance(rhs, WithAux) else rhs.shape
     )
     get_how_to_quantize = functools.partial(
         einsum.get_how_to_quantize,
@@ -245,9 +241,7 @@ class PtqProvider(qconfig.QuantizationProvider):
           preferred_element_type=preferred_element_type,
       )
     rhs_shape = (
-        qarray.get_original_shape(rhs.array)
-        if isinstance(rhs, WithAux)
-        else rhs.shape
+        rhs.array.qvalue.shape if isinstance(rhs, WithAux) else rhs.shape
     )
     dimension_numbers = jax.lax.conv_dimension_numbers(
         lhs.shape, rhs_shape, dimension_numbers
@@ -327,7 +321,7 @@ class PtqProvider(qconfig.QuantizationProvider):
     """Intercepts jax.numpy.dot."""
     a_ndim = np.ndim(a)
     if isinstance(b, WithAux):
-      b_ndim = len(qarray.get_original_shape(b.array))
+      b_ndim = b.array.qvalue.ndim
     else:
       b_ndim = np.ndim(b)
     if a_ndim == 0 or b_ndim == 0:
@@ -430,16 +424,6 @@ def _create_quantized_param(
 
   # The following code is about replacing the saved param with WithAux, with
   # correct metadata.
-  def with_box(boxed, kp: jax.tree_util.KeyPath, value):
-    """Put the value in the box and transform the metadata accordingly."""
-    split = set(how.tiled_axes) if how.scale_transpose else None
-    if kp[-1].name == 'scale':
-      return flax_util.update_boxed(
-          boxed, value=value, transpose=how.scale_transpose
-      )
-    elif kp[-1].name in ('qvalue', 'zero_point'):
-      return flax_util.update_boxed(boxed, value=value, split=split)
-    raise ValueError(f'Unexpected key path: {kp}')
 
   module = flax_util.get_current_module()
   if isinstance(module, nn.Module):
@@ -448,11 +432,15 @@ def _create_quantized_param(
           "It seems you're feeding an unquantized param to a quantized model."
       )
     param = module.get_variable('params', weight_name)
-    boxed = jax.tree.map_with_path(functools.partial(with_box, param), unboxed)
+    boxed = jax.tree.map(
+        lambda value: flax_util.update_boxed(param, value=value), unboxed
+    )
     module.put_variable('params', weight_name, boxed)
   elif isinstance(module, nnx.Module):
     param = getattr(module, weight_name)
-    boxed = jax.tree.map_with_path(functools.partial(with_box, param), unboxed)
+    boxed = jax.tree.map(
+        lambda value: flax_util.update_boxed(param, value=value), unboxed
+    )
     setattr(module, weight_name, boxed)
 
   return unboxed

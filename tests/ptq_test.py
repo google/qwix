@@ -59,10 +59,10 @@ class PtqTest(parameterized.TestCase):
     self.assertIsInstance(qw.qvalue, nn.Partitioned)
     self.assertIsInstance(qw.scale, nn.Partitioned)
     self.assertEqual(qw.qvalue.value.dtype, jnp.int8)
-    self.assertEqual(qw.qvalue.value.shape, (3, 4, 5))  # split from (12, 5)
-    self.assertEqual(qw.qvalue.names, ("contraction", None, "remaining"))
-    self.assertEqual(qw.scale.value.shape, (3, 1, 5))  # transposed
-    self.assertEqual(qw.scale.names, ("contraction", None, "remaining"))
+    self.assertEqual(qw.qvalue.value.shape, (12, 5))
+    self.assertEqual(qw.qvalue.names, ("contraction", "remaining"))
+    self.assertEqual(qw.scale.value.shape, (3, 5))
+    self.assertEqual(qw.scale.names, ("contraction", "remaining"))
 
     # Test param quantization.
     orig_params = dense.init(jax.random.key(0), model_input)["params"]
@@ -170,10 +170,10 @@ class PtqTest(parameterized.TestCase):
     self.assertEqual(qw.weight_name, "kernel")
     qw = qw.array
     self.assertEqual(qw.qvalue.dtype, jnp.int8)
-    self.assertEqual(qw.qvalue.shape, (3, 4, 5))  # split from (12, 5)
-    self.assertEqual(qw.qvalue.sharding, ("contraction", None, "remaining"))
-    self.assertEqual(qw.scale.shape, (3, 1, 5))  # transposed
-    self.assertEqual(qw.scale.sharding, ("contraction", None, "remaining"))
+    self.assertEqual(qw.qvalue.shape, (12, 5))
+    self.assertEqual(qw.qvalue.sharding, ("contraction", "remaining"))
+    self.assertEqual(qw.scale.shape, (3, 5))
+    self.assertEqual(qw.scale.sharding, ("contraction", "remaining"))
 
     # Weight quantization method 2: call quantize_model in eval_shape and
     # quantize_params.
@@ -247,11 +247,11 @@ class PtqTest(parameterized.TestCase):
     self.assertEqual(qw.weight_name, "kernel")
     qw = qw.array
     self.assertEqual(qw.qvalue.dtype, jnp.int8)
-    self.assertEqual(qw.qvalue.shape, (4, 4, 8, 10))  # split from (12, 5)
-    self.assertEqual(qw.qvalue.sharding, ("fsdp", None, "tp", None))
+    self.assertEqual(qw.qvalue.shape, (16, 8, 10))
+    self.assertEqual(qw.qvalue.sharding, ("fsdp", "tp", None))
     self.assertEqual(get_canonical_pspec(qw.qvalue.value), qw.qvalue.sharding)
-    self.assertEqual(qw.scale.shape, (1, 1, 4, 8, 10))  # transposed
-    self.assertEqual(qw.scale.sharding, (None, None, "fsdp", "tp", None))
+    self.assertEqual(qw.scale.shape, (4, 8, 10))
+    self.assertEqual(qw.scale.sharding, ("fsdp", "tp", None))
     self.assertEqual(get_canonical_pspec(qw.scale.value), qw.scale.sharding)
 
     # PTQ method 2: call quantize_model in eval_shape and quantize_params.

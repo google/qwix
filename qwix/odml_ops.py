@@ -319,7 +319,6 @@ class QuantizedOp:
 
     how = qarray.HowToQuantize(
         qtype=rule.act_qtype,
-        scale_transpose=None,
         tiled_axes={},
         channelwise_axes=(),
         batch_axes=rule.act_batch_axes,

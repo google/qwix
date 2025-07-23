@@ -119,7 +119,7 @@ We could inspect the params to verify that weights are now pre-quantized.
          {
            'Dense_0': {
              'kernel': WithAux(
-               array=TransposedQArray(
+               array=QArray(
                  qvalue=ShapeDtypeStruct(shape=(16, 64), dtype=int8),
                  scale=ShapeDtypeStruct(shape=(1, 64), dtype=float32),
                  ...
@@ -129,7 +129,7 @@ We could inspect the params to verify that weights are now pre-quantized.
            },
            'Dense_1': {
              'kernel': WithAux(
-               array=TransposedQArray(
+               array=QArray(
                  qvalue=ShapeDtypeStruct(shape=(64, 16), dtype=int8),
                  scale=ShapeDtypeStruct(shape=(1, 16), dtype=float32),
                  ...
