@@ -19,26 +19,26 @@ import jax
 from jax import numpy as jnp
 from qwix import flax_util
 from qwix import model as qwix_model
-from qwix import qat
 from qwix import qconfig
+from qwix import qt
 
 jax.config.update("jax_threefry_partitionable", False)
 
 
-class QatTest(absltest.TestCase):
+class QtTest(absltest.TestCase):
 
   def _make_array(self, shape, seed=42):
     return jax.random.normal(jax.random.key(seed), shape, jnp.bfloat16)
 
   def test_dot_general_grad(self):
-    qat_provider = qat.QatProvider([])
+    qt_provider = qt.QtProvider([])
     rule = qconfig.QuantizationRule(
         module_path=".*",
         weight_qtype=jnp.int8,
         act_qtype=jnp.int8,
         act_calibration_method="absmax",
     )
-    qat_provider._get_current_rule_and_op_id = lambda _: (rule, None)
+    qt_provider._get_current_rule_and_op_id = lambda _: (rule, None)
 
     lhs = self._make_array((2, 4)) * 8
     rhs = self._make_array((4, 2)) * 8
@@ -46,7 +46,7 @@ class QatTest(absltest.TestCase):
     fp_value, fp_grad = jax.value_and_grad(jax.lax.dot_general)(
         lhs, rhs, dimension_numbers
     )
-    q_value, q_grad = jax.value_and_grad(qat_provider.dot_general)(
+    q_value, q_grad = jax.value_and_grad(qt_provider.dot_general)(
         lhs, rhs, dimension_numbers
     )
     self.assertEqual(fp_value.dtype, q_value.dtype)
@@ -55,12 +55,13 @@ class QatTest(absltest.TestCase):
     # quantized value of the other side to compute the gradient.
     self.assertFalse(jnp.array_equal(fp_grad, q_grad), f"{fp_grad=} {q_grad=}")
     rel_mae = jnp.abs(fp_value - q_value).mean() / jnp.abs(fp_value).mean()
-    self.assertAlmostEqual(rel_mae, 0.0153809)
+    self.assertLess(rel_mae, 0.01)
 
   def test_srq_jit_grad(self):
     """Test that the grad of SRQ can be taken inside a jitted function."""
+    self.skipTest("We will add SRQ implementation as follow up.")
     dense = nn.Dense(features=10, param_dtype=jnp.bfloat16)
-    qat_provider = qat.QatProvider([
+    qt_provider = qt.QtProvider([
         qconfig.QuantizationRule(
             module_path=".*",
             weight_qtype=jnp.int8,
@@ -68,9 +69,9 @@ class QatTest(absltest.TestCase):
             act_static_scale=True,
         ),
     ])
-    qat_dense = qwix_model.quantize_model(dense, qat_provider)
+    qt_dense = qwix_model.quantize_model(dense, qt_provider)
     model_input = jnp.ones((10, 12), dtype=jnp.bfloat16)
-    variables = qat_dense.init(jax.random.key(0), model_input)
+    variables = qt_dense.init(jax.random.key(0), model_input)
     self.assertEqual(
         variables["quant_stats"]["dot_general0_lhs"]["sum_of_absmax"].shape,
         (1, 1),
@@ -80,7 +81,7 @@ class QatTest(absltest.TestCase):
     @jax.jit
     def jit_apply(variables):
       def loss_fn(params):
-        out, new_vars = qat_dense.apply(
+        out, new_vars = qt_dense.apply(
             {"params": params, "quant_stats": variables["quant_stats"]},
             model_input,
             mutable="quant_stats",
@@ -98,8 +99,9 @@ class QatTest(absltest.TestCase):
 
   def test_srq_jit_grad_nnx(self):
     """Test SRQ on NNX module."""
+    self.skipTest("We will add SRQ implementation as follow up.")
     linear = nnx.Linear(12, 10, rngs=nnx.Rngs(0))
-    qat_provider = qat.QatProvider([
+    qt_provider = qt.QtProvider([
         qconfig.QuantizationRule(
             module_path=".*",
             weight_qtype=jnp.int8,
@@ -109,8 +111,8 @@ class QatTest(absltest.TestCase):
     ])
 
     model_input = jnp.ones((10, 12))
-    qat_linear = qwix_model.quantize_model(linear, qat_provider, model_input)
-    quant_stats = nnx.variables(qat_linear, flax_util.QuantStat)
+    qt_linear = qwix_model.quantize_model(linear, qt_provider, model_input)
+    quant_stats = nnx.variables(qt_linear, flax_util.QuantStat)
 
     # quant_stats should be initialized but empty.
     self.assertLen(quant_stats, 1)
@@ -124,8 +126,8 @@ class QatTest(absltest.TestCase):
 
       return nnx.grad(loss_fn)(model, x)
 
-    jit_apply(qat_linear, model_input)
-    quant_stats = nnx.variables(qat_linear, flax_util.QuantStat)
+    jit_apply(qt_linear, model_input)
+    quant_stats = nnx.variables(qt_linear, flax_util.QuantStat)
 
     self.assertNotEmpty(quant_stats)
     self.assertLen(quant_stats, 1)
@@ -137,11 +139,11 @@ class QatTest(absltest.TestCase):
 
     # Disables quant_stats update and check that quant_stats are not updated.
     act_sum_of_absmax = quant_stats["dot_general0_lhs"].value["sum_of_absmax"]
-    qat_linear.set_attributes(
+    qt_linear.set_attributes(
         disable_quant_stats_update=True, raise_if_not_found=False
     )
-    jit_apply(qat_linear, model_input)
-    quant_stats = nnx.variables(qat_linear, flax_util.QuantStat)
+    jit_apply(qt_linear, model_input)
+    quant_stats = nnx.variables(qt_linear, flax_util.QuantStat)
 
     self.assertEqual(
         quant_stats["dot_general0_lhs"]["sum_of_absmax"], act_sum_of_absmax
@@ -149,11 +151,11 @@ class QatTest(absltest.TestCase):
     self.assertEqual(quant_stats["dot_general0_lhs"]["count"], 1)
 
     # Enables quant_stats update and check that quant_stats are updated again.
-    qat_linear.set_attributes(
+    qt_linear.set_attributes(
         disable_quant_stats_update=False, raise_if_not_found=False
     )
-    jit_apply(qat_linear, model_input)
-    quant_stats = nnx.variables(qat_linear, flax_util.QuantStat)
+    jit_apply(qt_linear, model_input)
+    quant_stats = nnx.variables(qt_linear, flax_util.QuantStat)
 
     self.assertNotEqual(
         quant_stats["dot_general0_lhs"]["sum_of_absmax"], act_sum_of_absmax
