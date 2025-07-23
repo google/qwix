@@ -61,7 +61,8 @@ class HowToQuantize:
   # E.g. jnp.int8, jnp.int4, jnp.float8_*, nf4, etc.
   # Actual qvalue dtype is determined by the quantization method.
   qtype: jax.typing.DTypeLike
-  # Channelwise axes will have individual scales.
+  # Channelwise axes will have individual scales, which has the same effect
+  # as setting their tile sizes to 1 in tiled_axes.
   channelwise_axes: Collection[int]
   # Tiled axes have subchannel quantization enabled. The value is a mapping
   # from tiled axis to tile size.
@@ -167,6 +168,7 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
   Returns:
     A dict of quantization statistics, e.g. {'min': ..., 'max': ...} for
     asymmetric quantization, or {'absmax': ...} for symmetric quantization.
+    Each value in the dict has the same shape as the (expected) scale.
   """
   reduce_axes = []  # axes to calibrate.
   batch_axes = []  # axes to calculate the mean of quant stats.
@@ -180,6 +182,9 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
     if axis in how.tiled_axes:
       tiled_axes_offset += 1  # reduce the tile_size rather than num_tiles.
     reduce_axes.append(axis + tiled_axes_offset)
+
+  # The returned calibration values should have the same shape as the scale.
+  shape = get_scale_shape(array.shape, how)
   array = split_axis(array, how.tiled_axes)
 
   # Parse the calibration method.
@@ -197,31 +202,31 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
     if args:  # args[0] is the scale factor.
       min_array = min_array * args[0]
       max_array = max_array * args[0]
-    return {'min': min_array, 'max': max_array}
+    return {'min': min_array.reshape(shape), 'max': max_array.reshape(shape)}
   elif method == 'absmax':
     absmax = jnp.max(jnp.abs(array), axis=reduce_axes, keepdims=True)
     if batch_axes:
       absmax = jnp.mean(absmax, axis=batch_axes, keepdims=True)
     if args:  # args[0] is the scale factor.
       absmax = absmax * args[0]
-    return {'absmax': absmax}
+    return {'absmax': absmax.reshape(shape)}
   elif method == 'rms':
     rms = jnp.sqrt(jnp.mean(jnp.square(array), axis=reduce_axes, keepdims=True))
     if batch_axes:
       rms = jnp.mean(rms, axis=batch_axes, keepdims=True)
     if not args:
       raise ValueError('A scale factor is required for RMS calibration.')
-    return {'absmax': rms * args[0]}
+    return {'absmax': (rms * args[0]).reshape(shape)}
   elif method == 'fixed':
     if len(args) != 2:
       raise ValueError('A fixed range is required for fixed calibration.')
     if args[0] > 0 or args[1] < 0 or args[0] >= args[1]:
       raise ValueError('The range must contain 0 and be non-empty.')
     if args[0] + args[1] == 0:
-      return {'absmax': jnp.array(args[1], dtype=array.dtype)}
+      return {'absmax': jnp.full(shape, args[1], array.dtype)}
     return {
-        'min': jnp.array(args[0], dtype=array.dtype),
-        'max': jnp.array(args[1], dtype=array.dtype),
+        'min': jnp.full(shape, args[0], array.dtype),
+        'max': jnp.full(shape, args[1], array.dtype),
     }
   else:
     raise ValueError(f'Unsupported calibration: {how.calibration_method}')
@@ -276,20 +281,27 @@ def quantize_with_scale_zero_point(
   """
   if not numerics.should_quantize(array.dtype):
     raise ValueError(f'Refuse to quantize: {array.dtype}')
-  original_shape = array.shape
-  array = split_axis(array, how.tiled_axes)
+  scale_shape = get_scale_shape(array.shape, how)
+  if scale.shape != scale_shape:
+    raise ValueError(f'Expect scale shape {scale_shape} but got {scale.shape}')
+  if zero_point is not None and zero_point.shape != scale_shape:
+    raise ValueError(
+        f'Expect zero_point shape {scale_shape} but got {zero_point.shape}'
+    )
+
   # Ensure that the scale has the same dtype as the fp array, because
   # dequantize() uses the scale dtype to reconstruct the original array.
   scale = scale.astype(array.dtype)
-  qvalue = array / scale
+
+  tiled_array = split_axis(array, how.tiled_axes)
+  tiled_scale = split_axis(scale, {a: 1 for a in how.tiled_axes})
+  qvalue = tiled_array / tiled_scale
   if zero_point is not None:
-    qvalue = qvalue + zero_point.astype(qvalue.dtype)
+    tiled_zero_point = split_axis(zero_point, {a: 1 for a in how.tiled_axes})
+    qvalue = qvalue + tiled_zero_point.astype(qvalue.dtype)
+  qvalue = qvalue.reshape(array.shape)
   qvalue = numerics.convert_to(qvalue, how.qtype)
-  scale_shape = get_scale_shape(original_shape, how)
-  scale = scale.reshape(scale_shape)
-  if zero_point is not None:
-    zero_point = zero_point.reshape(scale_shape)
-  return QArray(qvalue.reshape(original_shape), scale, zero_point, how.qtype)
+  return QArray(qvalue, scale, zero_point, how.qtype)
 
 
 def quantize(
@@ -336,9 +348,12 @@ def clip_to_calibration(
   original_shape = array.shape
   array = split_axis(array, tiled_axes)
   if 'min' in calibration and 'max' in calibration:
-    array = jnp.clip(array, calibration['min'], calibration['max'])
+    min_array = split_axis(calibration['min'], {a: 1 for a in tiled_axes})
+    max_array = split_axis(calibration['max'], {a: 1 for a in tiled_axes})
+    array = jnp.clip(array, min_array, max_array)
   elif 'absmax' in calibration:
-    array = jnp.clip(array, -calibration['absmax'], calibration['absmax'])
+    absmax = split_axis(calibration['absmax'], {a: 1 for a in tiled_axes})
+    array = jnp.clip(array, -absmax, absmax)
   else:
     raise ValueError(f'Unsupported calibration: {calibration}')
   return array.reshape(original_shape)
