@@ -50,20 +50,6 @@ class QArray:
   qtype: jax.typing.DTypeLike = flax.struct.field(pytree_node=False)
 
 
-@flax.struct.dataclass
-class TransposedQArray(QArray):
-  """A QArray that optimizes the inference performance.
-
-  * Tiled axes in qvalue are split into (tile_count, tile_size).
-  * The scale is transposed to match the output shape of a specific op
-    (e.g. einsum, dot_general, conv_general).
-  * Tiled axes in zero_point are split into (tile_count, 1).
-  """
-
-  # Because of the transpose, we need to store the original shape.
-  original_shape: tuple[int, ...] = flax.struct.field(pytree_node=False)
-
-
 @dataclasses.dataclass(slots=True, frozen=True, kw_only=True)
 class HowToQuantize:
   """Determines how to quantize an array."""
@@ -81,10 +67,6 @@ class HowToQuantize:
   # i.e., the mean of quant stats is calculated along the batch axes. An axis
   # can appear only in one of channelwise_axes, tiled_axes, or batch_axes.
   batch_axes: Collection[int]
-  # Transpose the scale to match the target side. If set, it should be a list
-  # of the same length as the output shape, with elements being the input axis
-  # or None.
-  scale_transpose: Sequence[int | None] | None
   # The calibration method to use. The format is <method>[,<args>], e.g.
   # "absmax" or "fixed,-10,10". Check calibrate() for supported methods.
   calibration_method: str
@@ -109,13 +91,6 @@ def get_scale_shape(array_shape: ShapeT, how: HowToQuantize) -> ShapeT:
     else:
       scale_shape.append(1)
   return tuple(scale_shape)
-
-
-def get_original_shape(array: QArray) -> ShapeT:
-  """Returns the original shape given a QArray."""
-  if isinstance(array, TransposedQArray):
-    return array.original_shape
-  return array.qvalue.shape
 
 
 def transpose_array(
@@ -162,15 +137,6 @@ def get_tiled_axes(array: QArray) -> Mapping[int, int]:
   Returns:
     A mapping from tiled axis to tile size.
   """
-  if isinstance(array, TransposedQArray):
-    tiled_axes = {}
-    for i, s in enumerate(array.original_shape):
-      j = i + len(tiled_axes)  # add the offset of prior tiled axes.
-      if array.qvalue.shape[j] != s:
-        # j: tile_count, j+1: tile_size
-        assert array.qvalue.shape[j] * array.qvalue.shape[j + 1] == s
-        tiled_axes[i] = array.qvalue.shape[j + 1]
-    return tiled_axes
   tiled_axes = {}
   for i, (j, k) in enumerate(zip(array.qvalue.shape, array.scale.shape)):
     if j != k and k != 1:
@@ -318,11 +284,6 @@ def quantize_with_scale_zero_point(
   qvalue = numerics.convert_to(qvalue, how.qtype)
   scale_shape = get_scale_shape(original_shape, how)
   scale = scale.reshape(scale_shape)
-  if how.scale_transpose:
-    scale = transpose_array(scale, how.scale_transpose)
-    return TransposedQArray(
-        qvalue, scale, zero_point, how.qtype, original_shape=original_shape
-    )
   if zero_point is not None:
     zero_point = zero_point.reshape(scale_shape)
   return QArray(qvalue.reshape(original_shape), scale, zero_point, how.qtype)
@@ -347,9 +308,6 @@ def dequantize(array: QArray) -> jax.Array:
   Returns:
     The dequantized array with the same dtype as the input's scale.
   """
-  if isinstance(array, TransposedQArray):
-    raise ValueError('TransposedQArray cannot be dequantized.')
-
   qvalue = numerics.convert_from(array.qvalue, array.qtype)
   qvalue = qvalue.astype(array.scale.dtype)
   tiled_axes = get_tiled_axes(array)

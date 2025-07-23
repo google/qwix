@@ -54,7 +54,6 @@ def get_how_to_quantize(
       channelwise_axes=channelwise_axes,
       tiled_axes={},
       batch_axes=batch_axes,
-      scale_transpose=get_transpose(dimension_numbers, for_lhs),
       calibration_method=calibration_method,
   )
 
@@ -101,12 +100,10 @@ def conv_general_dilated(
   dimension_numbers = jax.lax.conv_dimension_numbers(
       lhs_value.shape, rhs_value.shape, dimension_numbers
   )
-  if not isinstance(lhs, qarray.TransposedQArray):
-    transpose = get_transpose(dimension_numbers, for_lhs=True)
-    lhs_scale = qarray.transpose_array(lhs_scale, transpose)
-  if not isinstance(rhs, qarray.TransposedQArray):
-    transpose = get_transpose(dimension_numbers, for_lhs=False)
-    rhs_scale = qarray.transpose_array(rhs_scale, transpose)
+  transpose = get_transpose(dimension_numbers, for_lhs=True)
+  lhs_scale = qarray.transpose_array(lhs_scale, transpose)
+  transpose = get_transpose(dimension_numbers, for_lhs=False)
+  rhs_scale = qarray.transpose_array(rhs_scale, transpose)
 
   if all(x.dtype.name.startswith('int') for x in (lhs_value, rhs_value)):
     acc_type = jnp.int32

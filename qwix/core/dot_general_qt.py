@@ -116,7 +116,6 @@ def dot_general_qt_fwd(
         calibration_method=config.calibration_method,
         batch_axes=(),
     )
-    lhs_how = dataclasses.replace(lhs_how, scale_transpose=None)
     if config.disable_channelwise_axes:
       lhs_how = dataclasses.replace(lhs_how, channelwise_axes=[])
     lhs = qarray.quantize(lhs, lhs_how)
@@ -133,7 +132,6 @@ def dot_general_qt_fwd(
         calibration_method=config.calibration_method,
         batch_axes=(),
     )
-    rhs_how = dataclasses.replace(rhs_how, scale_transpose=None)
     if config.disable_channelwise_axes:
       rhs_how = dataclasses.replace(rhs_how, channelwise_axes=[])
     rhs = qarray.quantize(rhs, rhs_how)

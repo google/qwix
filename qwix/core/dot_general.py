@@ -60,22 +60,13 @@ def get_how_to_quantize(
   )
   tiled_axes = {}
   if tile_size:
-    dimension_numbers = _apply_subchannel(dimension_numbers)
-    ndims = [n + 1 for n in ndims]
     tiled_axes = {axis: tile_size for axis in contracting_axes}
-
-  scale_transpose = None
-  if numerics.can_dequant_on_output(qtype):
-    scale_transpose = _get_scale_transpose(
-        dimension_numbers, ndims, for_lhs, bool(tiled_axes)
-    )
 
   return qarray.HowToQuantize(
       qtype=qtype,
       channelwise_axes=channelwise_axes,
       tiled_axes=tiled_axes,
       batch_axes=batch_axes,
-      scale_transpose=scale_transpose,
       calibration_method=calibration_method,
   )
 
@@ -165,22 +156,20 @@ def _fast_dot_general(
   tiled_sum_axis = None
   if tile_size:
     (lhs_ca, rhs_ca), (lhs_ba, _) = dimension_numbers
-    # Split lhs/rhs_value if not already.
-    if not isinstance(lhs, qarray.TransposedQArray):
-      lhs_value = qarray.split_axis(lhs_value, {lhs_ca[0]: tile_size})
-      if lhs_zero_point is not None:
-        lhs_zero_point = qarray.split_axis(lhs_zero_point, {lhs_ca[0]: 1})
-    if not isinstance(rhs, qarray.TransposedQArray):
-      rhs_value = qarray.split_axis(rhs_value, {rhs_ca[0]: tile_size})
+    # Split lhs/rhs_value.
+    lhs_value = qarray.split_axis(lhs_value, {lhs_ca[0]: tile_size})
+    if lhs_zero_point is not None:
+      lhs_zero_point = qarray.split_axis(lhs_zero_point, {lhs_ca[0]: 1})
+    rhs_value = qarray.split_axis(rhs_value, {rhs_ca[0]: tile_size})
     tiled_sum_axis = len(lhs_ba)
     dimension_numbers = _apply_subchannel(dimension_numbers)
 
-  # Transpose lhs/rhs_scale if not already transposed.
+  # Transpose lhs/rhs_scale.
   ndims = (len(lhs_value.shape), len(rhs_value.shape))
-  if lhs_scale is not None and not isinstance(lhs, qarray.TransposedQArray):
+  if lhs_scale is not None:
     transpose = _get_scale_transpose(dimension_numbers, ndims, True, tile_size)  # pytype: disable=wrong-arg-types
     lhs_scale = qarray.transpose_array(lhs_scale, transpose)
-  if rhs_scale is not None and not isinstance(rhs, qarray.TransposedQArray):
+  if rhs_scale is not None:
     transpose = _get_scale_transpose(dimension_numbers, ndims, False, tile_size)  # pytype: disable=wrong-arg-types
     rhs_scale = qarray.transpose_array(rhs_scale, transpose)
 

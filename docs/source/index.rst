@@ -76,7 +76,6 @@ Relation with AQT
 The design of Qwix was inspired by `AQT <https://github.com/google/aqt>`_ and borrowed many great ideas from it. Here's a brief list of the similarities and the differences.
 
 * Qwix's ``QArray`` is similar to AQT's ``QTensor``, both supporting sub-channel quantization.
-* The PTQ mode in Qwix has a similar behavior and slightly better performance than the serving mode in AQT, due to the ``TransposedQArray`` design.
 * AQT has quantized training support (quantized forwards and quantized backwards), while Qwix's QAT is based on fake quantization, which doesn't improve the training performance.
 * AQT provides drop-in replacements for ``einsum`` and ``dot_general``, each of these having to be configured separately. Qwix provides addtional mechanisms to integrate with a whole model implicitly.
 * Applying static-range quantization is easier in Qwix as it has more in-depth support with Flax.

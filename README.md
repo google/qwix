@@ -110,7 +110,7 @@ Now the `ptq_model` will contain quantized weights. We could verify that.
 {
   'Dense_0': {
     'kernel': WithAux(
-        array=TransposedQArray(
+        array=QArray(
             qvalue=ShapeDtypeStruct(shape=(16, 64), dtype=int8),
             scale=ShapeDtypeStruct(shape=(1, 64), dtype=float32),
             ...
@@ -120,7 +120,7 @@ Now the `ptq_model` will contain quantized weights. We could verify that.
   },
   'Dense_1': {
     'kernel': WithAux(
-        array=TransposedQArray(
+        array=QArray(
             qvalue=ShapeDtypeStruct(shape=(64, 16), dtype=int8),
             scale=ShapeDtypeStruct(shape=(1, 16), dtype=float32),
             ...
@@ -159,8 +159,6 @@ the differences.
 
 *   Qwix's `QArray` is similar to AQT's `QTensor`, both supporting sub-channel
     quantization.
-*   The PTQ mode in Qwix has a similar behavior and slightly better performance
-    than the serving mode in AQT, due to the `TransposedQArray` design.
 *   AQT has quantized training support (quantized forwards and quantized
     backwards), while Qwix's QAT is based on fake quantization, which doesn't
     improve the training performance.
