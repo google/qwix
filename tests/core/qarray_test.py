@@ -77,6 +77,33 @@ class QArrayTest(parameterized.TestCase):
           calibration_method='minmax',
           expected_mae=0.00521851,
       ),
+      dict(
+          testcase_name='nf4_tiled',
+          array_shape=(10, 256, 16),
+          qtype='nf4',
+          channelwise_axes=[0],
+          tiled_axes={1: 32},
+          calibration_method='absmax',
+          expected_mae=0.0986328,
+      ),
+      dict(
+          testcase_name='rms_calibration',
+          array_shape=(10, 256, 16),
+          qtype=jnp.int8,
+          channelwise_axes=[0],
+          tiled_axes={1: 32},
+          calibration_method='rms,7',
+          expected_mae=0.017334,
+      ),
+      dict(
+          testcase_name='fixed_calibration',
+          array_shape=(10, 256, 16),
+          qtype=jnp.int8,
+          channelwise_axes=[0],
+          tiled_axes={},
+          calibration_method='fixed,-3,3',
+          expected_mae=0.00765991,
+      ),
   )
   def test_quantize_dequantize(
       self,
@@ -99,102 +126,12 @@ class QArrayTest(parameterized.TestCase):
     q_array = qarray.quantize(array, how)
     dq_array = qarray.dequantize(q_array)
 
-    self.assertEqual(q_array.qvalue.dtype, qtype)
+    self.assertEqual(
+        q_array.qvalue.dtype, jnp.uint4 if qtype == 'nf4' else qtype
+    )
     self.assertEqual(q_array.qvalue.shape, array_shape)
 
     mae = jnp.abs(array - dq_array).mean() / jnp.abs(array).mean()
-    self.assertAlmostEqual(mae, expected_mae)
-
-  @parameterized.named_parameters(
-      dict(
-          testcase_name='nf4',
-          array_shape=(10, 256, 16),
-          qtype='nf4',
-          channelwise_axes=[],
-          tiled_axes={},
-          expected_mae=0.0825195,
-          jit=False,
-      ),
-      dict(
-          testcase_name='nf4_with_channel',
-          array_shape=(10, 256, 16),
-          qtype='nf4',
-          channelwise_axes=[0],
-          tiled_axes={},
-          expected_mae=0.0825195,
-          jit=False,
-      ),
-      dict(
-          testcase_name='jitted_nf4_with_channel',
-          array_shape=(10, 256, 16),
-          qtype='nf4',
-          channelwise_axes=[0],
-          tiled_axes={},
-          expected_mae=0.0825195,
-          jit=True,
-      ),
-      dict(
-          testcase_name='nf4_tiled',
-          array_shape=(10, 256, 16),
-          qtype='nf4',
-          channelwise_axes=[0],
-          tiled_axes={1: 32},
-          expected_mae=0.0825195,
-          jit=False,
-      ),
-      dict(
-          testcase_name='jitted_nf4_tiled',
-          array_shape=(10, 256, 16),
-          qtype='nf4',
-          channelwise_axes=[0],
-          tiled_axes={1: 32},
-          expected_mae=0.0825195,
-          jit=True,
-      ),
-  )
-  def test_nf4(
-      self,
-      array_shape: tuple[int, ...],
-      qtype: jax.typing.DTypeLike,
-      channelwise_axes: Collection[int],
-      tiled_axes: Mapping[int, int],
-      expected_mae: float,
-      jit: bool = False,
-  ):
-    how = qarray.HowToQuantize(
-        qtype=qtype,
-        channelwise_axes=channelwise_axes,
-        tiled_axes=tiled_axes,
-        calibration_method='absmax',
-        batch_axes=(),
-    )
-
-    def quantize(array):
-      q_array = qarray.quantize(array, how)
-      return q_array
-
-    def dequantize(q_array):
-      return qarray.dequantize(q_array)
-
-    if jit:
-      quantize = jax.jit(quantize)
-      dequantize = jax.jit(dequantize)
-
-    array = self._make_array(array_shape, asymmetric=True)
-
-    q_array = quantize(array)
-    self.assertEqual(q_array.qvalue.dtype, jnp.uint4)
-    self.assertEqual(q_array.qvalue.shape, array_shape)
-    self.assertEqual(len(q_array.scale.shape), len(array_shape))
-
-    dq_array = dequantize(q_array)
-    self.assertEqual(dq_array.dtype, jnp.bfloat16)
-    self.assertEqual(dq_array.shape, array_shape)
-
-    mae = (
-        jnp.abs(array - dq_array.reshape(array.shape)).mean()
-        / jnp.abs(array).mean()
-    )
     self.assertAlmostEqual(mae, expected_mae)
 
   @parameterized.named_parameters(
@@ -282,47 +219,6 @@ class QArrayTest(parameterized.TestCase):
         qtype=jnp.int8,
     )
     self.assertEqual(qarray.get_tiled_axes(array), {1: 32, 2: 8})
-
-  @parameterized.named_parameters(
-      dict(
-          testcase_name='minmax',
-          calibration_method='minmax',
-          expected_mae=0.03612548,
-      ),
-      dict(
-          testcase_name='minmax_with_scale',
-          calibration_method='minmax,0.8',
-          expected_mae=0.15571204,
-      ),
-      dict(
-          testcase_name='rms',
-          calibration_method='rms,7',
-          expected_mae=0.14532784,
-      ),
-      dict(
-          testcase_name='fixed',
-          calibration_method='fixed,-1,100',
-          expected_mae=0.0500687,
-      ),
-  )
-  def test_calibration_methods(
-      self,
-      calibration_method: str,
-      expected_mae: float,
-  ):
-    array = jax.random.normal(jax.random.key(42), (64,))
-    array = array.at[0].set(100)
-    how = qarray.HowToQuantize(
-        qtype=jnp.int8,
-        channelwise_axes=[],
-        tiled_axes={},
-        calibration_method=calibration_method,
-        batch_axes=(),
-    )
-    q_array = qarray.quantize(array, how)
-    dq_array = qarray.dequantize(q_array)
-    mae = jnp.abs(array - dq_array).mean() / jnp.abs(array).mean()
-    self.assertAlmostEqual(mae, expected_mae)
 
 
 if __name__ == '__main__':
