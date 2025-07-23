@@ -166,26 +166,24 @@ class LoraProvider(ptq.PtqProvider):
 
     if isinstance(rhs, ptq.WithAux):  # rhs is quantized.
       weight_name = rhs.weight_name
-      rhs_shape = rhs.array.qvalue.shape
     else:
       weight_name = aux_data.get(rhs, 'weight_name', None)
-      rhs_shape = rhs.shape
 
     if weight_name is None:  # rhs is not a weight.
       return res
 
     # We only support ...a,ab->...b for now.
     assert (
-        len(rhs_shape) == 2
+        len(rhs.shape) == 2
         and tuple(dimension_numbers[0][1]) == (0,)
         and not dimension_numbers[1][1]
-    ), f'Unsupported: {rhs_shape=} {dimension_numbers=}'
+    ), f'Unsupported: {rhs.shape=} {dimension_numbers=}'
 
     lora_a, lora_b, dropout_layer = _get_or_create_lora_params(
         name=weight_name,
         rule=rule,
-        a_shape=(rhs_shape[0], rule.rank),
-        b_shape=(rule.rank, rhs_shape[1]),
+        a_shape=(rhs.shape[0], rule.rank),
+        b_shape=(rule.rank, rhs.shape[1]),
         a_sharding_transpose=(0, None),
         b_sharding_transpose=(None, 1),
     )
@@ -217,10 +215,8 @@ class LoraProvider(ptq.PtqProvider):
 
     if isinstance(rhs, ptq.WithAux):  # rhs is quantized.
       weight_name = rhs.weight_name
-      rhs_shape = rhs.array.qvalue.shape
     else:
       weight_name = aux_data.get(rhs, 'weight_name', None)
-      rhs_shape = rhs.shape
 
     if weight_name is None:  # rhs is not a weight.
       return res
@@ -231,7 +227,7 @@ class LoraProvider(ptq.PtqProvider):
         lora_einsum_str,
         a_sharding_transpose,
         b_sharding_transpose,
-    ) = _parse_einsum_str_for_lora(lhs.shape, rhs_shape, einsum_str, rule.rank)
+    ) = _parse_einsum_str_for_lora(lhs.shape, rhs.shape, einsum_str, rule.rank)
 
     # Store the lora_einsum_str for debugging.
     module = flax_util.get_current_module()
@@ -294,28 +290,26 @@ class LoraProvider(ptq.PtqProvider):
 
     if isinstance(rhs, ptq.WithAux):  # rhs is quantized.
       weight_name = rhs.weight_name
-      rhs_shape = rhs.array.qvalue.shape
     else:
       # Assert that rhs is a weight.
       weight_name = aux_data.get(rhs, 'weight_name')
-      rhs_shape = rhs.shape
 
     dimension_numbers = jax.lax.conv_dimension_numbers(
-        lhs.shape, rhs_shape, dimension_numbers
+        lhs.shape, rhs.shape, dimension_numbers
     )
     # Assert that the out feature is the last dimension of rhs and out.
     assert (
-        dimension_numbers.rhs_spec[0] == len(rhs_shape) - 1
+        dimension_numbers.rhs_spec[0] == len(rhs.shape) - 1
         and dimension_numbers.out_spec[1] == len(lhs.shape) - 1
     ), f'Unsupported: {dimension_numbers=}'
 
     lora_a, lora_b, dropout_layer = _get_or_create_lora_params(
         name=weight_name,
         rule=rule,
-        a_shape=(*rhs_shape[:-1], rule.rank),
-        b_shape=(rule.rank, rhs_shape[-1]),
-        a_sharding_transpose=(*range(len(rhs_shape) - 1), None),
-        b_sharding_transpose=(None, len(rhs_shape) - 1),
+        a_shape=(*rhs.shape[:-1], rule.rank),
+        b_shape=(rule.rank, rhs.shape[-1]),
+        a_sharding_transpose=(*range(len(rhs.shape) - 1), None),
+        b_sharding_transpose=(None, len(rhs.shape) - 1),
     )
 
     if dropout_layer is not None:
