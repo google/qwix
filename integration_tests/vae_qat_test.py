@@ -112,7 +112,7 @@ def loss_fn(model: VAE, x: jax.Array):
 
 
 @nnx.jit
-def train_step(model: VAE, optimizer: nnx.Optimizer, x: jax.Array):
+def train_step(model: VAE, optimizer: nnx.ModelAndOptimizer, x: jax.Array):
   loss, grads = nnx.value_and_grad(loss_fn)(model, x)
   optimizer.update(grads)
 
@@ -149,7 +149,7 @@ def train_and_evaluate(
   logging.info('X_test: %s %s', x_test.shape, x_test.dtype)
 
   steps_per_epoch = x_train.shape[0] // batch_size
-  optimizer = nnx.Optimizer(model, optax.adam(1e-3))
+  optimizer = nnx.ModelAndOptimizer(model, optax.adam(1e-3))
   train_loss = None
   for epoch in range(epochs):
     rng, input_rng = jax.random.split(rng)
