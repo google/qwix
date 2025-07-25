@@ -18,7 +18,7 @@ from typing import Collection
 
 import jax
 from jax import numpy as jnp
-from qwix.core import numerics
+from qwix.core import dot_general
 from qwix.core import qarray
 
 
@@ -94,166 +94,35 @@ def get_how_to_quantize(
   )
 
 
-def _get_transpose(src: str, dst: str) -> list[int | None]:
-  """Returns the transpose list for the given src and dst."""
-  return [src.index(d) if d in src else None for d in dst]
-
-
-def _assert_and_get_single_contraction(info: EinsumInfo) -> str:
-  if len(info.contractions) != 1:
-    raise ValueError('Only a single tiled axis is supported for now.')
-  return next(iter(info.contractions))
-
-
-def _apply_subchannel(info: EinsumInfo) -> EinsumInfo:
-  """Apply subchannel to einsum info."""
-  ca = _assert_and_get_single_contraction(info)
-  # This is faster than putting ca at the beginning of the out string.
-  # NOTE: This may change the numerics! (b/373012343)
-  tiled_idx = next(i for i, a in enumerate(info.out) if a not in info.lhs)
-  assert '*' not in info.lhs + info.rhs + info.out, f'{info=}'
-  return dataclasses.replace(
-      info,
-      # Use "*" as tile_size axis, which becomes the new contraction axis.
-      lhs=info.lhs.replace(ca, ca + '*'),
-      rhs=info.rhs.replace(ca, ca + '*'),
-      out=info.out[:tiled_idx] + ca + info.out[tiled_idx:],
-  )
-
-
-def _fast_einsum(
-    einsum_str: str, lhs: qarray.MaybeQArray, rhs: qarray.MaybeQArray
-):
-  """Einsum in faster path by computing in quantized types first then dequantize."""
-  if isinstance(lhs, qarray.QArray):
-    lhs_value = lhs.qvalue
-    lhs_scale = lhs.scale
-    lhs_zero_point = lhs.zero_point
-    lhs_tile_size = qarray.get_single_tile_size(lhs)
-  else:
-    lhs_value = lhs
-    lhs_scale = None
-    lhs_zero_point = None
-    lhs_tile_size = None
-  if isinstance(rhs, qarray.QArray):
-    rhs_value = rhs.qvalue
-    rhs_scale = rhs.scale
-    rhs_zero_point = rhs.zero_point
-    rhs_tile_size = qarray.get_single_tile_size(rhs)
-  else:
-    rhs_value = rhs
-    rhs_scale = None
-    rhs_zero_point = None
-    rhs_tile_size = None
-
-  if rhs_zero_point is not None:
-    raise ValueError('Asymmetric quantization for rhs is not supported.')
-
-  if lhs_scale is not None and rhs_scale is not None:
-    if lhs_tile_size != rhs_tile_size:
-      # Different tile sizes are not supported for now.
-      raise ValueError(f'{lhs_tile_size=} != {rhs_tile_size=}')
-
-  tile_size = lhs_tile_size or rhs_tile_size
-  lhs_ndim = len(lhs_value.shape)
-  rhs_ndim = len(rhs_value.shape)
-  info = get_einsum_info(einsum_str, (lhs_ndim, rhs_ndim))
-
-  tiled_sum_axis = None
-  einsum_out = info.out
-  if tile_size:
-    contraction = _assert_and_get_single_contraction(info)
-    # Prepare einsum_str, e.g., "gecf,efd->gecd" becomes "gecf*,ef*d->gecfd".
-    tiled_info = _apply_subchannel(info)
-    einsum_out = tiled_info.out
-    tiled_sum_axis = tiled_info.out.index(contraction)
-    einsum_str = tiled_info.lhs + ',' + tiled_info.rhs + '->' + tiled_info.out
-    # Split lhs/rhs_value.
-    lhs_ca = info.lhs.index(contraction)
-    lhs_value = qarray.split_axis(lhs_value, {lhs_ca: tile_size})
-    if lhs_zero_point is not None:
-      lhs_zero_point = qarray.split_axis(lhs_zero_point, {lhs_ca: 1})
-    rhs_ca = info.rhs.index(contraction)
-    rhs_value = qarray.split_axis(rhs_value, {rhs_ca: tile_size})
-
-  # Transpose lhs/rhs_scale.
-  if lhs_scale is not None:
-    transpose = _get_transpose(info.lhs, einsum_out)
-    lhs_scale = qarray.transpose_array(lhs_scale, transpose)
-  if rhs_scale is not None:
-    transpose = _get_transpose(info.rhs, einsum_out)
-    rhs_scale = qarray.transpose_array(rhs_scale, transpose)
-
-  if all(x.dtype.name.startswith('int') for x in (lhs_value, rhs_value)):
-    acc_type = jnp.int32
-  elif lhs_scale is not None:
-    acc_type = lhs_scale.dtype
-  elif rhs_scale is not None:
-    acc_type = rhs_scale.dtype
-  else:
-    acc_type = None  # let jnp.einsum decide.
-
-  res = jnp.einsum(
-      einsum_str, lhs_value, rhs_value, preferred_element_type=acc_type
-  )
-  if lhs_zero_point is not None:
-    # TODO(zhuyunx): This value can be constant folded in SRQ scenarios.
-    res -= jnp.einsum(
-        einsum_str,
-        jnp.broadcast_to(lhs_zero_point, lhs_value.shape),
-        rhs_value,
-        preferred_element_type=acc_type,
-    )
-
-  if lhs_scale is not None:
-    res *= lhs_scale
-  if rhs_scale is not None:
-    res *= rhs_scale
-  if tiled_sum_axis is not None:
-    res = jnp.sum(res, axis=tiled_sum_axis)
-  return res
-
-
-def _slow_einsum(
-    einsum_str: str, lhs: qarray.MaybeQArray, rhs: qarray.MaybeQArray
-) -> jax.Array:
-  """Einsum in slow path by dequantizing first then computing in floating-point types."""
-  if isinstance(lhs, qarray.QArray):
-    lhs_value = qarray.dequantize(lhs)
-  else:
-    lhs_value = lhs
-  if isinstance(rhs, qarray.QArray):
-    rhs_value = qarray.dequantize(rhs)
-  else:
-    rhs_value = rhs
-  return jnp.einsum(einsum_str, lhs_value, rhs_value)
-
-
-def einsum(
-    einsum_str: str, lhs: qarray.MaybeQArray, rhs: qarray.MaybeQArray
-) -> jax.Array:
-  """Quantized einsum that takes jax.Array or QArray and returns floating-point jax.Array.
+def einsum(*args, **kwargs) -> jax.Array:
+  """Quantized einsum that can take QArrays and returns floating-point jax.Array.
 
   Args:
-    einsum_str: The einsum string.
-    lhs: The left-hand side, either a jax.Array or QArray.
-    rhs: The right-hand side, either a jax.Array or QArray.
+    *args: Arguments to einsum.
+    **kwargs: Keyword arguments to einsum.
 
   Returns:
     The result of the einsum, a floating-point jax.Array.
   """
-  can_optimize = True
+  # We want to use jnp.einsum with quantized dot_general to avoid duplicating
+  # the implementation. However, jnp.einsum will check the inputs to be
+  # jax Arrays. To work around this, we send the qvalue to jnp.einsum and
+  # restore the actual QArray in a wrapper. preferred_element_type needs to be
+  # set so that jnp.einsum won't convert the output to some qvalue types.
+  args = list(args)
+  qvalue_to_qarray = {}
+  for i, arg in enumerate(args):
+    if isinstance(arg, qarray.QArray):
+      args[i] = arg.qvalue
+      qvalue_to_qarray[id(arg.qvalue)] = arg
+      kwargs['preferred_element_type'] = arg.scale.dtype
 
-  if isinstance(lhs, qarray.QArray) and not numerics.can_dequant_on_output(
-      lhs.qtype
-  ):
-    can_optimize = False
-  if isinstance(rhs, qarray.QArray) and not numerics.can_dequant_on_output(
-      rhs.qtype
-  ):
-    can_optimize = False
+  def _dot_general(*args, **kwargs):
+    args = [qvalue_to_qarray.pop(id(a), a) for a in args]
+    return dot_general.dot_general(*args, **kwargs)
 
-  if can_optimize:
-    return _fast_einsum(einsum_str, lhs, rhs)
-  else:
-    return _slow_einsum(einsum_str, lhs, rhs)
+  # Disabling JIT is necessary so that args in _dot_general are not tracers.
+  with jax.disable_jit():
+    out = jnp.einsum(*args, _dot_general=_dot_general, **kwargs)
+  assert not qvalue_to_qarray, 'All qvalues should be consumed.'
+  return out
