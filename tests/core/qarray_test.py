@@ -91,7 +91,7 @@ class QArrayTest(parameterized.TestCase):
           array_shape=(10, 256, 16),
           qtype=jnp.int8,
           channelwise_axes=[0],
-          tiled_axes={1: 32},
+          tiled_axes={1: 1 / 8},
           calibration_method='rms,7',
           expected_mae=0.017334,
       ),

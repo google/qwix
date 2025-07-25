@@ -52,7 +52,7 @@ def get_how_to_quantize(
     ndims: tuple[int, int],
     for_lhs: bool,
     qtype: jax.typing.DTypeLike,
-    tile_size: int | None,
+    tile_size: int | float | None,
     calibration_method: str,
     batch_axes: Collection[int],
 ) -> qarray.HowToQuantize:

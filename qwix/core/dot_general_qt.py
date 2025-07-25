@@ -32,7 +32,7 @@ class DotGeneralQtConfig:
   lhs_qtype: jax.typing.DTypeLike | None = None
   rhs_qtype: jax.typing.DTypeLike | None = None
   bwd_qtype: jax.typing.DTypeLike | None = None
-  tile_size: int | None = None
+  tile_size: int | float | None = None
   lhs_calibration_method: str = 'absmax'
   lhs_batch_axes: Collection[int] = ()
   lhs_quant_stat_name: str | None = None
