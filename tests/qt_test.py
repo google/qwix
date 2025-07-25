@@ -59,7 +59,6 @@ class QtTest(absltest.TestCase):
 
   def test_srq_jit_grad(self):
     """Test that the grad of SRQ can be taken inside a jitted function."""
-    self.skipTest("We will add SRQ implementation as follow up.")
     dense = nn.Dense(features=10, param_dtype=jnp.bfloat16)
     qt_provider = qt.QtProvider([
         qconfig.QuantizationRule(
@@ -99,7 +98,6 @@ class QtTest(absltest.TestCase):
 
   def test_srq_jit_grad_nnx(self):
     """Test SRQ on NNX module."""
-    self.skipTest("We will add SRQ implementation as follow up.")
     linear = nnx.Linear(12, 10, rngs=nnx.Rngs(0))
     qt_provider = qt.QtProvider([
         qconfig.QuantizationRule(

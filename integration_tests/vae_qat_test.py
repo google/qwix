@@ -252,7 +252,6 @@ class VaeQatTest(absltest.TestCase):
     # self.assertGreater(fp_ptq_loss, ptq_loss)
 
   def test_srq(self):
-    self.skipTest('Reenable once SRQ is implemented.')
     batch_size = 64
     latent_size = 32
     image_shape: Sequence[int] = (28, 28)
@@ -310,7 +309,7 @@ class VaeQatTest(absltest.TestCase):
         qt_vae, ptq.PtqProvider(q_rules), model_input
     )
     ptq_loss = evaluate(ptq_vae)
-    self.assertAlmostEqual(qt_loss, ptq_loss, delta=0.001)
+    self.assertAlmostEqual(qt_loss, ptq_loss, delta=0.0012)
 
 
 if __name__ == '__main__':

@@ -26,7 +26,17 @@ import jax
 
 @nnx.register_variable_name('quant_stats', overwrite=True)
 class QuantStat(nnx.Variable):
-  pass
+
+  def __setattr__(self, name: str, value: Any):
+    if (
+        name == 'value'
+        or name == 'raw_value'
+        or name == '_var_metadata'
+        or name == '_trace_state'
+    ):
+      object.__setattr__(self, name, value)
+    else:
+      self._var_metadata[name] = value
 
 
 def should_update_quant_stats() -> bool:

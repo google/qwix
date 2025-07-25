@@ -86,7 +86,6 @@ class PtqTest(parameterized.TestCase):
 
   @parameterized.parameters("absmax", "minmax", "rms,7")
   def test_nn_srq(self, act_calibration_method):
-    self.skipTest("Reenable once SRQ is implemented.")
     dense = nn.Dense(features=5)
     q_rules = [
         qconfig.QuantizationRule(
@@ -283,7 +282,6 @@ class PtqTest(parameterized.TestCase):
 
   @parameterized.parameters("absmax", "minmax")
   def test_nnx_srq(self, act_calibration_method):
-    self.skipTest("Reenable once SRQ is implemented.")
     q_rules = [
         qconfig.QuantizationRule(
             module_path=".*",
