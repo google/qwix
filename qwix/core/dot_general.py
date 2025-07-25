@@ -119,7 +119,8 @@ def _fast_dot_general(
     lhs: qarray.MaybeQArray,
     rhs: qarray.MaybeQArray,
     dimension_numbers: jax.lax.DotDimensionNumbers,
-    out_sharding: jax.sharding.NamedSharding | None = None,
+    preferred_element_type: jax.typing.DTypeLike | None = None,
+    **kwargs,
 ) -> jax.Array:
   """Dot general in optimized path by computing in quantized types first then dequantize."""
   if isinstance(lhs, qarray.QArray):
@@ -143,8 +144,8 @@ def _fast_dot_general(
     rhs_zero_point = None
     rhs_tile_size = None
 
-  if rhs_zero_point is not None:
-    raise ValueError('Asymmetric quantization for rhs is not supported.')
+  if lhs_zero_point is not None and rhs_zero_point is not None:
+    raise ValueError('Only one operand can be asymmetric.')
 
   if lhs_scale is not None and rhs_scale is not None:
     if lhs_tile_size != rhs_tile_size:
@@ -161,6 +162,8 @@ def _fast_dot_general(
     if lhs_zero_point is not None:
       lhs_zero_point = qarray.split_axis(lhs_zero_point, {lhs_ca[0]: 1})
     rhs_value = qarray.split_axis(rhs_value, {rhs_ca[0]: tile_size})
+    if rhs_zero_point is not None:
+      rhs_zero_point = qarray.split_axis(rhs_zero_point, {rhs_ca[0]: 1})
     tiled_sum_axis = len(lhs_ba)
     dimension_numbers = _apply_subchannel(dimension_numbers)
 
@@ -173,21 +176,21 @@ def _fast_dot_general(
     transpose = _get_scale_transpose(dimension_numbers, ndims, False, tile_size)  # pytype: disable=wrong-arg-types
     rhs_scale = qarray.transpose_array(rhs_scale, transpose)
 
-  if all(x.dtype.name.startswith('int') for x in (lhs_value, rhs_value)):
-    acc_type = jnp.int32
+  # We want to override the preferred_element_type to int32 for int x int
+  # dot_general, or bfloat16/float32 for fp x fp dot_general.
+  if all('int' in x.dtype.name for x in (lhs_value, rhs_value)):
+    preferred_element_type = jnp.int32
   elif lhs_scale is not None:
-    acc_type = lhs_scale.dtype
+    preferred_element_type = lhs_scale.dtype
   elif rhs_scale is not None:
-    acc_type = rhs_scale.dtype
-  else:
-    acc_type = None  # let jax.lax.dot_general decide.
+    preferred_element_type = rhs_scale.dtype
 
   res = jax.lax.dot_general(
       lhs_value,
       rhs_value,
       dimension_numbers=dimension_numbers,
-      preferred_element_type=acc_type,
-      out_sharding=out_sharding,
+      preferred_element_type=preferred_element_type,
+      **kwargs,
   )
 
   if lhs_zero_point is not None:
@@ -196,8 +199,17 @@ def _fast_dot_general(
         jnp.broadcast_to(lhs_zero_point, lhs_value.shape),
         rhs_value,
         dimension_numbers=dimension_numbers,
-        preferred_element_type=acc_type,
-        out_sharding=out_sharding,
+        preferred_element_type=preferred_element_type,
+        **kwargs,
+    )
+
+  if rhs_zero_point is not None:
+    res -= jax.lax.dot_general(
+        lhs_value,
+        jnp.broadcast_to(rhs_zero_point, rhs_value.shape),
+        dimension_numbers=dimension_numbers,
+        preferred_element_type=preferred_element_type,
+        **kwargs,
     )
 
   if lhs_scale is not None:
@@ -213,7 +225,7 @@ def _slow_dot_general(
     lhs: qarray.MaybeQArray,
     rhs: qarray.MaybeQArray,
     dimension_numbers: jax.lax.DotDimensionNumbers,
-    out_sharding: jax.sharding.NamedSharding | None = None,
+    **kwargs,
 ) -> jax.Array:
   """Dot general in slow path by dequantizing first then computing in floating-point types."""
   if isinstance(lhs, qarray.QArray):
@@ -224,16 +236,16 @@ def _slow_dot_general(
     rhs_value = qarray.dequantize(rhs)
   else:
     rhs_value = rhs
-  return jax.lax.dot_general(
-      lhs_value, rhs_value, dimension_numbers, out_sharding=out_sharding
-  )
+  return jax.lax.dot_general(lhs_value, rhs_value, dimension_numbers, **kwargs)
 
 
 def dot_general(
     lhs: qarray.MaybeQArray,
     rhs: qarray.MaybeQArray,
     dimension_numbers: jax.lax.DotDimensionNumbers,
-    out_sharding: jax.sharding.NamedSharding | None = None,
+    precision: jax.lax.PrecisionLike = None,
+    preferred_element_type: jax.typing.DTypeLike | None = None,
+    **kwargs,
 ) -> jax.Array:
   """Quantized jax.lax.dot_general.
 
@@ -241,7 +253,9 @@ def dot_general(
     lhs: The left-hand side, either a jax.Array or QArray.
     rhs: The right-hand side, either a jax.Array or QArray.
     dimension_numbers: The dimension numbers passed to dot_general.
-    out_sharding: Sharding for output tensors.
+    precision: The precision for jax.lax.dot_general.
+    preferred_element_type: The preferred element type for jax.lax.dot_general.
+    **kwargs: Additional keyword arguments to dot_general.
 
   Returns:
     a floating-point jax.Array.
@@ -259,9 +273,19 @@ def dot_general(
 
   if can_optimize:
     return _fast_dot_general(
-        lhs, rhs, dimension_numbers, out_sharding=out_sharding
+        lhs,
+        rhs,
+        dimension_numbers,
+        precision=precision,
+        preferred_element_type=preferred_element_type,
+        **kwargs,
     )
   else:
     return _slow_dot_general(
-        lhs, rhs, dimension_numbers, out_sharding=out_sharding
+        lhs,
+        rhs,
+        dimension_numbers,
+        precision=precision,
+        preferred_element_type=preferred_element_type,
+        **kwargs,
     )
