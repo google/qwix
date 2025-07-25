@@ -55,7 +55,9 @@ class QuantizationRule:
   bwd_qtype: jax.typing.DTypeLike | None = None
 
   # If set, enable subchannel for the contraction axis with the given tile size.
-  tile_size: int | None = None
+  # If it's a float, it must be "1 / tile_count" and the actual tile size will
+  # be round(axis_size * tile_size).
+  tile_size: int | float | None = None
 
   # If set, enable static-range quantization for input activations. Quantization
   # statistics for the input activations are collected and will appear in the

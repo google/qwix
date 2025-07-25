@@ -65,8 +65,12 @@ class HowToQuantize:
   # as setting their tile sizes to 1 in tiled_axes.
   channelwise_axes: Collection[int]
   # Tiled axes have subchannel quantization enabled. The value is a mapping
-  # from tiled axis to tile size.
-  tiled_axes: Mapping[int, int]
+  # from the tiled axis to the tile size. If the tile size is a float, it has
+  # to be "1 / tile_count" and the actual tile size will be
+  # round(axis_size * tile_size). Note that 1 and 1.0 have very different
+  # meanings: a tile size of 1 means to use per-channel scale, while a
+  # tile size of 1.0 means to use shared scale.
+  tiled_axes: Mapping[int, int | float]
   # Batch axes have shared scales, but are treated differently in calibration,
   # i.e., the mean of quant stats is calculated along the batch axes. An axis
   # can appear only in one of channelwise_axes, tiled_axes, or batch_axes.
@@ -89,9 +93,12 @@ def get_scale_shape(array_shape: ShapeT, how: HowToQuantize) -> ShapeT:
     if axis in how.channelwise_axes:
       scale_shape.append(dim)
     elif axis in how.tiled_axes:
-      if dim % how.tiled_axes[axis] != 0:
+      tile_size = how.tiled_axes[axis]
+      if isinstance(tile_size, float):
+        tile_size = round(dim * tile_size)
+      if dim % tile_size != 0:
         raise ValueError(f'{array_shape} cannot be tiled as {how.tiled_axes}.')
-      scale_shape.append(dim // how.tiled_axes[axis])
+      scale_shape.append(dim // tile_size)
     else:
       scale_shape.append(1)
   return tuple(scale_shape)
@@ -118,15 +125,20 @@ def transpose_array(
   return array
 
 
-def split_axis(array: jax.Array, tiled_axes: Mapping[int, int]) -> jax.Array:
+def split_axis(
+    array: jax.Array, tiled_axes: Mapping[int, int | float]
+) -> jax.Array:
   """Reshape the array where the axis is split into (tile_count, tile_size)."""
   new_shape = []
   for axis, dim in enumerate(array.shape):
     if axis in tiled_axes:
-      if dim % tiled_axes[axis] != 0:
+      tile_size = tiled_axes[axis]
+      if isinstance(tile_size, float):
+        tile_size = round(dim * tile_size)
+      if dim % tile_size != 0:
         raise ValueError(f'{array.shape} cannot be tiled as {tiled_axes}.')
-      new_shape.append(dim // tiled_axes[axis])
-      new_shape.append(tiled_axes[axis])
+      new_shape.append(dim // tile_size)
+      new_shape.append(tile_size)
     else:
       new_shape.append(dim)
   return array.reshape(new_shape)
@@ -342,7 +354,7 @@ def dequantize(array: QArray) -> jax.Array:
 def clip_to_calibration(
     array: jax.Array,
     calibration: Mapping[str, jax.Array],
-    tiled_axes: Mapping[int, int],
+    tiled_axes: Mapping[int, int | float],
 ) -> jax.Array:
   """Clips an array to the calibration range."""
   original_shape = array.shape
