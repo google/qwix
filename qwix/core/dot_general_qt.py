@@ -16,6 +16,7 @@
 from collections.abc import Collection
 import dataclasses
 import functools
+from typing import Any, Callable
 
 import jax
 import numpy as np
@@ -32,9 +33,16 @@ class DotGeneralQtConfig:
   rhs_qtype: jax.typing.DTypeLike | None = None
   bwd_qtype: jax.typing.DTypeLike | None = None
   tile_size: int | None = None
-  calibration_method: str = 'absmax'
+  lhs_calibration_method: str = 'absmax'
+  lhs_batch_axes: Collection[int] = ()
+  lhs_quant_stat_name: str | None = None
+  rhs_calibration_method: str = 'absmax'
+  rhs_batch_axes: Collection[int] = ()
+  rhs_quant_stat_name: str | None = None
+  bwd_calibration_method: str = 'absmax'
   disable_channelwise_axes: bool = False
   use_original_residuals: bool = False
+  collect_quant_stat: Callable[..., Any] | None = None
 
 
 def _get_remaining_axes(
@@ -95,6 +103,63 @@ def _update_dimension_numbers_for_backward_internal(
   return dims, out_transpose_axes
 
 
+def _quantize_operand(
+    operand: jax.Array,
+    *,
+    for_lhs: bool,
+    dimension_numbers: jax.lax.DotDimensionNumbers,
+    ndims: tuple[int, int],
+    config: DotGeneralQtConfig,
+) -> tuple[qarray.MaybeQArray, qarray.MaybeQArray]:
+  """Quantizes a single operand for the forward pass if configured to do so.
+
+  Args:
+    operand: The array to quantize (either LHS or RHS).
+    for_lhs: A boolean indicating if this is the LHS operand.
+    dimension_numbers: The dot_general dimension numbers.
+    ndims: A tuple of (lhs.ndim, rhs.ndim).
+    config: The quantization configuration.
+
+  Returns:
+    A tuple of (quantized_operand, residual_operand).
+  """
+  if for_lhs:
+    qtype = config.lhs_qtype
+    calibration_method = config.lhs_calibration_method
+    batch_axes = config.lhs_batch_axes
+    quant_stat_name = config.lhs_quant_stat_name
+  else:
+    qtype = config.rhs_qtype
+    calibration_method = config.rhs_calibration_method
+    batch_axes = config.rhs_batch_axes
+    quant_stat_name = config.rhs_quant_stat_name
+
+  if not (qtype and numerics.should_quantize(operand.dtype)):
+    return operand, operand
+
+  how = dot_general.get_how_to_quantize(
+      dimension_numbers=dimension_numbers,
+      ndims=ndims,
+      for_lhs=for_lhs,
+      qtype=qtype,
+      tile_size=config.tile_size,
+      calibration_method=calibration_method,
+      batch_axes=batch_axes,
+  )
+  if config.disable_channelwise_axes:
+    how = dataclasses.replace(how, channelwise_axes=[])
+
+  calibration = qarray.calibrate(operand, how)
+  if config.collect_quant_stat and quant_stat_name:
+    calibration = config.collect_quant_stat(quant_stat_name, calibration)
+  scale, zero_point = qarray.compute_scale_zero_point(calibration, qtype)
+  q_operand = qarray.quantize_with_scale_zero_point(
+      operand, how, scale, zero_point
+  )
+
+  return q_operand, operand if config.use_original_residuals else q_operand
+
+
 def dot_general_qt_fwd(
     lhs: jax.Array,
     rhs: jax.Array,
@@ -103,40 +168,20 @@ def dot_general_qt_fwd(
 ):
   """Forward pass for dot_general_qt custom VJP."""
   ndims = (lhs.ndim, rhs.ndim)
-  res_lhs, res_rhs = lhs, rhs
-
-  # Quantize lhs and rhs.
-  if config.lhs_qtype and numerics.should_quantize(lhs.dtype):
-    lhs_how = dot_general.get_how_to_quantize(
-        dimension_numbers=dimension_numbers,
-        ndims=ndims,
-        for_lhs=True,
-        qtype=config.lhs_qtype,
-        tile_size=config.tile_size,
-        calibration_method=config.calibration_method,
-        batch_axes=(),
-    )
-    if config.disable_channelwise_axes:
-      lhs_how = dataclasses.replace(lhs_how, channelwise_axes=[])
-    lhs = qarray.quantize(lhs, lhs_how)
-    if not config.use_original_residuals:
-      res_lhs = lhs
-
-  if config.rhs_qtype and numerics.should_quantize(rhs.dtype):
-    rhs_how = dot_general.get_how_to_quantize(
-        dimension_numbers=dimension_numbers,
-        ndims=ndims,
-        for_lhs=False,
-        qtype=config.rhs_qtype,
-        tile_size=config.tile_size,
-        calibration_method=config.calibration_method,
-        batch_axes=(),
-    )
-    if config.disable_channelwise_axes:
-      rhs_how = dataclasses.replace(rhs_how, channelwise_axes=[])
-    rhs = qarray.quantize(rhs, rhs_how)
-    if not config.use_original_residuals:
-      res_rhs = rhs
+  lhs, res_lhs = _quantize_operand(
+      lhs,
+      for_lhs=True,
+      dimension_numbers=dimension_numbers,
+      ndims=ndims,
+      config=config,
+  )
+  rhs, res_rhs = _quantize_operand(
+      rhs,
+      for_lhs=False,
+      dimension_numbers=dimension_numbers,
+      ndims=ndims,
+      config=config,
+  )
 
   primal_out = dot_general.dot_general(lhs, rhs, dimension_numbers)
   return primal_out, (res_lhs, res_rhs)
@@ -167,7 +212,7 @@ def dot_general_qt_bwd(
           for_lhs=True,
           qtype=config.bwd_qtype,
           tile_size=config.tile_size,
-          calibration_method=config.calibration_method,
+          calibration_method=config.bwd_calibration_method,
           batch_axes=(),
       )
       if config.disable_channelwise_axes:
@@ -181,7 +226,7 @@ def dot_general_qt_bwd(
           for_lhs=False,
           qtype=config.bwd_qtype,
           tile_size=config.tile_size,
-          calibration_method=config.calibration_method,
+          calibration_method=config.bwd_calibration_method,
           batch_axes=(),
       )
       if config.disable_channelwise_axes:

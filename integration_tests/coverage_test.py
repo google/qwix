@@ -81,7 +81,7 @@ class Transformer(nn.Module):
 class CoverageTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
-      # TODO(jiwonshin): Re-enable once SRQ is implemented.
+      # TODO(jiwonshin): Re-enable once conv_general is implemented.
       # dict(
       #     testcase_name='cnn_srq',
       #     model=CNN(),

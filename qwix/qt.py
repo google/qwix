@@ -22,6 +22,8 @@ import jax
 from jax import numpy as jnp
 from jax.experimental import pallas as pl
 from qwix import aux_data
+from qwix import averaging
+from qwix import flax_util
 from qwix import interception
 from qwix import qconfig
 from qwix.core import dot_general_qt
@@ -31,17 +33,24 @@ class QtProvider(qconfig.QuantizationProvider):
   """Quantization provider for Quantized Training(QT)."""
 
   def __init__(
-      self, rules, disable_channelwise_axes=True, use_original_residuals=False
+      self,
+      rules,
+      bwd_callibration_method='absmax',
+      disable_channelwise_axes=True,
+      use_original_residuals=False,
   ):
     """Initializes the QtProvider.
 
     Args:
       rules: The quantization rules.
+      bwd_callibration_method: The calibration method to use for the backward
+        pass.
       disable_channelwise_axes: Whether to disable channelwise axes.
       use_original_residuals: Whether to use original residuals instead of
         quantized residuals.
     """
     super().__init__(rules=rules)
+    self._bwd_calibration_method = bwd_callibration_method
     self._disable_channelwise_axes = disable_channelwise_axes
     self._use_original_residuals = use_original_residuals
 
@@ -56,7 +65,7 @@ class QtProvider(qconfig.QuantizationProvider):
       out_sharding=None,
   ) -> jax.Array:
     """QT dot_general."""
-    rule, _ = self._get_current_rule_and_op_id('dot_general')
+    rule, op_id = self._get_current_rule_and_op_id('dot_general')
     if rule is None or rule.weight_qtype is None:
       return jax.lax.dot_general(
           lhs,
@@ -66,18 +75,7 @@ class QtProvider(qconfig.QuantizationProvider):
           preferred_element_type=preferred_element_type,
           out_sharding=out_sharding,
       )
-    config = dot_general_qt.DotGeneralQtConfig(
-        lhs_qtype=rule.act_qtype,
-        rhs_qtype=rule.weight_qtype
-        if aux_data.get(rhs, 'weight_name', None)
-        else rule.act_qtype,
-        bwd_qtype=rule.bwd_qtype,
-        tile_size=rule.tile_size,
-        # TODO(jiwonshin): use separate calibration methods for lhs and rhs.
-        calibration_method='absmax',
-        disable_channelwise_axes=self._disable_channelwise_axes,
-        use_original_residuals=self._use_original_residuals,
-    )
+    config = self._create_dot_general_qt_config(rule, op_id, rhs)
     return dot_general_qt.dot_general_qt(lhs, rhs, dimension_numbers, config)
 
   def einsum(
@@ -90,7 +88,7 @@ class QtProvider(qconfig.QuantizationProvider):
       out_sharding=None,
   ) -> jax.Array:
     """QT einsum."""
-    rule, _ = self._get_current_rule_and_op_id('einsum')
+    rule, op_id = self._get_current_rule_and_op_id('einsum')
     if rule is None or rule.weight_qtype is None:
       return jnp.einsum(
           einsum_str,
@@ -103,30 +101,21 @@ class QtProvider(qconfig.QuantizationProvider):
     if not isinstance(einsum_str, str) or len(operands) != 2:
       raise ValueError(f'Unsupported einsum format: {einsum_str=} {operands=}')
     _, rhs = operands
+    config = self._create_dot_general_qt_config(rule, op_id, rhs)
 
-    config = dot_general_qt.DotGeneralQtConfig(
-        lhs_qtype=rule.act_qtype,
-        rhs_qtype=rule.weight_qtype
-        if aux_data.get(rhs, 'weight_name', None)
-        else rule.act_qtype,
-        bwd_qtype=rule.bwd_qtype,
-        tile_size=rule.tile_size,
-        # TODO(jiwonshin): use separate calibration methods for lhs and rhs.
-        calibration_method='absmax',
-        disable_channelwise_axes=self._disable_channelwise_axes,
-        use_original_residuals=self._use_original_residuals,
-    )
     custom_dot_general = lambda *args, **kwargs: dot_general_qt.dot_general_qt(
         *args[:3], config
     )
-    return jnp.einsum(
-        einsum_str,
-        *operands,
-        precision=precision,
-        preferred_element_type=preferred_element_type,
-        _dot_general=custom_dot_general,
-        out_sharding=out_sharding,
-    )
+
+    with jax.disable_jit():
+      return jnp.einsum(
+          einsum_str,
+          *operands,
+          precision=precision,
+          preferred_element_type=preferred_element_type,
+          _dot_general=custom_dot_general,
+          out_sharding=out_sharding,
+      )
 
   def nn_param(
       self,
@@ -186,3 +175,69 @@ class QtProvider(qconfig.QuantizationProvider):
           aux_data.clear(node.value)
           aux_data.set(node.value, 'weight_name', path[-1])
     return model, model_args, model_kwargs
+
+  def _collect_quant_stat(
+      self,
+      name: str,
+      calibration: averaging.Calibration,
+  ) -> averaging.Calibration:
+    """Collects the quantization statistics."""
+    aggregator = averaging.SimpleMovingAverage()
+    quant_stat = flax_util.get_or_create_variable(
+        'quant_stats', name, lambda: aggregator.init(calibration)
+    )
+
+    if flax_util.should_update_quant_stats():
+      quant_stat.value = aggregator.update(quant_stat.value, calibration)
+
+    return aggregator.get_calibration(quant_stat.value, calibration)
+
+  def _create_dot_general_qt_config(
+      self, rule: qconfig.QuantizationRule, op_id: str, rhs: jax.Array
+  ) -> dot_general_qt.DotGeneralQtConfig:
+    """Creates a DotGeneralQtConfig for dot_general and einsum."""
+    # LHS is always considered an activation for quantization purposes.
+    lhs_qtype = None
+    lhs_quant_stat_name = None
+    lhs_calibration_method = None
+    lhs_batch_axes = ()
+    if rule.act_qtype is not None:
+      lhs_qtype = rule.act_qtype
+      lhs_calibration_method = rule.act_calibration_method
+      if rule.act_static_scale:
+        lhs_quant_stat_name = f'{op_id}_lhs'
+        lhs_batch_axes = rule.act_batch_axes
+
+    # RHS configs based on whether it's a weight or an activation.
+    rhs_qtype = None
+    rhs_quant_stat_name = None
+    rhs_calibration_method = None
+    rhs_batch_axes = ()
+    is_weight = aux_data.get(rhs, 'weight_name', None) is not None
+
+    if is_weight:
+      rhs_qtype = rule.weight_qtype
+      rhs_calibration_method = rule.weight_calibration_method
+    elif rule.act_qtype is not None:
+      rhs_qtype = rule.act_qtype
+      rhs_calibration_method = rule.act_calibration_method
+      if rule.act_static_scale:
+        rhs_quant_stat_name = f'{op_id}_rhs'
+        rhs_batch_axes = rule.act_batch_axes
+
+    return dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype=lhs_qtype,
+        rhs_qtype=rhs_qtype,
+        bwd_qtype=rule.bwd_qtype,
+        tile_size=rule.tile_size,
+        lhs_calibration_method=lhs_calibration_method,
+        lhs_batch_axes=lhs_batch_axes,
+        lhs_quant_stat_name=lhs_quant_stat_name,
+        rhs_calibration_method=rhs_calibration_method,
+        rhs_batch_axes=rhs_batch_axes,
+        rhs_quant_stat_name=rhs_quant_stat_name,
+        bwd_calibration_method=self._bwd_calibration_method,
+        collect_quant_stat=self._collect_quant_stat,
+        disable_channelwise_axes=self._disable_channelwise_axes,
+        use_original_residuals=self._use_original_residuals,
+    )
