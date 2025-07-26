@@ -13,7 +13,8 @@
 # limitations under the License.
 """Quantized training (QT) support."""
 
-from typing import Any, Callable, Sequence
+import dataclasses
+from typing import Any, Callable, Sequence, Union
 
 from flax import linen as nn
 from flax import nnx
@@ -29,30 +30,34 @@ from qwix import qconfig
 from qwix.core import dot_general_qt
 
 
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class QtRule(qconfig.QuantizationRule):
+  """QuantizationRule with all settings specific to Quantized Training (QT)."""
+
+  bwd_qtype: jax.typing.DTypeLike | None = None
+  bwd_calibration_method: str = 'absmax'
+  bwd_drhs_tile_size: int | None = None
+  disable_channelwise_axes: bool = True
+  use_original_residuals: bool = False
+
+
 class QtProvider(qconfig.QuantizationProvider):
   """Quantization provider for Quantized Training(QT)."""
 
-  def __init__(
-      self,
-      rules,
-      bwd_callibration_method='absmax',
-      disable_channelwise_axes=True,
-      use_original_residuals=False,
-  ):
+  def __init__(self, rules: Sequence[Union[qconfig.QuantizationRule, QtRule]]):
     """Initializes the QtProvider.
 
     Args:
-      rules: The quantization rules.
-      bwd_callibration_method: The calibration method to use for the backward
-        pass.
-      disable_channelwise_axes: Whether to disable channelwise axes.
-      use_original_residuals: Whether to use original residuals instead of
-        quantized residuals.
+      rules: A sequence of QuantizationRule or QtRule objects. Plain
+        QuantizationRule instances will be automatically converted to QtRule
+        with default settings.
     """
-    super().__init__(rules=rules)
-    self._bwd_calibration_method = bwd_callibration_method
-    self._disable_channelwise_axes = disable_channelwise_axes
-    self._use_original_residuals = use_original_residuals
+    processed_rules = []
+    for rule in rules:
+      if not isinstance(rule, QtRule):
+        rule = QtRule(**dataclasses.asdict(rule))
+      processed_rules.append(rule)
+    super().__init__(rules=processed_rules)
 
   def dot_general(
       self,
@@ -66,6 +71,8 @@ class QtProvider(qconfig.QuantizationProvider):
   ) -> jax.Array:
     """QT dot_general."""
     rule, op_id = self._get_current_rule_and_op_id('dot_general')
+    if not isinstance(rule, QtRule):
+      rule = QtRule(**dataclasses.asdict(rule))
     if rule is None or rule.weight_qtype is None:
       return jax.lax.dot_general(
           lhs,
@@ -89,6 +96,8 @@ class QtProvider(qconfig.QuantizationProvider):
   ) -> jax.Array:
     """QT einsum."""
     rule, op_id = self._get_current_rule_and_op_id('einsum')
+    if not isinstance(rule, QtRule):
+      rule = QtRule(**dataclasses.asdict(rule))
     if rule is None or rule.weight_qtype is None:
       return jnp.einsum(
           einsum_str,
@@ -193,7 +202,7 @@ class QtProvider(qconfig.QuantizationProvider):
     return aggregator.get_calibration(quant_stat.value, calibration)
 
   def _create_dot_general_qt_config(
-      self, rule: qconfig.QuantizationRule, op_id: str, rhs: jax.Array
+      self, rule: QtRule, op_id: str, rhs: jax.Array
   ) -> dot_general_qt.DotGeneralQtConfig:
     """Creates a DotGeneralQtConfig for dot_general and einsum."""
     # LHS is always considered an activation for quantization purposes.
@@ -229,6 +238,7 @@ class QtProvider(qconfig.QuantizationProvider):
         lhs_qtype=lhs_qtype,
         rhs_qtype=rhs_qtype,
         bwd_qtype=rule.bwd_qtype,
+        bwd_drhs_tile_size=rule.bwd_drhs_tile_size,
         tile_size=rule.tile_size,
         lhs_calibration_method=lhs_calibration_method,
         lhs_batch_axes=lhs_batch_axes,
@@ -236,8 +246,8 @@ class QtProvider(qconfig.QuantizationProvider):
         rhs_calibration_method=rhs_calibration_method,
         rhs_batch_axes=rhs_batch_axes,
         rhs_quant_stat_name=rhs_quant_stat_name,
-        bwd_calibration_method=self._bwd_calibration_method,
+        bwd_calibration_method=rule.bwd_calibration_method,
         collect_quant_stat=self._collect_quant_stat,
-        disable_channelwise_axes=self._disable_channelwise_axes,
-        use_original_residuals=self._use_original_residuals,
+        disable_channelwise_axes=rule.disable_channelwise_axes,
+        use_original_residuals=rule.use_original_residuals,
     )
