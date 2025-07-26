@@ -259,6 +259,98 @@ class PallasTest(parameterized.TestCase):
         )
     )
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="weight_only_single_scale",
+          lhs_shape=(8, 128),
+          lhs_dtype=jnp.bfloat16,
+          lhs_scale_shape=None,
+          rhs_shape=(256, 128),
+          rhs_scale_shape=(1, 1),
+          dimension_numbers=(([1], [1]), ([], [])),
+      ),
+      # Not implemented: Broadcast in both sublanes and lanes.
+      #   "vector.broadcast" (vector<1x1xbf16>) -> vector<8x256xbf16>
+      # dict(
+      #     testcase_name="single_scale_bf16",
+      #     lhs_shape=(8, 128),
+      #     lhs_scale_shape=(1, 1),
+      #     lhs_scale_dtype=jnp.bfloat16,
+      #     rhs_shape=(256, 128),
+      #     rhs_scale_shape=(1, 1),
+      #     rhs_scale_dtype=jnp.bfloat16,
+      #     dimension_numbers=(([1], [1]), ([], [])),
+      # ),
+      dict(
+          testcase_name="channelwise_fp32",
+          lhs_shape=(8, 128),
+          lhs_scale_shape=(8, 1),
+          rhs_shape=(128, 256),
+          rhs_scale_shape=(1, 256),
+          dimension_numbers=(([1], [0]), ([], [])),
+      ),
+      dict(
+          testcase_name="channelwise_bf16",
+          lhs_shape=(8, 16, 128),
+          lhs_scale_shape=(8, 16, 1),
+          lhs_scale_dtype=jnp.bfloat16,
+          rhs_shape=(256, 128),
+          rhs_scale_shape=(256, 1),
+          rhs_scale_dtype=jnp.bfloat16,
+          dimension_numbers=(([2], [1]), ([], [])),
+      ),
+      # Not Implemented: batch dims must be equal
+      # dict(
+      #     testcase_name="subchannel",
+      #     lhs_shape=(8, 256),
+      #     lhs_scale_shape=(8, 2),
+      #     rhs_shape=(256, 256),
+      #     rhs_scale_shape=(2, 256),
+      #     dimension_numbers=(([1], [0]), ([], [])),
+      # ),
+  )
+  def test_pallas_dot_general(
+      self,
+      *,
+      lhs_shape,
+      lhs_dtype=jnp.int8,
+      lhs_scale_shape,
+      lhs_scale_dtype=jnp.float32,
+      rhs_shape,
+      rhs_dtype=jnp.int8,
+      rhs_scale_shape,
+      rhs_scale_dtype=jnp.float32,
+      dimension_numbers,
+  ):
+    """Test what kind of dot_general can be called in pallas kernels."""
+
+    def pl_kernel(x, y, o):
+      o[...] = dot_general.dot_general(
+          jax.tree.map(lambda x: x[...], x),
+          jax.tree.map(lambda x: x[...], y),
+          dimension_numbers,
+      )
+
+    if lhs_scale_shape is None:
+      lhs = jnp.ones(lhs_shape, lhs_dtype)
+    else:
+      lhs = qarray.QArray(
+          jnp.ones(lhs_shape, lhs_dtype),
+          jnp.ones(lhs_scale_shape, lhs_scale_dtype),
+          None,
+          lhs_dtype,
+      )
+    rhs = qarray.QArray(
+        jnp.ones(rhs_shape, rhs_dtype),
+        jnp.ones(rhs_scale_shape, rhs_scale_dtype),
+        None,
+        rhs_dtype,
+    )
+    jax_output = dot_general.dot_general(lhs, rhs, dimension_numbers)
+    output_shape = jax.ShapeDtypeStruct(jax_output.shape, jax_output.dtype)
+    pallas_output = pl.pallas_call(pl_kernel, output_shape)(lhs, rhs)
+    self.assertTrue(jnp.allclose(jax_output, pallas_output))
+
 
 if __name__ == "__main__":
   absltest.main()
