@@ -13,7 +13,7 @@
 # limitations under the License.
 """Quantized jax.lax.dot_general with subchannel support."""
 
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 
 import jax
 from jax import numpy as jnp
@@ -74,45 +74,57 @@ def get_how_to_quantize(
 def _get_scale_transpose(
     dimension_numbers: jax.lax.DotDimensionNumbers,
     ndims: tuple[int, int],
-    for_lhs: bool,
-    is_tiled: bool,
-) -> list[int | None]:
-  """Returns the transpose list for lhs_scale or rhs_scale."""
+) -> tuple[list[int | None], list[int | None]]:
+  """Returns the transpose list for lhs_scale and rhs_scale."""
   (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dimension_numbers
   lhs_ra = sorted(set(range(ndims[0])) - set(lhs_ca) - set(lhs_ba))
   rhs_ra = sorted(set(range(ndims[1])) - set(rhs_ca) - set(rhs_ba))
-  if for_lhs:
-    # out is ba + lhs_ra + rhs_ra.
-    transpose = list(lhs_ba) + list(lhs_ra) + [None] * len(rhs_ra)
-    if is_tiled:
-      # When subchannel is enabled, the original scale has one less dimension
-      # than ndims here, which is the new contracting axis. Adjust axes after
-      # the contracting axis by one.
-      transpose = [a - 1 if a and a > lhs_ca[0] else a for a in transpose]
-  else:
-    transpose = list(rhs_ba) + [None] * len(lhs_ra) + list(rhs_ra)
-    if is_tiled:
-      transpose = [a - 1 if a and a > rhs_ca[0] else a for a in transpose]
-  return transpose
+  return (
+      list(lhs_ba) + list(lhs_ra) + [None] * len(rhs_ra),  # lhs_scale_transpose
+      list(rhs_ba) + [None] * len(lhs_ra) + list(rhs_ra),  # rhs_scale_transpose
+  )
 
 
-def _apply_subchannel(
-    dimension_numbers: jax.lax.DotDimensionNumbers,
-) -> jax.lax.DotDimensionNumbers:
-  """Apply subchannel to dimension_numbers."""
-  (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dimension_numbers
-  if len(lhs_ca) != 1:
-    raise ValueError('Only a single tiled axis is supported for now.')
-  # 1. Adjust axes because a new axis is added.
-  lhs_ba = [a if a < lhs_ca[0] else a + 1 for a in lhs_ba]
-  rhs_ba = [a if a < rhs_ca[0] else a + 1 for a in rhs_ba]
-  # 2. Add the original ca as new ba.
-  lhs_ba += lhs_ca
-  rhs_ba += rhs_ca
-  # 3. Make the new ca.
-  lhs_ca = [lhs_ca[0] + 1]
-  rhs_ca = [rhs_ca[0] + 1]
-  return (lhs_ca, rhs_ca), (lhs_ba, rhs_ba)
+def _apply_tiling(
+    contracting_axes: Sequence[int],
+    batch_axes: Sequence[int],
+    tiled_axes: Collection[int],
+) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+  """Apply tiling to dimension numbers.
+
+  Each tiled contracting axis is split into two axes, the first being the new
+  batch axis, and the second being the new contracting axis.
+
+  Args:
+    contracting_axes: The original contracting axes.
+    batch_axes: The original batch axes.
+    tiled_axes: The tiled axes. Must be a subset of contracting_axes.
+
+  Returns:
+    A tuple of (new_ca, new_ba, sum_axes).
+  """
+  new_ca = [a + sum(t <= a for t in tiled_axes) for a in contracting_axes]
+  new_ba = [a + sum(t < a for t in tiled_axes) for a in batch_axes]
+  # We choose to insert the tile_count axes to the end of the batch axes.
+  # Alternatively, we could insert them to the beginning or to the middle,
+  # as long as lhs and rhs use the same order.
+  new_ba += [
+      a + sum(t < a for t in tiled_axes)
+      for a in contracting_axes
+      if a in tiled_axes
+  ]
+  sum_axes = range(len(batch_axes), len(new_ba))
+  return tuple(new_ca), tuple(new_ba), tuple(sum_axes)
+
+
+def _broadcast_axes(
+    array: jax.Array, shape: tuple[int, ...], axes: Collection[int]
+) -> jax.Array:
+  """Broadcast the given axes in the array to the given shape."""
+  target_shape = list(array.shape)
+  for a in axes:
+    target_shape[a] = shape[a]
+  return jnp.broadcast_to(array, target_shape)
 
 
 def _fast_dot_general(
@@ -127,54 +139,78 @@ def _fast_dot_general(
     lhs_value = lhs.qvalue
     lhs_scale = lhs.scale
     lhs_zero_point = lhs.zero_point
-    lhs_tile_size = qarray.get_single_tile_size(lhs)
+    lhs_tiled_axes = qarray.get_tiled_axes(lhs)
   else:
     lhs_value = lhs
     lhs_scale = None
     lhs_zero_point = None
-    lhs_tile_size = None
+    lhs_tiled_axes = {}
   if isinstance(rhs, qarray.QArray):
     rhs_value = rhs.qvalue
     rhs_scale = rhs.scale
     rhs_zero_point = rhs.zero_point
-    rhs_tile_size = qarray.get_single_tile_size(rhs)
+    rhs_tiled_axes = qarray.get_tiled_axes(rhs)
   else:
     rhs_value = rhs
     rhs_scale = None
     rhs_zero_point = None
-    rhs_tile_size = None
+    rhs_tiled_axes = {}
 
   if lhs_zero_point is not None and rhs_zero_point is not None:
     raise ValueError('Only one operand can be asymmetric.')
 
-  if lhs_scale is not None and rhs_scale is not None:
-    if lhs_tile_size != rhs_tile_size:
-      # Different tile sizes are not supported for now.
-      raise ValueError(f'{lhs_tile_size=} != {rhs_tile_size=}')
+  (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dimension_numbers
 
-  tile_size = lhs_tile_size or rhs_tile_size
+  if set(lhs_tiled_axes) - set(lhs_ca) or set(rhs_tiled_axes) - set(rhs_ca):
+    raise ValueError(
+        'Only contracting axes can be tiled for now.'
+        f' {lhs_tiled_axes=} {rhs_tiled_axes=} {dimension_numbers=}'
+    )
 
-  tiled_sum_axis = None
-  if tile_size:
-    (lhs_ca, rhs_ca), (lhs_ba, _) = dimension_numbers
-    # Split lhs/rhs_value.
-    lhs_value = qarray.split_axis(lhs_value, {lhs_ca[0]: tile_size})
-    if lhs_zero_point is not None:
-      lhs_zero_point = qarray.split_axis(lhs_zero_point, {lhs_ca[0]: 1})
-    rhs_value = qarray.split_axis(rhs_value, {rhs_ca[0]: tile_size})
-    if rhs_zero_point is not None:
-      rhs_zero_point = qarray.split_axis(rhs_zero_point, {rhs_ca[0]: 1})
-    tiled_sum_axis = len(lhs_ba)
-    dimension_numbers = _apply_subchannel(dimension_numbers)
+  # Figure out the tiled axes to use for the dot_general. For greater
+  # flexibility, we allow a non-tiled axis to be contracted with a tiled axis.
+  # However, if both axes are tiled, their tile sizes must be the same.
+  for l, r in zip(lhs_ca, rhs_ca):
+    lhs_tile_size = lhs_tiled_axes.get(l)
+    rhs_tile_size = rhs_tiled_axes.get(r)
+    if lhs_tile_size and rhs_tile_size and lhs_tile_size != rhs_tile_size:
+      raise ValueError(
+          'Contracting axes must be tiled with the same tile size.'
+          f' {lhs_tiled_axes=} {rhs_tiled_axes=} {dimension_numbers=}'
+      )
+    if lhs_tile_size or rhs_tile_size:
+      lhs_tiled_axes[l] = lhs_tile_size or rhs_tile_size
+      rhs_tiled_axes[r] = lhs_tile_size or rhs_tile_size
 
-  # Transpose lhs/rhs_scale.
-  ndims = (len(lhs_value.shape), len(rhs_value.shape))
+  # Split lhs/rhs_value for tiled axes.
+  lhs_value = qarray.split_axis(lhs_value, lhs_tiled_axes)
+  rhs_value = qarray.split_axis(rhs_value, rhs_tiled_axes)
+
+  # Split lhs/rhs_zero_point for tiled axes.
+  if lhs_zero_point is not None:
+    lhs_zero_point = qarray.split_axis(
+        lhs_zero_point, {a: 1 for a in lhs_tiled_axes}
+    )
+  if rhs_zero_point is not None:
+    rhs_zero_point = qarray.split_axis(
+        rhs_zero_point, {a: 1 for a in rhs_tiled_axes}
+    )
+
+  # Update dimension_numbers and get sum_axes for tiled axes.
+  lhs_ca, lhs_ba, sum_axes = _apply_tiling(lhs_ca, lhs_ba, lhs_tiled_axes)
+  rhs_ca, rhs_ba, _ = _apply_tiling(rhs_ca, rhs_ba, rhs_tiled_axes)
+  dimension_numbers = (lhs_ca, rhs_ca), (lhs_ba, rhs_ba)
+
+  # Transpose lhs/rhs_scale. This works for tiled axes too.
+  lhs_scale_transpose, rhs_scale_transpose = _get_scale_transpose(
+      dimension_numbers, (len(lhs_value.shape), len(rhs_value.shape))
+  )
   if lhs_scale is not None:
-    transpose = _get_scale_transpose(dimension_numbers, ndims, True, tile_size)  # pytype: disable=wrong-arg-types
-    lhs_scale = qarray.transpose_array(lhs_scale, transpose)
+    lhs_scale = qarray.split_axis(lhs_scale, {a: 1 for a in lhs_tiled_axes})
+    lhs_scale = qarray.transpose_array(lhs_scale, lhs_scale_transpose)
   if rhs_scale is not None:
-    transpose = _get_scale_transpose(dimension_numbers, ndims, False, tile_size)  # pytype: disable=wrong-arg-types
-    rhs_scale = qarray.transpose_array(rhs_scale, transpose)
+    rhs_scale = qarray.split_axis(rhs_scale, {a: 1 for a in rhs_tiled_axes})
+    rhs_scale = qarray.transpose_array(rhs_scale, rhs_scale_transpose)
 
   # We want to override the preferred_element_type to int32 for int x int
   # dot_general, or bfloat16/float32 for fp x fp dot_general.
@@ -196,7 +232,7 @@ def _fast_dot_general(
   if lhs_zero_point is not None:
     # TODO(zhuyunx): This value can be constant folded in SRQ scenarios.
     res -= jax.lax.dot_general(
-        jnp.broadcast_to(lhs_zero_point, lhs_value.shape),
+        _broadcast_axes(lhs_zero_point, lhs_value.shape, lhs_ca + lhs_ba),
         rhs_value,
         dimension_numbers=dimension_numbers,
         preferred_element_type=preferred_element_type,
@@ -206,7 +242,7 @@ def _fast_dot_general(
   if rhs_zero_point is not None:
     res -= jax.lax.dot_general(
         lhs_value,
-        jnp.broadcast_to(rhs_zero_point, rhs_value.shape),
+        _broadcast_axes(rhs_zero_point, rhs_value.shape, rhs_ca + rhs_ba),
         dimension_numbers=dimension_numbers,
         preferred_element_type=preferred_element_type,
         **kwargs,
@@ -216,8 +252,8 @@ def _fast_dot_general(
     res *= lhs_scale
   if rhs_scale is not None:
     res *= rhs_scale
-  if tiled_sum_axis is not None:
-    res = jnp.sum(res, axis=tiled_sum_axis)
+  if sum_axes:
+    res = jnp.sum(res, axis=sum_axes)
   return res
 
 
