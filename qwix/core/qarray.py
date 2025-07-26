@@ -144,30 +144,20 @@ def split_axis(
   return array.reshape(new_shape)
 
 
-def get_tiled_axes(array: QArray) -> Mapping[int, int]:
+def get_tiled_axes(array: QArray) -> dict[int, int]:
   """Infers the tiled axes from a QArray.
 
   Args:
     array: The QArray to infer the tiled axes from.
 
   Returns:
-    A mapping from tiled axis to tile size.
+    A dict from tiled axis to tile size.
   """
   tiled_axes = {}
   for i, (j, k) in enumerate(zip(array.qvalue.shape, array.scale.shape)):
     if j != k and k != 1:
       tiled_axes[i] = j // k
   return tiled_axes
-
-
-def get_single_tile_size(array: QArray) -> int | None:
-  """A helper function to get the single tile size from a QArray."""
-  tiled_axes = get_tiled_axes(array)
-  if not tiled_axes:
-    return None
-  if len(tiled_axes) > 1:
-    raise ValueError('Only a single tiled axis is supported for now.')
-  return next(iter(tiled_axes.values()))
 
 
 def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
