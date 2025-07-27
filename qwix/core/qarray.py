@@ -108,21 +108,16 @@ def transpose_array(
     array: jax.Array, transpose: Sequence[int | None]
 ) -> jax.Array:
   """Similar to jnp.transpose, but allows missing and new axes in the transpose list."""
-  for axis, dim in enumerate(array.shape):
-    if axis not in transpose and dim > 1:
-      raise ValueError(
-          'Diminishing axes must have a dimension of 1, got '
-          f'{array.shape=} {transpose=}'
-      )
-  padded = tuple(transpose) + (None,) * (len(array.shape) - len(transpose))
-  missing_idx = set(range(len(padded))) - set(padded)
-  padded = tuple(missing_idx.pop() if i is None else i for i in padded)
-  if len(array.shape) < len(padded):  # pad the input scale.
-    array = array.reshape(array.shape + (1,) * (len(padded) - len(array.shape)))
-  array = array.transpose(*padded)
-  if len(transpose) < len(padded):  # unpad the output scale.
-    array = array.reshape(array.shape[: len(transpose)])
-  return array
+  # Because transpose is not generally supported in pallas kernels, we try to
+  # avoid complex transposes here by calling squeeze first. For example, for
+  # transpose [1, 2, None], instead of just calling transpose(1, 2, 0), we call
+  # squeeze(0).expand(2).
+  used_axes = [a for a in transpose if a is not None and array.shape[a] > 1]
+  return (
+      array.squeeze([a for a in range(array.ndim) if a not in used_axes])
+      .transpose([sum(i < a for i in used_axes) for a in used_axes])
+      .reshape([1 if a is None else array.shape[a] for a in transpose])
+  )
 
 
 def split_axis(
