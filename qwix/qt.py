@@ -13,6 +13,7 @@
 # limitations under the License.
 """Quantized training (QT) support."""
 
+import dataclasses
 from typing import Any, Callable, Sequence
 
 from flax import linen as nn
@@ -29,30 +30,26 @@ from qwix import qconfig
 from qwix.core import dot_general_qt
 
 
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class QtRule(qconfig.QuantizationRule):
+  """QuantizationRule with all settings specific to Quantized Training (QT)."""
+
+  # In backward pass, quantize residuals and gradients to the given type.
+  bwd_qtype: jax.typing.DTypeLike | None = None
+  # In backward pass, calibrate residuals and gradients using the given method.
+  bwd_calibration_method: str = 'absmax'
+  # In backward pass, enable subchannel for contraction axes when calculating
+  # the gradient of weights. Note that the tiling is actually applied to the
+  # the incoming gradient and the activation residual rather than any "weight".
+  bwd_weight_grad_tile_size: int | float | None = None
+  # If True, disable channelwise axes.
+  disable_channelwise_axes: bool = True
+  # If True, use the original residuals instead of the quantized residuals.
+  use_original_residuals: bool = False
+
+
 class QtProvider(qconfig.QuantizationProvider):
   """Quantization provider for Quantized Training(QT)."""
-
-  def __init__(
-      self,
-      rules,
-      bwd_callibration_method='absmax',
-      disable_channelwise_axes=True,
-      use_original_residuals=False,
-  ):
-    """Initializes the QtProvider.
-
-    Args:
-      rules: The quantization rules.
-      bwd_callibration_method: The calibration method to use for the backward
-        pass.
-      disable_channelwise_axes: Whether to disable channelwise axes.
-      use_original_residuals: Whether to use original residuals instead of
-        quantized residuals.
-    """
-    super().__init__(rules=rules)
-    self._bwd_calibration_method = bwd_callibration_method
-    self._disable_channelwise_axes = disable_channelwise_axes
-    self._use_original_residuals = use_original_residuals
 
   def dot_general(
       self,
@@ -101,6 +98,7 @@ class QtProvider(qconfig.QuantizationProvider):
     if not isinstance(einsum_str, str) or len(operands) != 2:
       raise ValueError(f'Unsupported einsum format: {einsum_str=} {operands=}')
     _, rhs = operands
+    # TODO(jiwonshin): Enforce rhs to be always weight.
     config = self._create_dot_general_qt_config(rule, op_id, rhs)
 
     custom_dot_general = lambda *args, **kwargs: dot_general_qt.dot_general_qt(
@@ -196,6 +194,8 @@ class QtProvider(qconfig.QuantizationProvider):
       self, rule: qconfig.QuantizationRule, op_id: str, rhs: jax.Array
   ) -> dot_general_qt.DotGeneralQtConfig:
     """Creates a DotGeneralQtConfig for dot_general and einsum."""
+    if not isinstance(rule, QtRule):
+      rule = QtRule(**dataclasses.asdict(rule))
     # LHS is always considered an activation for quantization purposes.
     lhs_qtype = None
     lhs_quant_stat_name = None
@@ -229,6 +229,7 @@ class QtProvider(qconfig.QuantizationProvider):
         lhs_qtype=lhs_qtype,
         rhs_qtype=rhs_qtype,
         bwd_qtype=rule.bwd_qtype,
+        bwd_drhs_tile_size=rule.bwd_weight_grad_tile_size,
         tile_size=rule.tile_size,
         lhs_calibration_method=lhs_calibration_method,
         lhs_batch_axes=lhs_batch_axes,
@@ -236,8 +237,8 @@ class QtProvider(qconfig.QuantizationProvider):
         rhs_calibration_method=rhs_calibration_method,
         rhs_batch_axes=rhs_batch_axes,
         rhs_quant_stat_name=rhs_quant_stat_name,
-        bwd_calibration_method=self._bwd_calibration_method,
+        bwd_calibration_method=rule.bwd_calibration_method,
         collect_quant_stat=self._collect_quant_stat,
-        disable_channelwise_axes=self._disable_channelwise_axes,
-        use_original_residuals=self._use_original_residuals,
+        disable_channelwise_axes=rule.disable_channelwise_axes,
+        use_original_residuals=rule.use_original_residuals,
     )

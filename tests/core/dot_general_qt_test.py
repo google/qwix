@@ -117,6 +117,19 @@ class DotGeneralQtTest(parameterized.TestCase):
           expected_mae_fp_out=0.4,
           expected_mae_fp_grads=0.4,
       ),
+      dict(
+          testcase_name='fp8_bwd_param_grad_tiling',
+          lhs_shape=(64, 64),
+          rhs_shape=(64, 64),
+          lhs_qtype='float8_e4m3',
+          rhs_qtype='float8_e4m3',
+          bwd_qtype='float8_e4m3',
+          bwd_drhs_tile_size=32,
+          expected_mae_fq_out=0.0033,
+          expected_mae_fq_grads=0.14,
+          expected_mae_fp_out=0.2,
+          expected_mae_fp_grads=0.2,
+      ),
   )
   def test_grad_against_fq(
       self,
@@ -127,6 +140,7 @@ class DotGeneralQtTest(parameterized.TestCase):
       rhs_qtype,
       bwd_qtype=None,
       tile_size=None,
+      bwd_drhs_tile_size=None,
       expected_mae_fq_out,
       expected_mae_fq_grads,
       expected_mae_fp_out,
@@ -140,6 +154,7 @@ class DotGeneralQtTest(parameterized.TestCase):
         rhs_qtype=rhs_qtype,
         bwd_qtype=bwd_qtype,
         tile_size=tile_size,
+        bwd_drhs_tile_size=bwd_drhs_tile_size,
     )
 
     def loss_fn_fq(lhs_arr, rhs_arr):

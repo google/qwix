@@ -33,6 +33,8 @@ class DotGeneralQtConfig:
   rhs_qtype: jax.typing.DTypeLike | None = None
   bwd_qtype: jax.typing.DTypeLike | None = None
   tile_size: int | float | None = None
+  bwd_dlhs_tile_size: int | float | None = None
+  bwd_drhs_tile_size: int | float | None = None
   lhs_calibration_method: str = 'absmax'
   lhs_batch_axes: Collection[int] = ()
   lhs_quant_stat_name: str | None = None
@@ -211,7 +213,9 @@ def dot_general_qt_bwd(
           ndims=(g.ndim, y.ndim),
           for_lhs=True,
           qtype=config.bwd_qtype,
-          tile_size=config.tile_size,
+          tile_size=config.bwd_drhs_tile_size
+          if y_is_fwd_lhs
+          else config.bwd_dlhs_tile_size,
           calibration_method=config.bwd_calibration_method,
           batch_axes=(),
       )
@@ -225,7 +229,9 @@ def dot_general_qt_bwd(
           ndims=(g.ndim, y.ndim),
           for_lhs=False,
           qtype=config.bwd_qtype,
-          tile_size=config.tile_size,
+          tile_size=config.bwd_drhs_tile_size
+          if y_is_fwd_lhs
+          else config.bwd_dlhs_tile_size,
           calibration_method=config.bwd_calibration_method,
           batch_axes=(),
       )
