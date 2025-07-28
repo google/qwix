@@ -60,7 +60,7 @@ def get_how_to_quantize(
   )
   tiled_axes = {}
   if tile_size:
-    tiled_axes = {axis: tile_size for axis in contracting_axes}
+    tiled_axes = {contracting_axes[0]: tile_size}
 
   return qarray.HowToQuantize(
       qtype=qtype,
