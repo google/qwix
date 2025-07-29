@@ -133,6 +133,48 @@ class InterceptionTest(absltest.TestCase):
     n = 42
     self.assertEqual(func2(0.0), 42)
 
+  def test_scan_custom_vjp(self):
+    @jax.custom_vjp
+    def replaced_sin(x):
+      return replaced_sin_fwd(x)[0]
+
+    # When replaced_sin is called inside a scan, the replaced_sin_fwd function
+    # will be called in another code path, e.g.
+    #
+    #  File "interception_test.py", in func
+    #    _, y = jax.lax.scan(lambda carry, x: (carry, jnp.sin(x)), 0.0, x[None])
+    #  <... a bunch of Jax code ...>
+    #  File "interception_test.py", in replaced_sin_fwd
+    #    return jnp.sin(x) + 1.0, ()
+    #
+    # This causes the jnp.sin in replaced_sin_fwd to also be intercepted.
+    # There's no better way to detect this, because we do want to intercept
+    # replaced_sin_fwd if it's defined by the user. So we have to manually
+    # disable the interception here.
+    @interception.disable_interceptions
+    def replaced_sin_fwd(x):
+      return jnp.sin(x) + 1.0, ()
+
+    def replaced_sin_bwd(res, g):
+      del res
+      return (jnp.sin(g - 1),)
+
+    replaced_sin.defvjp(replaced_sin_fwd, replaced_sin_bwd)
+
+    interceptor = lambda: {"jax.numpy.sin": replaced_sin}
+
+    def func(x):
+      x = jnp.asarray(x)
+      _, y = jax.lax.scan(lambda carry, x: (carry, jnp.sin(x)), 0.0, x[None])
+      return y.squeeze()
+
+    func = interception.wrap_func_intercepted(func, interceptor)
+    self.assertEqual(replaced_sin(0.0), 1.0)
+    self.assertEqual(func(0.0), 1.0)
+    out, grads = jax.value_and_grad(func)(0.0)
+    self.assertEqual(out, 1.0)
+    self.assertEqual(grads, 0.0)
+
 
 if __name__ == "__main__":
   absltest.main()
