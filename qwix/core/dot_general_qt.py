@@ -20,6 +20,7 @@ from typing import Any, Callable
 
 import jax
 import numpy as np
+from qwix import interception
 from qwix.core import dot_general
 from qwix.core import numerics
 from qwix.core import qarray
@@ -162,6 +163,9 @@ def _quantize_operand(
   return q_operand, operand if config.bwd_use_original_residuals else q_operand
 
 
+# See test_scan_custom_vjp in interception_test.py for why we need to manually
+# disable interceptions for dot_general_qt_fwd.
+@interception.disable_interceptions
 def dot_general_qt_fwd(
     lhs: jax.Array,
     rhs: jax.Array,
