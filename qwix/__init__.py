@@ -23,4 +23,4 @@ from qwix.model import quantize_model
 from qwix.odml import OdmlConversionProvider, OdmlQatProvider
 from qwix.ptq import PtqProvider, quantize_params
 from qwix.qconfig import QuantizationProvider, QuantizationRule
-from qwix.qt import QtProvider
+from qwix.qt import QtProvider, QtRule
