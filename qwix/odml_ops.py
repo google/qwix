@@ -73,6 +73,18 @@ def get_all_ops():
   #      the previous op wants to quantize the output, the op will fake quantize
   #      its input. Otherwise, the op will insert no FQ.
 
+  # l2_norm is not listed here because there's no standard implementation.
+  # Usually people implement it as
+  #
+  #   def l2_norm(x, eps=1e-6):
+  #     return x / jnp.maximum(jnp.linalg.norm(x, axis=-1, keepdims=True), eps)
+  #
+  # To support this op, register it manually in the provider (both QAT and
+  # conversion) using the tanh handler, e.g.
+  #
+  #   l2_norm_full_name = l2_norm.__module__ + '.' + l2_norm.__name__
+  #   provider._ops[l2_norm_full_name] = provider._ops['jax.numpy.tanh']
+
   quantize = lambda *a, **k: functools.partial(QuantizedOp, input_idx=a, **k)
 
   ops = {
@@ -96,6 +108,7 @@ def get_all_ops():
       'jax.lax.reshape': TransparentOp,
       'jax.lax.split': Split,
       'jax.lax.squeeze': TransparentOp,
+      'jax.lax.stop_gradient': TransparentOp,
       'jax.lax.transpose': TransparentOp,
       'jax.lax.with_sharding_constraint': TransparentOp,
       'jax.numpy.array': TransparentOp,
@@ -105,10 +118,6 @@ def get_all_ops():
       'jax.numpy.cos': NoQuantOp,
       'jax.numpy.einsum': DotEinsumConv,
       'jax.numpy.floor': OnlyOutputOp,
-      # Only L2 norm is supported in TFLite. The rule here is only correct when
-      # the output of jnp.linalg.norm is fed to a div directly, e.g.
-      #   x = x / jnp.linalg.norm(x, axis=-1, keepdims=True)
-      'jax.numpy.linalg.norm': OnlyInputOp,
       'jax.numpy.mean': quantize(0),
       'jax.numpy.pad': OnlyOutputOp,
       'jax.numpy.repeat': quantize(0),  # not fully supported by the converter.
@@ -397,14 +406,18 @@ class TransparentOp(QuantizedOp):
           f'Unsupported num of inputs {self.input_idx} for op {self._op_name}.'
       )
     out = self._call_original_op(*args, **kwargs)
-    for key in self.forwarded_aux_data:
-      value = aux_data.get(args[self.input_idx[0]], key, None)
-      if value is not None:
-        aux_data.set(out, key, value)
-    # Also forward the FQ_ARRAY if it's used to skip the quantization.
-    fq_array = aux_data.get(args[self.input_idx[0]], _FQ_ARRAY, None)
-    if fq_array == 'self':
-      aux_data.set(out, _FQ_ARRAY, fq_array)
+
+    def forward(out, arg):
+      for key in self.forwarded_aux_data:
+        value = aux_data.get(arg, key, None)
+        if value is not None:
+          aux_data.set(out, key, value)
+      # Also forward the FQ_ARRAY if it's used to skip the quantization.
+      fq_array = aux_data.get(arg, _FQ_ARRAY, None)
+      if fq_array == 'self':
+        aux_data.set(out, _FQ_ARRAY, fq_array)
+
+    jax.tree.map(forward, out, args[self.input_idx[0]])
     return out
 
 
