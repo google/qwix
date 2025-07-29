@@ -43,7 +43,7 @@ class DotGeneralQtConfig:
   rhs_quant_stat_name: str | None = None
   bwd_calibration_method: str = 'absmax'
   disable_channelwise_axes: bool = False
-  use_original_residuals: bool = False
+  bwd_use_original_residuals: bool = False
   collect_quant_stat: Callable[..., Any] | None = None
 
 
@@ -159,7 +159,7 @@ def _quantize_operand(
       operand, how, scale, zero_point
   )
 
-  return q_operand, operand if config.use_original_residuals else q_operand
+  return q_operand, operand if config.bwd_use_original_residuals else q_operand
 
 
 def dot_general_qt_fwd(

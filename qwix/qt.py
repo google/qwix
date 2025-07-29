@@ -42,10 +42,11 @@ class QtRule(qconfig.QuantizationRule):
   # the gradient of weights. Note that the tiling is actually applied to the
   # the incoming gradient and the activation residual rather than any "weight".
   bwd_weight_grad_tile_size: int | float | None = None
-  # If True, disable channelwise axes.
-  disable_channelwise_axes: bool = True
-  # If True, use the original residuals instead of the quantized residuals.
-  use_original_residuals: bool = False
+  # If True, disable channelwise axes for both forward and backward passes.
+  disable_channelwise_axes: bool = False
+  # If True, use the original values instead of the quantized values as the
+  # residuals for backward pass.
+  bwd_use_original_residuals: bool = False
 
 
 class QtProvider(qconfig.QuantizationProvider):
@@ -240,5 +241,5 @@ class QtProvider(qconfig.QuantizationProvider):
         bwd_calibration_method=rule.bwd_calibration_method,
         collect_quant_stat=self._collect_quant_stat,
         disable_channelwise_axes=rule.disable_channelwise_axes,
-        use_original_residuals=rule.use_original_residuals,
+        bwd_use_original_residuals=rule.bwd_use_original_residuals,
     )
