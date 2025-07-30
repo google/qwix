@@ -299,15 +299,14 @@ class PallasTest(parameterized.TestCase):
           rhs_scale_dtype=jnp.bfloat16,
           dimension_numbers=(([2], [1]), ([], [])),
       ),
-      # Not Implemented: batch dims must be equal
-      # dict(
-      #     testcase_name="subchannel",
-      #     lhs_shape=(8, 256),
-      #     lhs_scale_shape=(8, 2),
-      #     rhs_shape=(256, 256),
-      #     rhs_scale_shape=(2, 256),
-      #     dimension_numbers=(([1], [0]), ([], [])),
-      # ),
+      dict(
+          testcase_name="subchannel",
+          lhs_shape=(8, 16, 512),
+          lhs_scale_shape=(8, 16, 4),
+          rhs_shape=(512, 256),
+          rhs_scale_shape=(4, 256),
+          dimension_numbers=(([2], [0]), ([], [])),
+      ),
   )
   def test_pallas_dot_general(
       self,
@@ -325,31 +324,44 @@ class PallasTest(parameterized.TestCase):
     """Test what kind of dot_general can be called in pallas kernels."""
 
     def pl_kernel(x, y, o):
-      o[...] = dot_general.dot_general(
+      o[...] = dot_general.loop_dot_general(
           jax.tree.map(lambda x: x[...], x),
           jax.tree.map(lambda x: x[...], y),
           dimension_numbers,
       )
 
     if lhs_scale_shape is None:
-      lhs = jnp.ones(lhs_shape, lhs_dtype)
+      lhs = self._make_array(lhs_shape, lhs_dtype)
     else:
       lhs = qarray.QArray(
-          jnp.ones(lhs_shape, lhs_dtype),
-          jnp.ones(lhs_scale_shape, lhs_scale_dtype),
+          self._make_array(lhs_shape, lhs_dtype),
+          self._make_array(lhs_scale_shape, lhs_scale_dtype),
           None,
           lhs_dtype,
       )
     rhs = qarray.QArray(
-        jnp.ones(rhs_shape, rhs_dtype),
-        jnp.ones(rhs_scale_shape, rhs_scale_dtype),
+        self._make_array(rhs_shape, rhs_dtype),
+        self._make_array(rhs_scale_shape, rhs_scale_dtype),
         None,
         rhs_dtype,
     )
     jax_output = dot_general.dot_general(lhs, rhs, dimension_numbers)
     output_shape = jax.ShapeDtypeStruct(jax_output.shape, jax_output.dtype)
     pallas_output = pl.pallas_call(pl_kernel, output_shape)(lhs, rhs)
-    self.assertTrue(jnp.allclose(jax_output, pallas_output))
+    self.assertLess(
+        jnp.abs(jax_output - pallas_output).mean() / jnp.abs(jax_output).mean(),
+        2e-3,  # bf16 has a lot error.
+    )
+
+  def _make_array(self, shape, dtype):
+    try:
+      iinfo = jnp.iinfo(dtype)
+      return jax.random.randint(
+          jax.random.key(0), shape, int(iinfo.min), int(iinfo.max), dtype
+      )
+    except ValueError:
+      # dtype is float.
+      return jax.random.normal(jax.random.key(0), shape, dtype)
 
 
 if __name__ == "__main__":

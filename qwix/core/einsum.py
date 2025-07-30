@@ -94,11 +94,14 @@ def get_how_to_quantize(
   )
 
 
-def einsum(*args, **kwargs) -> jax.Array:
+def einsum(
+    *args, _qwix_dot_general=dot_general.dot_general, **kwargs
+) -> jax.Array:
   """Quantized einsum that can take QArrays and returns floating-point jax.Array.
 
   Args:
     *args: Arguments to einsum.
+    _qwix_dot_general: The dot_general function to use.
     **kwargs: Keyword arguments to einsum.
 
   Returns:
@@ -119,7 +122,7 @@ def einsum(*args, **kwargs) -> jax.Array:
 
   def _dot_general(*args, **kwargs):
     args = [qvalue_to_qarray.pop(id(a), a) for a in args]
-    return dot_general.dot_general(*args, **kwargs)
+    return _qwix_dot_general(*args, **kwargs)
 
   # Disabling JIT is necessary so that args in _dot_general are not tracers.
   with jax.disable_jit():
