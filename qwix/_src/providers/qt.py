@@ -22,12 +22,12 @@ import flax.linen.dtypes
 import jax
 from jax import numpy as jnp
 from jax.experimental import pallas as pl
-from qwix import aux_data
-from qwix import averaging
-from qwix import flax_util
-from qwix import interception
-from qwix import qconfig
-from qwix.core import dot_general_qt
+from qwix._src import aux_data
+from qwix._src import averaging
+from qwix._src import flax_util
+from qwix._src import interception
+from qwix._src import qconfig
+from qwix._src.core import dot_general_qt
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

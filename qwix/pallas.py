@@ -45,11 +45,11 @@ from collections.abc import Collection, Mapping
 import functools
 
 import jax
-from qwix.core import qarray
-from qwix.core.dot_general import loop_dot_general as dot_general
-from qwix.core.einsum import einsum as _einsum
-from qwix.core.pallas import pallas_call
-from qwix.core.qarray import QArray, dequantize
+from qwix._src.core import qarray
+from qwix._src.core.dot_general import loop_dot_general as dot_general
+from qwix._src.core.einsum import einsum as _einsum
+from qwix._src.core.pallas import pallas_call
+from qwix._src.core.qarray import QArray, dequantize
 
 einsum = functools.partial(_einsum, _qwix_dot_general=dot_general)
 

@@ -21,13 +21,13 @@ from flax import nnx
 from flax import typing
 import jax
 from jax.nn import initializers
-from qwix import aux_data
-from qwix import flax_util
-from qwix import model as qwix_model
-from qwix import ptq
-from qwix import qconfig
-from qwix.core import einsum
-from qwix.core import qarray
+from qwix._src import aux_data
+from qwix._src import flax_util
+from qwix._src import model as qwix_model
+from qwix._src import qconfig
+from qwix._src.core import einsum
+from qwix._src.core import qarray
+from qwix._src.providers import ptq
 
 
 # apply_lora_to_model is just an alias for quantize_model.

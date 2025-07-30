@@ -21,7 +21,7 @@ from typing import Any, Callable
 import jax
 from jax.experimental import pallas as pl
 import numpy as np
-from qwix.core import qarray
+from qwix._src.core import qarray
 
 
 def pallas_call(

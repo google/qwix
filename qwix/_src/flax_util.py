@@ -26,8 +26,11 @@ import jax
 
 @nnx.register_variable_name('quant_stats', overwrite=True)
 class QuantStat(nnx.Variable):
+  """NNX variable that stores quantization statistics."""
 
   def __setattr__(self, name: str, value: Any):
+    # Disables the unnecessary check on self._trace_state in
+    # nnx.Variable.__setattr__, see https://github.com/google/flax/issues/4847.
     if (
         name == 'value'
         or name == 'raw_value'

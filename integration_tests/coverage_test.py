@@ -19,10 +19,10 @@ from absl.testing import parameterized
 from flax import linen as nn
 import jax
 from jax import numpy as jnp
-from qwix import model as qwix_model
-from qwix import ptq
-from qwix import qconfig
-from qwix import qt
+from qwix._src import model as qwix_model
+from qwix._src import qconfig
+from qwix._src.providers import ptq
+from qwix._src.providers import qt
 
 
 class CNN(nn.Module):

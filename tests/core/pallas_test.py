@@ -20,9 +20,9 @@ import jax
 from jax import numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
-from qwix.core import dot_general
-from qwix.core import pallas
-from qwix.core import qarray
+from qwix._src.core import dot_general
+from qwix._src.core import pallas
+from qwix._src.core import qarray
 
 
 class PallasTest(parameterized.TestCase):

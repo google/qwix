@@ -17,8 +17,8 @@ from collections.abc import Collection, Sequence
 import itertools
 import jax
 from jax import numpy as jnp
-from qwix.core import numerics
-from qwix.core import qarray
+from qwix._src.core import numerics
+from qwix._src.core import qarray
 
 
 def get_how_to_quantize(

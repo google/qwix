@@ -16,9 +16,9 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 from jax import numpy as jnp
-from qwix.core import dot_general
-from qwix.core import dot_general_qt
-from qwix.core import qarray
+from qwix._src.core import dot_general
+from qwix._src.core import dot_general_qt
+from qwix._src.core import qarray
 
 
 def _fake_quant(

@@ -20,12 +20,12 @@ from typing import Any, Callable, Sequence
 
 import jax
 from jax import numpy as jnp
-from qwix import aux_data
-from qwix import qconfig
-from qwix.core import conv_general
-from qwix.core import dot_general
-from qwix.core import einsum
-from qwix.core import qarray
+from qwix._src import aux_data
+from qwix._src import qconfig
+from qwix._src.core import conv_general
+from qwix._src.core import dot_general
+from qwix._src.core import einsum
+from qwix._src.core import qarray
 
 
 def quantize_immediately_if_needed(x: jax.Array) -> jax.Array:
@@ -127,7 +127,9 @@ def get_all_ops():
       'jax.numpy.take': Take,
       'jax.numpy.tanh': Tanh,
       'jax.numpy.ufunc.__call__': UfuncCall,  # includes add, sub, mul, pow.
-      'qwix.odml_ops.quantize_immediately_if_needed': OnlyInputOp,
+      'qwix._src.providers.odml_ops.quantize_immediately_if_needed': (
+          OnlyInputOp
+      ),
       # go/keep-sorted end
   }
 

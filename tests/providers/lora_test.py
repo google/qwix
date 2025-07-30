@@ -21,8 +21,8 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 from jax import sharding as shd
-from qwix import lora
-from qwix import ptq
+from qwix._src.providers import lora
+from qwix._src.providers import ptq
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 

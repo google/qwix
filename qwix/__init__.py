@@ -16,10 +16,10 @@
 
 # pylint: disable=g-multiple-import, g-importing-member
 
-from qwix.flax_util import QuantStat
-from qwix.lora import LoraProvider, LoraRule, apply_lora_to_model
-from qwix.model import quantize_model
-from qwix.odml import OdmlConversionProvider, OdmlQatProvider
-from qwix.ptq import PtqProvider, quantize_params
-from qwix.qconfig import QuantizationProvider, QuantizationRule
-from qwix.qt import QtProvider, QtRule
+from qwix._src.flax_util import QuantStat
+from qwix._src.model import quantize_model
+from qwix._src.providers.lora import LoraProvider, LoraRule, apply_lora_to_model
+from qwix._src.providers.odml import OdmlConversionProvider, OdmlQatProvider
+from qwix._src.providers.ptq import PtqProvider, quantize_params
+from qwix._src.providers.qt import QtProvider, QtRule
+from qwix._src.qconfig import QuantizationProvider, QuantizationRule

@@ -21,8 +21,8 @@ from typing import Any
 
 from absl import logging
 import jax
-from qwix import aux_data
-from qwix import flax_util
+from qwix._src import aux_data
+from qwix._src import flax_util
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

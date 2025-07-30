@@ -21,10 +21,10 @@ from flax import linen as nn
 from flax import nnx
 import jax
 from jax import numpy as jnp
-from qwix import flax_util
-from qwix import model as qwix_model
-from qwix import odml
-from qwix import qconfig
+from qwix._src import flax_util
+from qwix._src import model as qwix_model
+from qwix._src import qconfig
+from qwix._src.providers import odml
 
 
 class OdmlTest(parameterized.TestCase):
