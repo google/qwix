@@ -14,7 +14,7 @@
 """Quantized jax.lax.dot_general with subchannel support."""
 
 from collections.abc import Collection, Sequence
-
+import itertools
 import jax
 from jax import numpy as jnp
 from qwix.core import numerics
@@ -265,14 +265,112 @@ def _slow_dot_general(
 ) -> jax.Array:
   """Dot general in slow path by dequantizing first then computing in floating-point types."""
   if isinstance(lhs, qarray.QArray):
-    lhs_value = qarray.dequantize(lhs)
+    lhs = qarray.dequantize(lhs)
+  if isinstance(rhs, qarray.QArray):
+    rhs = qarray.dequantize(rhs)
+  return jax.lax.dot_general(lhs, rhs, dimension_numbers, **kwargs)
+
+
+def loop_dot_general(
+    lhs: qarray.MaybeQArray,
+    rhs: qarray.MaybeQArray,
+    dimension_numbers: jax.lax.DotDimensionNumbers,
+    preferred_element_type: jax.typing.DTypeLike | None = None,
+    **kwargs,
+) -> jax.Array:
+  """Loop-based tiled dot general implementation."""
+  if isinstance(lhs, qarray.QArray):
+    lhs_value = lhs.qvalue
+    lhs_scale = lhs.scale
+    assert lhs.zero_point is None
+    lhs_tiled_axes = qarray.get_tiled_axes(lhs)
   else:
     lhs_value = lhs
+    lhs_scale = None
+    lhs_tiled_axes = {}
   if isinstance(rhs, qarray.QArray):
-    rhs_value = qarray.dequantize(rhs)
+    rhs_value = rhs.qvalue
+    rhs_scale = rhs.scale
+    assert rhs.zero_point is None
+    rhs_tiled_axes = qarray.get_tiled_axes(rhs)
   else:
     rhs_value = rhs
-  return jax.lax.dot_general(lhs_value, rhs_value, dimension_numbers, **kwargs)
+    rhs_scale = None
+    rhs_tiled_axes = {}
+
+  lhs_ca, rhs_ca = dimension_numbers[0]
+
+  if set(lhs_tiled_axes) - set(lhs_ca) or set(rhs_tiled_axes) - set(rhs_ca):
+    raise ValueError(
+        'Only contracting axes can be tiled for now.'
+        f' {lhs_tiled_axes=} {rhs_tiled_axes=} {dimension_numbers=}'
+    )
+
+  # Allow non-tiled axes to be contracted with tiled axes.
+  ca_tile_counts = []  # number of tiles for each contracting axis.
+  for l, r in zip(lhs_ca, rhs_ca):
+    lhs_tile_size = lhs_tiled_axes.get(l)
+    rhs_tile_size = rhs_tiled_axes.get(r)
+    if lhs_tile_size and rhs_tile_size and lhs_tile_size != rhs_tile_size:
+      raise ValueError(
+          'Contracting axes must be tiled with the same tile size.'
+          f' {lhs_tiled_axes=} {rhs_tiled_axes=} {dimension_numbers=}'
+      )
+    tile_size = lhs_tile_size or rhs_tile_size
+    if tile_size is not None:
+      lhs_tiled_axes[l] = tile_size
+      rhs_tiled_axes[r] = tile_size
+      ca_tile_counts.append(lhs_value.shape[l] // tile_size)
+    else:
+      ca_tile_counts.append(1)
+
+  if all('int' in x.dtype.name for x in (lhs_value, rhs_value)):
+    preferred_element_type = jnp.int32
+  elif lhs_scale is not None:
+    preferred_element_type = lhs_scale.dtype
+  elif rhs_scale is not None:
+    preferred_element_type = rhs_scale.dtype
+
+  lhs_scale_transpose, rhs_scale_transpose = _get_scale_transpose(
+      dimension_numbers, (len(lhs_value.shape), len(rhs_value.shape))
+  )
+
+  def take_slice(
+      array: jax.Array, ca: Sequence[int], ca_tile_indices: Sequence[int]
+  ) -> jax.Array:
+    indices = []
+    for i, s in enumerate(array.shape):
+      if i not in ca or s == 1:
+        indices.append(slice(None))
+        continue
+      index = ca_tile_indices[ca.index(i)]
+      count = ca_tile_counts[ca.index(i)]
+      assert s % count == 0
+      size = s // count
+      indices.append(slice(index * size, (index + 1) * size))
+    return array[*indices]
+
+  acc = None
+  for ca_tile_indices in itertools.product(*map(range, ca_tile_counts)):
+    # ca_tile_indices is a list of tile indices for each contracting axis.
+    out = jax.lax.dot_general(
+        take_slice(lhs_value, lhs_ca, ca_tile_indices),
+        take_slice(rhs_value, rhs_ca, ca_tile_indices),
+        dimension_numbers=dimension_numbers,
+        preferred_element_type=preferred_element_type,
+        **kwargs,
+    )
+    if lhs_scale is not None:
+      out *= qarray.transpose_array(
+          take_slice(lhs_scale, lhs_ca, ca_tile_indices), lhs_scale_transpose
+      )
+    if rhs_scale is not None:
+      out *= qarray.transpose_array(
+          take_slice(rhs_scale, rhs_ca, ca_tile_indices), rhs_scale_transpose
+      )
+    acc = out if acc is None else acc + out
+  assert acc is not None
+  return acc
 
 
 def dot_general(
