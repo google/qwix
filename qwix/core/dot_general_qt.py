@@ -38,14 +38,13 @@ class DotGeneralQtConfig:
   bwd_drhs_tile_size: int | float | None = None
   lhs_calibration_method: str = 'absmax'
   lhs_batch_axes: Collection[int] = ()
-  lhs_quant_stat_name: str | None = None
+  lhs_collect_quant_stat: Callable[[Any], Any] | None = None
   rhs_calibration_method: str = 'absmax'
   rhs_batch_axes: Collection[int] = ()
-  rhs_quant_stat_name: str | None = None
+  rhs_collect_quant_stat: Callable[[Any], Any] | None = None
   bwd_calibration_method: str = 'absmax'
   disable_channelwise_axes: bool = False
   bwd_use_original_residuals: bool = False
-  collect_quant_stat: Callable[..., Any] | None = None
 
 
 def _get_remaining_axes(
@@ -130,12 +129,12 @@ def _quantize_operand(
     qtype = config.lhs_qtype
     calibration_method = config.lhs_calibration_method
     batch_axes = config.lhs_batch_axes
-    quant_stat_name = config.lhs_quant_stat_name
+    collect_quant_stat = config.lhs_collect_quant_stat
   else:
     qtype = config.rhs_qtype
     calibration_method = config.rhs_calibration_method
     batch_axes = config.rhs_batch_axes
-    quant_stat_name = config.rhs_quant_stat_name
+    collect_quant_stat = config.rhs_collect_quant_stat
 
   if not (qtype and numerics.should_quantize(operand.dtype)):
     return operand, operand
@@ -153,8 +152,8 @@ def _quantize_operand(
     how = dataclasses.replace(how, channelwise_axes=[])
 
   calibration = qarray.calibrate(operand, how)
-  if config.collect_quant_stat and quant_stat_name:
-    calibration = config.collect_quant_stat(quant_stat_name, calibration)
+  if collect_quant_stat:
+    calibration = collect_quant_stat(calibration)
   scale, zero_point = qarray.compute_scale_zero_point(calibration, qtype)
   q_operand = qarray.quantize_with_scale_zero_point(
       operand, how, scale, zero_point
