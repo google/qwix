@@ -23,12 +23,12 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 import numpy as np
-from qwix import aux_data
-from qwix import averaging
-from qwix import flax_util
-from qwix import odml_ops
-from qwix import qconfig
-from qwix.core import qarray
+from qwix._src import aux_data
+from qwix._src import averaging
+from qwix._src import flax_util
+from qwix._src import qconfig
+from qwix._src.core import qarray
+from qwix._src.providers import odml_ops
 
 
 class OdmlQatProvider(qconfig.QuantizationProvider):

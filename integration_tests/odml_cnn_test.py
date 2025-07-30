@@ -28,9 +28,9 @@ from jax import numpy as jnp
 import ml_collections
 import numpy as np
 import optax
-from qwix import model as qwix_model
-from qwix import odml
-from qwix import qconfig
+from qwix._src import model as qwix_model
+from qwix._src import qconfig
+from qwix._src.providers import odml
 import tensorflow_datasets as tfds
 
 

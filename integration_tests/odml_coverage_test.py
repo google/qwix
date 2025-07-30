@@ -25,11 +25,11 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 import numpy as np
-from qwix import flax_util
-from qwix import model as qwix_model
-from qwix import odml
-from qwix import odml_ops
-from qwix import qconfig
+from qwix._src import flax_util
+from qwix._src import model as qwix_model
+from qwix._src import qconfig
+from qwix._src.providers import odml
+from qwix._src.providers import odml_ops
 
 
 jax.config.update('jax_threefry_partitionable', False)

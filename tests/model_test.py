@@ -18,8 +18,8 @@ from typing import Any
 from absl.testing import absltest
 from flax import linen as nn
 from jax import numpy as jnp
-from qwix import model
-from qwix import qconfig
+from qwix._src import model
+from qwix._src import qconfig
 
 
 class NnModel(nn.Module):

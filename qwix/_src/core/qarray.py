@@ -18,7 +18,7 @@ from typing import Collection, Mapping, Sequence, TypeAlias
 import flax.struct
 import jax
 from jax import numpy as jnp
-from qwix.core import numerics
+from qwix._src.core import numerics
 
 
 @flax.struct.dataclass

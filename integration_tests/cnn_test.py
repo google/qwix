@@ -31,10 +31,10 @@ from jax import numpy as jnp
 import ml_collections
 import numpy as np
 import optax
-from qwix import model as qwix_model
-from qwix import ptq
-from qwix import qconfig
-from qwix import qt
+from qwix._src import model as qwix_model
+from qwix._src import qconfig
+from qwix._src.providers import ptq
+from qwix._src.providers import qt
 import tensorflow_datasets as tfds
 
 

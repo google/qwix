@@ -20,7 +20,7 @@ import jax
 from jax import numpy as jnp
 from jax.nn import initializers
 import numpy as np
-from qwix import flax_util
+from qwix._src import flax_util
 
 
 class FlaxUtilTest(parameterized.TestCase):

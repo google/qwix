@@ -20,8 +20,8 @@ from typing import Any, TypeVar
 
 from flax import linen as nn
 from flax import nnx
-from qwix import interception
-from qwix import qconfig
+from qwix._src import interception
+from qwix._src import qconfig
 
 
 ModelType = TypeVar("ModelType")

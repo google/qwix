@@ -14,7 +14,7 @@
 
 from absl.testing import absltest
 from jax import numpy as jnp
-from qwix.core import numerics
+from qwix._src.core import numerics
 
 
 class NumericsTest(absltest.TestCase):

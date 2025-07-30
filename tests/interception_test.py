@@ -16,7 +16,7 @@ import threading
 from absl.testing import absltest
 import jax
 from jax import numpy as jnp
-from qwix import interception
+from qwix._src import interception
 
 
 class InterceptionTest(absltest.TestCase):

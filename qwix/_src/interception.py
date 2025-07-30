@@ -19,7 +19,7 @@ import threading
 import types
 from typing import Any, Callable, Mapping, TypeAlias
 
-from qwix import aux_data
+from qwix._src import aux_data
 
 Function: TypeAlias = Callable[..., Any]
 
@@ -204,7 +204,7 @@ def _fn_to_code(fn: Function) -> types.CodeType:
     # Because the wrapper object can replace any code in other modules, so it
     # has to import the modules here.
     import inspect  # pylint: disable=g-import-not-at-top,redefined-outer-name,reimported
-    from qwix import aux_data  # pylint: disable=g-import-not-at-top,redefined-outer-name,reimported
+    from qwix._src import aux_data  # pylint: disable=g-import-not-at-top,redefined-outer-name,reimported
 
     fn = aux_data.get(inspect.currentframe().f_code, "fn")  # pytype: disable=attribute-error
     return fn(*args, **kwargs)

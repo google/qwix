@@ -20,10 +20,10 @@ from typing import Any, Callable
 
 import jax
 import numpy as np
-from qwix import interception
-from qwix.core import dot_general
-from qwix.core import numerics
-from qwix.core import qarray
+from qwix._src import interception
+from qwix._src.core import dot_general
+from qwix._src.core import numerics
+from qwix._src.core import qarray
 
 
 @dataclasses.dataclass(slots=True, frozen=True, kw_only=True)

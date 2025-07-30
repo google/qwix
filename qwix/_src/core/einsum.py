@@ -18,8 +18,8 @@ from typing import Collection
 
 import jax
 from jax import numpy as jnp
-from qwix.core import dot_general
-from qwix.core import qarray
+from qwix._src.core import dot_general
+from qwix._src.core import qarray
 
 
 @dataclasses.dataclass(slots=True)
