@@ -73,7 +73,7 @@ class QtProvider(qconfig.QuantizationProvider):
           preferred_element_type=preferred_element_type,
           out_sharding=out_sharding,
       )
-    config = self._create_dot_general_qt_config(rule, op_id, rhs)
+    config = self._create_dot_general_qt_config(rule, op_id, lhs, rhs)
     return dot_general_qt.dot_general_qt(lhs, rhs, dimension_numbers, config)
 
   def einsum(
@@ -98,9 +98,8 @@ class QtProvider(qconfig.QuantizationProvider):
       )
     if not isinstance(einsum_str, str) or len(operands) != 2:
       raise ValueError(f'Unsupported einsum format: {einsum_str=} {operands=}')
-    _, rhs = operands
-    # TODO(jiwonshin): Enforce rhs to be always weight.
-    config = self._create_dot_general_qt_config(rule, op_id, rhs)
+    lhs, rhs = operands
+    config = self._create_dot_general_qt_config(rule, op_id, lhs, rhs)
 
     custom_dot_general = lambda *args, **kwargs: dot_general_qt.dot_general_qt(
         *args[:3], config
@@ -192,54 +191,74 @@ class QtProvider(qconfig.QuantizationProvider):
     return aggregator.get_calibration(quant_stat.value, calibration)
 
   def _create_dot_general_qt_config(
-      self, rule: qconfig.QuantizationRule, op_id: str, rhs: jax.Array
+      self,
+      rule: qconfig.QuantizationRule,
+      op_id: str,
+      lhs: jax.Array,
+      rhs: jax.Array,
   ) -> dot_general_qt.DotGeneralQtConfig:
     """Creates a DotGeneralQtConfig for dot_general and einsum."""
     if not isinstance(rule, QtRule):
       rule = QtRule(**dataclasses.asdict(rule))
-    # LHS is always considered an activation for quantization purposes.
+
+    # LHS configs based on whether it's a weight or an activation.
     lhs_qtype = None
-    lhs_quant_stat_name = None
     lhs_calibration_method = None
     lhs_batch_axes = ()
-    if rule.act_qtype is not None:
+    lhs_is_weight = aux_data.get(lhs, 'weight_name', None) is not None
+    bwd_dlhs_tile_size = None
+    lhs_collect_quant_stat = None
+
+    if lhs_is_weight:
+      bwd_dlhs_tile_size = rule.bwd_weight_grad_tile_size
+      if rule.weight_qtype is not None:
+        lhs_qtype = rule.weight_qtype
+        lhs_calibration_method = rule.weight_calibration_method
+    elif rule.act_qtype is not None:
       lhs_qtype = rule.act_qtype
       lhs_calibration_method = rule.act_calibration_method
       if rule.act_static_scale:
-        lhs_quant_stat_name = f'{op_id}_lhs'
+        lhs_collect_quant_stat = lambda cal: self._collect_quant_stat(
+            f'{op_id}_lhs', cal
+        )
         lhs_batch_axes = rule.act_batch_axes
 
     # RHS configs based on whether it's a weight or an activation.
     rhs_qtype = None
-    rhs_quant_stat_name = None
     rhs_calibration_method = None
     rhs_batch_axes = ()
-    is_weight = aux_data.get(rhs, 'weight_name', None) is not None
+    rhs_is_weight = aux_data.get(rhs, 'weight_name', None) is not None
+    bwd_drhs_tile_size = None
+    rhs_collect_quant_stat = None
 
-    if is_weight:
-      rhs_qtype = rule.weight_qtype
-      rhs_calibration_method = rule.weight_calibration_method
+    if rhs_is_weight:
+      bwd_drhs_tile_size = rule.bwd_weight_grad_tile_size
+      if rule.weight_qtype is not None:
+        rhs_qtype = rule.weight_qtype
+        rhs_calibration_method = rule.weight_calibration_method
     elif rule.act_qtype is not None:
       rhs_qtype = rule.act_qtype
       rhs_calibration_method = rule.act_calibration_method
       if rule.act_static_scale:
-        rhs_quant_stat_name = f'{op_id}_rhs'
+        rhs_collect_quant_stat = lambda cal: self._collect_quant_stat(
+            f'{op_id}_rhs', cal
+        )
         rhs_batch_axes = rule.act_batch_axes
 
     return dot_general_qt.DotGeneralQtConfig(
         lhs_qtype=lhs_qtype,
         rhs_qtype=rhs_qtype,
         bwd_qtype=rule.bwd_qtype,
-        bwd_drhs_tile_size=rule.bwd_weight_grad_tile_size,
+        bwd_dlhs_tile_size=bwd_dlhs_tile_size,
+        bwd_drhs_tile_size=bwd_drhs_tile_size,
         tile_size=rule.tile_size,
         lhs_calibration_method=lhs_calibration_method,
         lhs_batch_axes=lhs_batch_axes,
-        lhs_quant_stat_name=lhs_quant_stat_name,
+        lhs_collect_quant_stat=lhs_collect_quant_stat,
         rhs_calibration_method=rhs_calibration_method,
         rhs_batch_axes=rhs_batch_axes,
-        rhs_quant_stat_name=rhs_quant_stat_name,
+        rhs_collect_quant_stat=rhs_collect_quant_stat,
         bwd_calibration_method=rule.bwd_calibration_method,
-        collect_quant_stat=self._collect_quant_stat,
         disable_channelwise_axes=rule.disable_channelwise_axes,
         bwd_use_original_residuals=rule.bwd_use_original_residuals,
     )
