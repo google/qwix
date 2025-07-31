@@ -29,7 +29,6 @@ from qwix._src import flax_util
 from qwix._src import model as qwix_model
 from qwix._src import qconfig
 from qwix._src.providers import odml
-from qwix._src.providers import odml_ops
 
 
 jax.config.update('jax_threefry_partitionable', False)
@@ -316,7 +315,6 @@ class ConvBnRelu(nn.Module):
     )(x)
     x = nn.BatchNorm(use_running_average=True)(x)
     x = nn.relu6(x)
-    x = odml_ops.quantize_immediately_if_needed(x)
     return x
 
   def create_input(self):
@@ -324,7 +322,7 @@ class ConvBnRelu(nn.Module):
 
   expected_quant_stats_keys = {
       'Conv_0/conv_general_dilated0_lhs',
-      'quantize_immediately_if_needed0',
+      'final_output0',
   }
 
   # Everything can be fused into a single op.

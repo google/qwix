@@ -29,21 +29,7 @@ from qwix._src.core import qarray
 
 
 def quantize_immediately_if_needed(x: jax.Array) -> jax.Array:
-  """Trigger an immediate quantization if it's requested by the previous op.
-
-  Qwix usually defers the quantization of an activation to the next op, because
-  some ops can be fused, e.g. dot_general + add + relu. Sometimes, it's desired
-  to quantize the activation immediately, e.g. when we want to quantize only
-  part of the model.
-
-  Args:
-    x: The array to quantize.
-
-  Returns:
-    The quantized array when quantization is needed, otherwise the original
-    array.
-  """
-  # This is a no op when quantization is not enabled.
+  """Deprecated. This is a no op."""
   return x
 
 
@@ -127,9 +113,6 @@ def get_all_ops():
       'jax.numpy.take': Take,
       'jax.numpy.tanh': Tanh,
       'jax.numpy.ufunc.__call__': UfuncCall,  # includes add, sub, mul, pow.
-      'qwix._src.providers.odml_ops.quantize_immediately_if_needed': (
-          OnlyInputOp
-      ),
       # go/keep-sorted end
   }
 
