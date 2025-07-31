@@ -161,7 +161,8 @@ class PallasTest(parameterized.TestCase):
   def test_pallas_dequantize(self, input_shape, tiled_axes, bs=(128, 128)):
     """Comprehensive tests for the pallas_call function."""
 
-    def dequantize_kernel(q_ref, out_ref):
+    def dequantize_kernel(scalar_ref, q_ref, out_ref):
+      del scalar_ref  # Unused.
       out_ref[...] = qarray.dequantize(jax.tree.map(lambda x: x[...], q_ref))
 
     def dequantize_pallas(q: qarray.QArray):
@@ -170,10 +171,13 @@ class PallasTest(parameterized.TestCase):
       return pallas.pallas_call(
           dequantize_kernel,
           out_shape=jax.ShapeDtypeStruct(q.qvalue.shape, q.scale.dtype),
-          in_specs=[pl.BlockSpec(block_shape, lambda *args: args)],
-          out_specs=pl.BlockSpec(block_shape, lambda *args: args),
-          grid=tuple(i // bs for i, bs in zip(q.qvalue.shape, block_shape)),
-      )(q)
+          grid_spec=pltpu.PrefetchScalarGridSpec(
+              num_scalar_prefetch=1,
+              grid=tuple(i // bs for i, bs in zip(q.qvalue.shape, block_shape)),
+              in_specs=[pl.BlockSpec(block_shape, lambda *args: args[:-1])],
+              out_specs=pl.BlockSpec(block_shape, lambda *args: args[:-1]),
+          ),
+      )(jnp.ones((1,), jnp.float32), q)
 
     x = jax.random.uniform(jax.random.key(0), input_shape, jnp.float32)
     how = qarray.HowToQuantize(

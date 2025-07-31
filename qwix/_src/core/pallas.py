@@ -59,22 +59,25 @@ def pallas_call(
     grid_spec = pl.GridSpec(grid, in_specs, out_specs, scratch_shapes)
 
   def wrapper(*args):
-    in_specs = _update_block_specs_for_qarray(grid_spec.in_specs, args)
-    in_specs, args, restore_fn = _transform_block_specs_for_tpu(in_specs, args)
+    num_scalar_prefetch = getattr(grid_spec, "num_scalar_prefetch", 0)
+
+    in_specs = _update_block_specs_for_qarray(
+        grid_spec.in_specs, args[num_scalar_prefetch:]
+    )
+    in_specs, new_args, restore_fn = _transform_block_specs_for_tpu(
+        in_specs, args[num_scalar_prefetch:]
+    )
+    args = args[:num_scalar_prefetch] + new_args
 
     # pl.GridSpec doesn't support dataclasses.replace.
     new_grid_spec = copy.copy(grid_spec)
     new_grid_spec.in_specs = in_specs
 
-    # Range of the input_refs in the kernel arguments.
-    input_start = getattr(grid_spec, "num_scalar_prefetch", 0)
-    input_end = input_start + len(args)
-
     return pl.pallas_call(
         lambda *kernel_args: kernel(
-            *kernel_args[:input_start],
-            *restore_fn(kernel_args[input_start:input_end]),
-            *kernel_args[input_end:],
+            *kernel_args[:num_scalar_prefetch],
+            *restore_fn(kernel_args[num_scalar_prefetch : len(args)]),
+            *kernel_args[len(args) :],
         ),
         out_shape,
         grid_spec=new_grid_spec,
