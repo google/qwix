@@ -94,18 +94,18 @@ def _update_block_specs_for_qarray(block_specs: Any, args: Any) -> Any:
     if not isinstance(arg, qarray.QArray):
       return spec
 
-    # Calculate the number of blocks for each axis. We don't support uneven
-    # tiling for now.
-    if any(v % bv != 0 for v, bv in zip(arg.qvalue.shape, spec.block_shape)):
-      raise ValueError(f"{arg.qvalue.shape} % {spec.block_shape} != 0")
-    num_blocks = [v // bv for v, bv in zip(arg.qvalue.shape, spec.block_shape)]
+    # Calculate block size of the scale array for each axis.
+    scale_block_shape = []
+    for v, bv, s in zip(arg.qvalue.shape, spec.block_shape, arg.scale.shape):
+      if bv is None:
+        scale_block_shape.append(None)
+      elif s == 1:
+        scale_block_shape.append(1)
+      else:
+        assert v % bv == 0 and s % (v // bv) == 0, f"{v=} {bv=} {s=}"
+        scale_block_shape.append(s // (v // bv))
+    scale_block_shape = tuple(scale_block_shape)
 
-    # Scale down the block shape for the scale.
-    if any(s % b != 0 and s > 1 for s, b in zip(arg.scale.shape, num_blocks)):
-      raise ValueError(f"{arg.scale.shape} cannot be divided into {num_blocks}")
-    scale_block_shape = tuple(
-        s // b if s > 1 else 1 for s, b in zip(arg.scale.shape, num_blocks)
-    )
     scale_index_map = lambda *a: tuple(
         i if s > 1 else 0 for i, s in zip(spec.index_map(*a), arg.scale.shape)
     )
@@ -154,7 +154,7 @@ def _transform_block_specs_for_tpu(
       continue
 
     # Solution 1: try to transpose the array to put the longest axis at the end.
-    transpose = np.argsort(spec.block_shape)
+    transpose = np.argsort([1 if s is None else s for s in spec.block_shape])
     block_shape_t = _reorder(spec.block_shape, transpose)
     if _can_fit_tpu_requirements(block_shape_t, _reorder(arg.shape, transpose)):
       flatten_args[i] = arg.transpose(transpose)
@@ -166,14 +166,16 @@ def _transform_block_specs_for_tpu(
       flatten_block_specs[i] = dataclasses.replace(
           spec, block_shape=block_shape_t, index_map=index_map_t
       )
-      reverse_transposes[i] = np.argsort(transpose)
+      reverse_transposes[i] = np.argsort(
+          [t for t in transpose if spec.block_shape[t] is not None]
+      )
       continue
 
     # Solution 2: reshape the array into (*num_blocks, 1, prod(block_shape))).
     # This satisfies the TPU requirement because the last two dimensions are
     # equal to the respective dimension of the overall array.
     dims = range(arg.ndim)
-    arg_t = qarray.split_axis(arg, dict(enumerate(spec.block_shape)))
+    arg_t = qarray.split_axis(arg, {i: spec.block_shape[i] or 1 for i in dims})
     arg_t = arg_t.transpose([2 * i for i in dims] + [2 * i + 1 for i in dims])
     arg_t = arg_t.reshape([arg_t.shape[i] for i in dims] + [1, -1])
     flatten_args[i] = arg_t
@@ -184,19 +186,16 @@ def _transform_block_specs_for_tpu(
     flatten_block_specs[i] = dataclasses.replace(
         spec, block_shape=block_shape_t, index_map=index_map_t
     )
-    reverse_reshapes[i] = spec.block_shape
+    reverse_reshapes[i] = [bs for bs in spec.block_shape if bs is not None]
 
   def restore(kernel_args):
-    flatten_kernel_args = treedef.flatten_up_to(kernel_args)
-    for i, kernel_arg in enumerate(flatten_kernel_args):
+    kernel_args = treedef.flatten_up_to(kernel_args)
+    for i, kernel_arg in enumerate(kernel_args):
       if i in reverse_transposes:
-        flatten_kernel_args[i] = kernel_arg[...].transpose(
-            reverse_transposes[i]
-        )
+        kernel_args[i] = kernel_arg[...].transpose(reverse_transposes[i])
       elif i in reverse_reshapes:
-        # Note: reshape on MemoryRef may return corrupted data!
-        flatten_kernel_args[i] = kernel_arg[...].reshape(reverse_reshapes[i])
-    return treedef.unflatten(flatten_kernel_args)
+        kernel_args[i] = kernel_arg[...].reshape(reverse_reshapes[i])
+    return treedef.unflatten(kernel_args)
 
   return (
       treedef.unflatten(flatten_block_specs),
@@ -213,9 +212,10 @@ def _reorder(
 
 
 def _can_fit_tpu_requirements(
-    block_shape: tuple[int, ...], arg_shape: tuple[int, ...]
+    block_shape: tuple[int | None, ...], arg_shape: tuple[int, ...]
 ) -> bool:
   """Check if the block shape can fit the TPU requirements."""
+  block_shape = tuple(1 if s is None else s for s in block_shape)
   return (block_shape[-1] % 128 == 0 or block_shape[-1] == arg_shape[-1]) and (
       block_shape[-2] % 8 == 0 or block_shape[-2] == arg_shape[-2]
   )
