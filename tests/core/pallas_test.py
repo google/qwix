@@ -44,6 +44,14 @@ class PallasTest(parameterized.TestCase):
           expected_scale_block_shape=(8, 2),
           expected_scale_index_map={(1, 1): (1, 1)},
       ),
+      dict(
+          testcase_name="block_shape_none",
+          block_shape=(None, 256),
+          qvalue_shape=(1024, 1024),
+          scale_shape=(1024, 8),  # 1x128 tiling.
+          expected_scale_block_shape=(None, 2),
+          expected_scale_index_map={(1, 1): (1, 1)},
+      ),
   )
   def test_update_block_specs_for_qarray(
       self,
@@ -73,25 +81,32 @@ class PallasTest(parameterized.TestCase):
   @parameterized.named_parameters(
       dict(
           testcase_name="no_transform",
-          arg_shape=(4, 128),
-          block_shape=(4, 128),
-          expected_new_block_shape=(4, 128),
+          arg_shape=(4, 4, 128),
+          block_shape=(None, 4, 128),
+          expected_new_block_shape=(None, 4, 128),
+          expected_new_index_map={(0, 1, 2): (0, 1, 2)},
       ),
       dict(
           testcase_name="transpose",
-          block_shape=(128, 8),
-          arg_shape=(128, 16),
-          expected_new_block_shape=(8, 128),
+          arg_shape=(4, 128, 16),
+          block_shape=(None, 128, 8),
+          expected_new_block_shape=(None, 8, 128),
+          expected_new_index_map={(1, 2, 3): (1, 3, 2)},
       ),
       dict(
           testcase_name="reshape",
           block_shape=(8, 8),
           arg_shape=(32, 32),
           expected_new_block_shape=(1, 1, 1, 64),
+          expected_new_index_map={(1, 2): (1, 2, 0, 0)},
       ),
   )
   def test_transform_block_specs_for_tpu(
-      self, block_shape, arg_shape, expected_new_block_shape
+      self,
+      arg_shape,
+      block_shape,
+      expected_new_block_shape,
+      expected_new_index_map,
   ):
     block_spec = pl.BlockSpec(block_shape, lambda *args: tuple(args))
     arg = jnp.zeros(arg_shape, dtype=jnp.float32)
@@ -104,10 +119,17 @@ class PallasTest(parameterized.TestCase):
         )
     )
     self.assertEqual(new_block_spec.block_shape, expected_new_block_shape)
+    for k, v in expected_new_index_map.items():
+      self.assertEqual(new_block_spec.index_map(*k), v)
     restored = restore_fn(
-        jnp.zeros(expected_new_block_shape, dtype=jnp.float32)
+        jnp.zeros(
+            [s for s in expected_new_block_shape if s is not None],
+            dtype=jnp.float32,
+        )
     )
-    self.assertEqual(restored.shape, block_shape)
+    self.assertEqual(
+        restored.shape, tuple(s for s in block_shape if s is not None)
+    )
 
   @parameterized.named_parameters(
       dict(
@@ -190,26 +212,26 @@ class PallasTest(parameterized.TestCase):
     qx = qarray.quantize(x, how)
     self.assertTrue(jnp.allclose(dequantize_pallas(qx), qarray.dequantize(qx)))
 
-  def test_pallas_matmul(self):
-    """A basic example of using Qwix pallas_call to implement matmul."""
+  def test_pallas_batch_matmul(self):
+    """A basic example of using Qwix pallas_call to implement batch_matmul."""
 
     def pallas_matmul_kernel(x_ref, y_ref, z_ref, acc_ref, *, nsteps):
-      @pl.when(pl.program_id(2) == 0)
+
+      @pl.when(pl.program_id(3) == 0)
       def _():
         acc_ref[...] = jnp.zeros_like(acc_ref)
 
-      x = jax.tree.map(lambda x: x[...], x_ref)
-      y = jax.tree.map(lambda x: x[...], y_ref)
-      # NOTE: Qwix's dot_general is not generally supported inside pallas
-      # kernels, as the reshape and transpose operations will trigger errors
-      # when block sizes != subchannel tiled sizes.
-      acc_ref[...] += dot_general.dot_general(x, y, (((1,), (0,)), ((), ())))
+      acc_ref[...] += dot_general.loop_dot_general(
+          jax.tree.map(lambda x: x[...], x_ref),
+          jax.tree.map(lambda x: x[...], y_ref),
+          (((1,), (0,)), ((), ())),
+      )
 
-      @pl.when(pl.program_id(2) == nsteps - 1)
+      @pl.when(pl.program_id(3) == nsteps - 1)
       def _():
         z_ref[...] = acc_ref[...].astype(z_ref.dtype)
 
-    def pallas_matmul(
+    def pallas_batch_matmul(
         x: qarray.QArray,
         y: qarray.QArray,
         *,
@@ -217,49 +239,46 @@ class PallasTest(parameterized.TestCase):
         bk: int = 128,
         bn: int = 128,
     ):
-      m, k = x.qvalue.shape
-      _, n = y.qvalue.shape
+      b, m, k = x.qvalue.shape
+      _, _, n = y.qvalue.shape
 
       return pallas.pallas_call(
           functools.partial(pallas_matmul_kernel, nsteps=k // bk),
-          out_shape=jax.ShapeDtypeStruct((m, n), jnp.float32),
-          grid=(m // bm, n // bn, k // bk),
+          out_shape=jax.ShapeDtypeStruct((b, m, n), jnp.float32),
+          grid=(b, m // bm, n // bn, k // bk),
           in_specs=[
-              pl.BlockSpec((bm, bk), lambda i, j, k: (i, k)),
-              pl.BlockSpec((bk, bn), lambda i, j, k: (k, j)),
+              pl.BlockSpec((None, bm, bk), lambda b, i, j, k: (b, i, k)),
+              pl.BlockSpec((None, bk, bn), lambda b, i, j, k: (b, k, j)),
           ],
-          out_specs=pl.BlockSpec((bm, bn), lambda i, j, k: (i, j)),
+          out_specs=pl.BlockSpec((None, bm, bn), lambda b, i, j, k: (b, i, j)),
           scratch_shapes=[pltpu.VMEM((bm, bn), jnp.float32)],
-          compiler_params=pltpu.CompilerParams(
-              dimension_semantics=("parallel", "parallel", "arbitrary")
-          ),
       )(x, y)
 
     x_how = qarray.HowToQuantize(
         qtype="int8",
-        channelwise_axes=[],
-        tiled_axes={0: 1, 1: 128},
+        channelwise_axes=[0, 1],
+        tiled_axes={2: 128},
         batch_axes=[],
         calibration_method="absmax",
     )
     qx = qarray.quantize(
-        jax.random.uniform(jax.random.key(0), (256, 256), jnp.float32), x_how
+        jax.random.uniform(jax.random.key(0), (4, 256, 256), jnp.float32), x_how
     )
     y_how = qarray.HowToQuantize(
         qtype="int8",
-        channelwise_axes=[],
-        tiled_axes={0: 128, 1: 1},
+        channelwise_axes=[2],
+        tiled_axes={1: 128},
         batch_axes=[],
         calibration_method="absmax",
     )
     qy = qarray.quantize(
-        jax.random.uniform(jax.random.key(1), (256, 256), jnp.float32), y_how
+        jax.random.uniform(jax.random.key(1), (4, 256, 256), jnp.float32), y_how
     )
 
     self.assertTrue(
         jnp.allclose(
-            pallas_matmul(qx, qy),
-            dot_general.dot_general(qx, qy, (((1,), (0,)), ((), ()))),
+            pallas_batch_matmul(qx, qy),
+            dot_general.dot_general(qx, qy, (((2,), (1,)), ((0,), (0,)))),
         )
     )
 
