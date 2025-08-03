@@ -348,7 +348,7 @@ def loop_dot_general(
       assert s % count == 0
       size = s // count
       indices.append(slice(index * size, (index + 1) * size))
-    return array[*indices]
+    return array[tuple(indices)]
 
   acc = None
   for ca_tile_indices in itertools.product(*map(range, ca_tile_counts)):
