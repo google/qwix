@@ -1,0 +1,189 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from collections.abc import Sequence
+from absl.testing import absltest
+from absl.testing import parameterized
+import jax
+from jax import numpy as jnp
+from qwix._src.core import conv_general
+from qwix._src.core import conv_general_qt
+from qwix._src.core import qarray
+
+
+def _fake_quant(
+    array: jax.Array,
+    how: qarray.HowToQuantize,
+) -> jax.Array:
+  """Generic fake quantization function using a Straight-Through Estimator."""
+  calibration = qarray.calibrate(array, how)
+  scale, zero_point = qarray.compute_scale_zero_point(calibration, how.qtype)
+  q_array = qarray.quantize_with_scale_zero_point(
+      array, how.qtype, scale, zero_point
+  )
+  dq_array = qarray.dequantize(q_array)
+  ste_array = array
+  return ste_array + jax.lax.stop_gradient(dq_array - ste_array)
+
+
+def conv_general_fq(
+    lhs: jax.Array,
+    rhs: jax.Array,
+    config: conv_general_qt.ConvGeneralQtConfig,
+    window_strides: Sequence[int],
+    padding: str | Sequence[tuple[int, int]],
+    dimension_numbers: jax.lax.ConvDimensionNumbers | None,
+):
+  """conv_general_dilated implemented with fake quantization."""
+  dnums = jax.lax.conv_dimension_numbers(
+      lhs.shape, rhs.shape, dimension_numbers
+  )
+
+  lhs_how = conv_general.get_how_to_quantize(
+      dimension_numbers=dnums,
+      for_lhs=True,
+      qtype=config.fwd_qtype,
+      calibration_method=config.fwd_calibration_method,
+  )
+  rhs_how = conv_general.get_how_to_quantize(
+      dimension_numbers=dnums,
+      for_lhs=False,
+      qtype=config.fwd_qtype,
+      calibration_method=config.fwd_calibration_method,
+  )
+  lhs_fq = _fake_quant(lhs, lhs_how)
+  rhs_fq = _fake_quant(rhs, rhs_how)
+  return jax.lax.conv_general_dilated(
+      lhs_fq,
+      rhs_fq,
+      window_strides,
+      padding,
+      dimension_numbers=dnums,
+  )
+
+
+class ConvGeneralQtTest(parameterized.TestCase):
+  """Test class for conv_general_qt."""
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='int8',
+          fwd_qtype='int8',
+          expected_mae_fq_out=0.01,
+          expected_mae_fq_grads=0.01,
+          expected_mae_fp_out=0.08,
+          expected_mae_fp_grads=0.06,
+      ),
+      dict(
+          testcase_name='int4',
+          fwd_qtype='int4',
+          expected_mae_fq_out=0.01,
+          expected_mae_fq_grads=0.01,
+          expected_mae_fp_out=0.5,
+          expected_mae_fp_grads=0.5,
+      ),
+      dict(
+          testcase_name='fp8_bwd',
+          fwd_qtype='float8_e4m3',
+          bwd_qtype='float8_e4m3',
+          expected_mae_fq_out=0.01,
+          expected_mae_fq_grads=0.01,
+          expected_mae_fp_out=0.05,
+          expected_mae_fp_grads=0.25,
+      ),
+  )
+  def test_grad_against_fq(
+      self,
+      *,
+      fwd_qtype,
+      bwd_qtype=None,
+      expected_mae_fq_out,
+      expected_mae_fq_grads,
+      expected_mae_fp_out,
+      expected_mae_fp_grads,
+  ):
+    # Setup convolution parameters
+    lhs_shape = (4, 16, 16, 8)  # N, H, W, C_in
+    rhs_shape = (3, 3, 8, 32)  # H_k, W_k, C_in, C_out
+    window_strides = (1, 1)
+    padding = 'SAME'
+    dimension_numbers = ('NHWC', 'HWIO', 'NHWC')
+
+    lhs = jax.random.normal(jax.random.key(0), lhs_shape, jnp.float32)
+    rhs = jax.random.normal(jax.random.key(1), rhs_shape, jnp.float32)
+
+    config = conv_general_qt.ConvGeneralQtConfig(
+        fwd_qtype=fwd_qtype,
+        bwd_qtype=bwd_qtype,
+    )
+
+    def loss_fn_fq(lhs_arr, rhs_arr):
+      return jnp.sum(
+          conv_general_fq(
+              lhs_arr,
+              rhs_arr,
+              config,
+              window_strides,
+              padding,
+              dimension_numbers,
+          )
+      )
+
+    def loss_fn_qt(lhs_arr, rhs_arr):
+      return jnp.sum(
+          conv_general_qt.conv_general_qt(
+              lhs=lhs_arr,
+              rhs=rhs_arr,
+              config=config,
+              window_strides=window_strides,
+              padding=padding,
+              dimension_numbers=dimension_numbers,
+          )
+      )
+
+    def loss_fn_fp(lhs_arr, rhs_arr):
+      return jnp.sum(
+          jax.lax.conv_general_dilated(
+              lhs_arr,
+              rhs_arr,
+              window_strides,
+              padding,
+              dimension_numbers=dimension_numbers,
+          )
+      )
+
+    fq_out, fq_grads = jax.value_and_grad(loss_fn_fq, argnums=(0, 1))(lhs, rhs)
+    qt_out, qt_grads = jax.value_and_grad(loss_fn_qt, argnums=(0, 1))(lhs, rhs)
+    fp_out, fp_grads = jax.value_and_grad(loss_fn_fp, argnums=(0, 1))(lhs, rhs)
+
+    mae = lambda x, y: jnp.mean(jnp.abs((x - y) / y))
+
+    # Assert that the forward pass is close to the FQ reference
+    self.assertLessEqual(mae(qt_out, fq_out), expected_mae_fq_out)
+
+    # Assert that the forward pass is reasonably close to the full-precision op
+    self.assertLessEqual(mae(qt_out, fp_out), expected_mae_fp_out)
+
+    # Assert that gradients are reasonably close to the full-precision gradients
+    self.assertLessEqual(mae(qt_grads[0], fp_grads[0]), expected_mae_fp_grads)
+    self.assertLessEqual(mae(qt_grads[1], fp_grads[1]), expected_mae_fp_grads)
+
+    # If backward pass is NOT quantized, grads should be very close to FQ grads
+    if bwd_qtype is None:
+      self.assertLessEqual(mae(qt_grads[0], fq_grads[0]), expected_mae_fq_grads)
+      self.assertLessEqual(mae(qt_grads[1], fq_grads[1]), expected_mae_fq_grads)
+
+
+if __name__ == '__main__':
+  absltest.main()

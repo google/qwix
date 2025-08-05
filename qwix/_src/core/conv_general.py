@@ -68,7 +68,36 @@ def get_transpose(
   return transpose
 
 
-def conv_general_dilated(
+def _slow_conv_general_dilated(
+    lhs: qarray.MaybeQArray,
+    rhs: qarray.MaybeQArray,
+    window_strides: Sequence[int],
+    padding: str | Sequence[tuple[int, int]],
+    lhs_dilation: Sequence[int] | None = None,
+    rhs_dilation: Sequence[int] | None = None,
+    dimension_numbers: jax.lax.ConvGeneralDilatedDimensionNumbers = None,
+    feature_group_count: int = 1,
+    batch_group_count: int = 1,
+) -> jax.Array:
+  """Dequantizes first then computes in floating-point types."""
+  if isinstance(lhs, qarray.QArray):
+    lhs = qarray.dequantize(lhs)
+  if isinstance(rhs, qarray.QArray):
+    rhs = qarray.dequantize(rhs)
+  return jax.lax.conv_general_dilated(
+      lhs,
+      rhs,
+      window_strides,
+      padding,
+      lhs_dilation,
+      rhs_dilation,
+      dimension_numbers,
+      feature_group_count,
+      batch_group_count,
+  )
+
+
+def _fast_conv_general_dilated(
     lhs: qarray.QArray,
     rhs: qarray.QArray,
     window_strides: Sequence[int],
@@ -136,3 +165,40 @@ def conv_general_dilated(
   res *= lhs_scale
   res *= rhs_scale
   return res
+
+
+def conv_general_dilated(
+    lhs: qarray.QArray,
+    rhs: qarray.QArray,
+    window_strides: Sequence[int],
+    padding: str | Sequence[tuple[int, int]],
+    lhs_dilation: Sequence[int] | None = None,
+    rhs_dilation: Sequence[int] | None = None,
+    dimension_numbers: jax.lax.ConvGeneralDilatedDimensionNumbers = None,
+    feature_group_count: int = 1,
+    batch_group_count: int = 1,
+) -> jax.Array:
+  """Dispatches to fast or slow conv_general_dilated depending on the inputs."""
+  if isinstance(lhs, qarray.QArray) and isinstance(rhs, qarray.QArray):
+    return _fast_conv_general_dilated(
+        lhs,
+        rhs,
+        window_strides,
+        padding,
+        lhs_dilation,
+        rhs_dilation,
+        dimension_numbers,
+        feature_group_count,
+        batch_group_count,
+    )
+  return _slow_conv_general_dilated(
+      lhs,
+      rhs,
+      window_strides,
+      padding,
+      lhs_dilation,
+      rhs_dilation,
+      dimension_numbers,
+      feature_group_count,
+      batch_group_count,
+  )
