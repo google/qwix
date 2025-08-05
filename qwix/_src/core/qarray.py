@@ -71,10 +71,6 @@ class HowToQuantize:
   # meanings: a tile size of 1 means to use per-channel scale, while a
   # tile size of 1.0 means to use shared scale.
   tiled_axes: Mapping[int, int | float]
-  # Batch axes have shared scales, but are treated differently in calibration,
-  # i.e., the mean of quant stats is calculated along the batch axes. An axis
-  # can appear only in one of channelwise_axes, tiled_axes, or batch_axes.
-  batch_axes: Collection[int]
   # The calibration method to use. The format is <method>[,<args>], e.g.
   # "absmax" or "fixed,-10,10". Check calibrate() for supported methods.
   calibration_method: str
@@ -168,14 +164,10 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
     Each value in the dict has the same shape as the (expected) scale.
   """
   reduce_axes = []  # axes to calibrate.
-  batch_axes = []  # axes to calculate the mean of quant stats.
   tiled_axes_offset = 0
   for axis, _ in enumerate(array.shape):
     if axis in how.channelwise_axes:
       continue  # no reduce needed.
-    if axis in how.batch_axes:
-      batch_axes.append(axis + tiled_axes_offset)
-      continue  # batch axes are reduced differently.
     if axis in how.tiled_axes:
       tiled_axes_offset += 1  # reduce the tile_size rather than num_tiles.
     reduce_axes.append(axis + tiled_axes_offset)
@@ -190,9 +182,6 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
   if method == 'minmax':
     min_array = jnp.min(array, axis=reduce_axes, keepdims=True)
     max_array = jnp.max(array, axis=reduce_axes, keepdims=True)
-    if batch_axes:
-      min_array = jnp.mean(min_array, axis=batch_axes, keepdims=True)
-      max_array = jnp.mean(max_array, axis=batch_axes, keepdims=True)
     # Ensure min_array <= 0 <= max_array so that 0 can be accurately quantized.
     min_array = jnp.clip(min_array, max=0)
     max_array = jnp.clip(max_array, min=0)
@@ -202,15 +191,11 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
     return {'min': min_array.reshape(shape), 'max': max_array.reshape(shape)}
   elif method == 'absmax':
     absmax = jnp.max(jnp.abs(array), axis=reduce_axes, keepdims=True)
-    if batch_axes:
-      absmax = jnp.mean(absmax, axis=batch_axes, keepdims=True)
     if args:  # args[0] is the scale factor.
       absmax = absmax * args[0]
     return {'absmax': absmax.reshape(shape)}
   elif method == 'rms':
     rms = jnp.sqrt(jnp.mean(jnp.square(array), axis=reduce_axes, keepdims=True))
-    if batch_axes:
-      rms = jnp.mean(rms, axis=batch_axes, keepdims=True)
     if not args:
       raise ValueError('A scale factor is required for RMS calibration.')
     return {'absmax': (rms * args[0]).reshape(shape)}
@@ -261,7 +246,7 @@ def compute_scale_zero_point(
 
 def quantize_with_scale_zero_point(
     array: jax.Array,
-    how: HowToQuantize,
+    qtype: jax.typing.DTypeLike,
     scale: jax.Array,
     zero_point: jax.Array | None,
 ) -> QArray:
@@ -269,7 +254,7 @@ def quantize_with_scale_zero_point(
 
   Args:
     array: The array to quantize.
-    how: The quantization rule.
+    qtype: The logical type used for quantization.
     scale: The scale to use.
     zero_point: The zero_point to use.
 
@@ -278,27 +263,25 @@ def quantize_with_scale_zero_point(
   """
   if not numerics.should_quantize(array.dtype):
     raise ValueError(f'Refuse to quantize: {array.dtype}')
-  scale_shape = get_scale_shape(array.shape, how)
-  if scale.shape != scale_shape:
-    raise ValueError(f'Expect scale shape {scale_shape} but got {scale.shape}')
-  if zero_point is not None and zero_point.shape != scale_shape:
+  if zero_point is not None and zero_point.shape != scale.shape:
     raise ValueError(
-        f'Expect zero_point shape {scale_shape} but got {zero_point.shape}'
+        f'Expect zero_point shape {scale.shape} but got {zero_point.shape}'
     )
 
   # Ensure that the scale has the same dtype as the fp array, because
   # dequantize() uses the scale dtype to reconstruct the original array.
   scale = scale.astype(array.dtype)
 
-  tiled_array = split_axis(array, how.tiled_axes)
-  tiled_scale = split_axis(scale, {a: 1 for a in how.tiled_axes})
+  tiled_axes = get_tiled_axes(QArray(array, scale, zero_point, qtype))
+  tiled_array = split_axis(array, tiled_axes)
+  tiled_scale = split_axis(scale, {a: 1 for a in tiled_axes})
   qvalue = tiled_array / tiled_scale
   if zero_point is not None:
-    tiled_zero_point = split_axis(zero_point, {a: 1 for a in how.tiled_axes})
+    tiled_zero_point = split_axis(zero_point, {a: 1 for a in tiled_axes})
     qvalue = qvalue + tiled_zero_point.astype(qvalue.dtype)
   qvalue = qvalue.reshape(array.shape)
-  qvalue = numerics.convert_to(qvalue, how.qtype)
-  return QArray(qvalue, scale, zero_point, how.qtype)
+  qvalue = numerics.convert_to(qvalue, qtype)
+  return QArray(qvalue, scale, zero_point, qtype)
 
 
 def quantize(
@@ -308,7 +291,7 @@ def quantize(
   """Quantizes an array using a dynamic range."""
   calibration = calibrate(array, how)
   scale, zero_point = compute_scale_zero_point(calibration, how.qtype)
-  return quantize_with_scale_zero_point(array, how, scale, zero_point)
+  return quantize_with_scale_zero_point(array, how.qtype, scale, zero_point)
 
 
 def dequantize(array: QArray) -> jax.Array:

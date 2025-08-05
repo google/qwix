@@ -193,7 +193,7 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
       )
     scale, zero_point = qarray.compute_scale_zero_point(calibration, how.qtype)
     q_array = qarray.quantize_with_scale_zero_point(
-        array, how, scale, zero_point
+        array, how.qtype, scale, zero_point
     )
     dq_array = qarray.dequantize(q_array)
     # Use a straight through estimator as the gradient of the dq_array.
@@ -207,6 +207,10 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
       calibration_is_fixed_range: bool,
   ) -> averaging.Calibration:
     """Collects the quantization statistics."""
+    # For SRQ, only per-tensor scale is supported, so we don't need to check the
+    # act_batch_axes at all.
+    calibration = jax.tree.map(lambda x: x.mean(keepdims=True), calibration)
+
     aggregator = averaging.SimpleMovingAverage()
     quant_stat = flax_util.get_or_create_variable(
         'quant_stats', name, lambda: aggregator.init(calibration)
@@ -305,9 +309,10 @@ class OdmlConversionProvider(OdmlQatProvider):
       # Check if the array is a weight or an activation.
       weight_name = aux_data.get(array, 'weight_name', None)
       if weight_name is not None:  # Weights.
+        assert quant_stat_name is None
         mdl_path = flax_util.get_current_module_path()
         weight = self._flatten_params[mdl_path + (weight_name,)]
-        if array.shape != weight.shape:  # when _flatten_dot_general is used.
+        if weight.shape != array.shape:  # when _flatten_dot_general is used.
           weight = weight.reshape(array.shape)
         calibration = qarray.calibrate(weight, how)
         scale, zp = qarray.compute_scale_zero_point(calibration, how.qtype)
@@ -326,7 +331,7 @@ class OdmlConversionProvider(OdmlQatProvider):
       return qarray.dequantize(
           qarray.quantize(x, how)
           if scale is None
-          else qarray.quantize_with_scale_zero_point(x, how, scale, zp)
+          else qarray.quantize_with_scale_zero_point(x, how.qtype, scale, zp)
       )
 
     return _fake_quant_op(array, **attributes)
@@ -343,8 +348,6 @@ class OdmlConversionProvider(OdmlQatProvider):
 
     if 'count' not in quant_stat or quant_stat['count'] == 0:
       raise ValueError(f'quant_stats is not initialized for {quant_stat_name}')
-    if any(jnp.isnan(v).any() for v in quant_stat.values()):
-      raise ValueError(f'quant_stats has NaN for {quant_stat_name}')
     calibration = averaging.SimpleMovingAverage().get_calibration(quant_stat)
     return qarray.compute_scale_zero_point(calibration, how.qtype)
 
@@ -360,6 +363,8 @@ class OdmlConversionProvider(OdmlQatProvider):
     # For dynamic-range quantization, the scale is an empty array.
     if scale is None:
       scale = np.array([], np.float32)
+    if jnp.isnan(scale).any() or jnp.isinf(scale).any() or (scale == 0).any():
+      raise ValueError(f'Invalid scale: {scale}')
     # Flatten the scale because ODML wants a 1D array.
     quantization_dim = None
     for dim, length in enumerate(scale.shape):

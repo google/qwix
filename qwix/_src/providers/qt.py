@@ -14,6 +14,7 @@
 """Quantized training (QT) support."""
 
 import dataclasses
+import functools
 from typing import Any, Callable, Sequence
 
 from flax import linen as nn
@@ -177,9 +178,15 @@ class QtProvider(qconfig.QuantizationProvider):
   def _collect_quant_stat(
       self,
       name: str,
+      batch_axes: tuple[int, ...],
       calibration: averaging.Calibration,
   ) -> averaging.Calibration:
     """Collects the quantization statistics."""
+    # Calculate the mean over the batch axes.
+    calibration = jax.tree.map(
+        lambda x: x.mean(axis=batch_axes, keepdims=True), calibration
+    )
+
     aggregator = averaging.SimpleMovingAverage()
     quant_stat = flax_util.get_or_create_variable(
         'quant_stats', name, lambda: aggregator.init(calibration)
@@ -204,7 +211,6 @@ class QtProvider(qconfig.QuantizationProvider):
     # LHS configs based on whether it's a weight or an activation.
     lhs_qtype = None
     lhs_calibration_method = None
-    lhs_batch_axes = ()
     lhs_is_weight = aux_data.get(lhs, 'weight_name', None) is not None
     bwd_dlhs_tile_size = None
     lhs_collect_quant_stat = None
@@ -218,15 +224,13 @@ class QtProvider(qconfig.QuantizationProvider):
       lhs_qtype = rule.act_qtype
       lhs_calibration_method = rule.act_calibration_method
       if rule.act_static_scale:
-        lhs_collect_quant_stat = lambda cal: self._collect_quant_stat(
-            f'{op_id}_lhs', cal
+        lhs_collect_quant_stat = functools.partial(
+            self._collect_quant_stat, f'{op_id}_lhs', rule.act_batch_axes
         )
-        lhs_batch_axes = rule.act_batch_axes
 
     # RHS configs based on whether it's a weight or an activation.
     rhs_qtype = None
     rhs_calibration_method = None
-    rhs_batch_axes = ()
     rhs_is_weight = aux_data.get(rhs, 'weight_name', None) is not None
     bwd_drhs_tile_size = None
     rhs_collect_quant_stat = None
@@ -240,10 +244,9 @@ class QtProvider(qconfig.QuantizationProvider):
       rhs_qtype = rule.act_qtype
       rhs_calibration_method = rule.act_calibration_method
       if rule.act_static_scale:
-        rhs_collect_quant_stat = lambda cal: self._collect_quant_stat(
-            f'{op_id}_rhs', cal
+        rhs_collect_quant_stat = functools.partial(
+            self._collect_quant_stat, f'{op_id}_rhs', rule.act_batch_axes
         )
-        rhs_batch_axes = rule.act_batch_axes
 
     return dot_general_qt.DotGeneralQtConfig(
         lhs_qtype=lhs_qtype,
@@ -253,10 +256,8 @@ class QtProvider(qconfig.QuantizationProvider):
         bwd_drhs_tile_size=bwd_drhs_tile_size,
         tile_size=rule.tile_size,
         lhs_calibration_method=lhs_calibration_method,
-        lhs_batch_axes=lhs_batch_axes,
         lhs_collect_quant_stat=lhs_collect_quant_stat,
         rhs_calibration_method=rhs_calibration_method,
-        rhs_batch_axes=rhs_batch_axes,
         rhs_collect_quant_stat=rhs_collect_quant_stat,
         bwd_calibration_method=rule.bwd_calibration_method,
         disable_channelwise_axes=rule.disable_channelwise_axes,

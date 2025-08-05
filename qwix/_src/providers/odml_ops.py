@@ -257,35 +257,36 @@ class QuantizedOp:
     args = list(args)
     if len(self.input_idx) == 1:
       idx = self.input_idx[0]
-      args[idx] = self._fake_quant_act(args[idx], rule, op_id)
+      args[idx] = self._maybe_fake_quant(args[idx], rule, op_id)
     elif len(self.input_idx) == 2:
       lhs, rhs = tuple(self.input_idx)  # pylint: disable=unbalanced-tuple-unpacking
       # Binary ops could have non-array args, e.g. x + 1.
       if isinstance(args[lhs], jax.Array):
-        args[lhs] = self._fake_quant_act(args[lhs], rule, op_id + '_lhs')
+        args[lhs] = self._maybe_fake_quant(args[lhs], rule, op_id + '_lhs')
       if isinstance(args[rhs], jax.Array):
-        args[rhs] = self._fake_quant_act(args[rhs], rule, op_id + '_rhs')
+        args[rhs] = self._maybe_fake_quant(args[rhs], rule, op_id + '_rhs')
     else:
       raise ValueError(
           f'Unsupported num of inputs {self.input_idx} for op {self._op_name}.'
       )
     return args
 
-  def _fake_quant_act(
+  def _maybe_fake_quant(
       self,
       array: jax.Array,
       rule: qconfig.QuantizationRule | None,
-      quant_stat_name: str | None = None,
+      quant_stat_name: str,
   ) -> jax.Array:
-    """Fake quantize an activation.
+    """Fake quantize the array based on the given rule.
+
+    Most of the time array is an activation, but it could also be a weight that
+    is not consumed by dot_general/conv/einsum, e.g. jnp.take.
 
     Args:
       array: The array to quantize.
       rule: The quantization rule for the array. If None, the array will not be
         quantized.
-      quant_stat_name: The name for the quantization statistics. If set, the
-        quantization statistics will be collected and the scale will be computed
-        from the statistics.
+      quant_stat_name: The name for the quantization statistics.
 
     Returns:
       The fake quantized array.
@@ -297,6 +298,22 @@ class QuantizedOp:
 
     # Only quantize float arrays.
     if array.dtype not in (jnp.float32, jnp.bfloat16):
+      return array
+
+    # Check if the array is a weight.
+    if aux_data.get(array, _WEIGHT_NAME, None) is not None:
+      if rule and rule.weight_qtype:
+        how = qarray.HowToQuantize(
+            qtype=rule.weight_qtype,
+            channelwise_axes=(),
+            tiled_axes={},
+            # Use act_calibration_method because it is more like an activation,
+            # i.e., asymmetric rather than symmetric.
+            calibration_method=rule.act_calibration_method,
+        )
+        fq_array = self._fake_quant_fn(array, how, None)
+        aux_data.set(array, _FQ_ARRAY, fq_array)
+        return fq_array
       return array
 
     # Check if the array should be quantized as the output of the previous op.
@@ -314,8 +331,9 @@ class QuantizedOp:
     how = qarray.HowToQuantize(
         qtype=rule.act_qtype,
         tiled_axes={},
-        channelwise_axes=(),
-        batch_axes=rule.act_batch_axes,
+        # Use per-channel scales for batch axes, which will be reduced later
+        # in _collect_quant_stat.
+        channelwise_axes=rule.act_batch_axes,
         calibration_method=rule.act_calibration_method,
     )
 
@@ -454,7 +472,7 @@ class FinalOutput(QuantizedOp):
     if self.fixed_range_for_output is not None:
       aux_data.set(x, _FIXED_RANGE, self.fixed_range_for_output)
     # Only FQ the output if the previous op wants.
-    return self._fake_quant_act(x, None, op_id)
+    return self._maybe_fake_quant(x, None, op_id)
 
 
 class BatchNorm(QuantizedOp):
@@ -469,7 +487,7 @@ class BatchNorm(QuantizedOp):
       aux_data.set(out, _ALLOW_FUSION, True)
     else:
       rule, op_id = self._get_rule_and_op_id_fn('batch_norm_op')
-      x = self._fake_quant_act(x, rule, op_id)
+      x = self._maybe_fake_quant(x, rule, op_id)
       out = norm(x, *args, **kwargs)
     return self._fake_quant_output(out, rule)
 
@@ -545,7 +563,7 @@ class Concatenate(QuantizedOp):
     rule, op_id = self._get_rule_and_op_id_fn(self._op_name)
     if not rule or rule.act_qtype is None:
       arrays = [
-          self._fake_quant_act(x, rule, op_id + f'_input{i}')
+          self._maybe_fake_quant(x, rule, op_id + f'_input{i}')
           for i, x in enumerate(arrays)
       ]
 
@@ -568,7 +586,7 @@ class Take(OnlyInputOp):
     # Only x needs to be fake quantized.
     args = list(args)
     rule, op_id = self._get_rule_and_op_id_fn(self._op_name)
-    args[0] = self._fake_quant_act(args[0], rule, op_id)
+    args[0] = self._maybe_fake_quant(args[0], rule, op_id)
 
     if rule and rule.act_qtype:
       # Provide a default fill_value for take. Otherwise, it will be nan
@@ -592,7 +610,7 @@ class Split(OnlyInputOp):
       return self._call_original_op(x, sizes, axis)
 
     rule, op_id = self._get_rule_and_op_id_fn(self._op_name)
-    x = self._fake_quant_act(x, rule, op_id)
+    x = self._maybe_fake_quant(x, rule, op_id)
 
     outputs = self._call_original_op(x, sizes, axis)
     # Output doesn't need more FQ.
@@ -610,10 +628,10 @@ class Silu(QuantizedOp):
     if not aux_data.get(x, _IS_ACTIVATION, False):
       return self._call_original_op(x)
     rule, op_id = self._get_rule_and_op_id_fn(self._op_name)
-    x = self._fake_quant_act(x, rule, op_id)
+    x = self._maybe_fake_quant(x, rule, op_id)
     y = jax.nn.sigmoid(x)
     aux_data.set(y, _FIXED_RANGE, Softmax.fixed_range_for_output)
-    y = self._fake_quant_act(y, rule, op_id + '_sigmoid')
+    y = self._maybe_fake_quant(y, rule, op_id + '_sigmoid')
     return self._fake_quant_output(x * y, rule)
 
 
@@ -623,7 +641,7 @@ class DotEinsumConv(QuantizedOp):
   # Whether to check if the lhs is an activation.
   check_activation: bool = True
 
-  # Whether to disable per-channel qiantization for weights.
+  # Whether to disable per-channel quantization for weights.
   disable_per_channel_weights: bool = False
 
   def __init__(self, **kwargs):
@@ -652,7 +670,6 @@ class DotEinsumConv(QuantizedOp):
             qtype=qtype,
             tile_size=None,  # Tiling is not supported in ODML.
             calibration_method=calibration_method,
-            batch_axes=(),  # This function only handles DRQ and weights.
         )
       case 'einsum':
         return einsum.get_how_to_quantize(
@@ -662,7 +679,6 @@ class DotEinsumConv(QuantizedOp):
             qtype=qtype,
             tile_size=None,  # Tiling is not supported in ODML.
             calibration_method=calibration_method,
-            batch_axes=(),  # This function only handles DRQ and weights.
         )
       case 'conv_general_dilated':
         d_num = args[4] if len(args) > 4 else kwargs['dimension_numbers']
@@ -671,7 +687,6 @@ class DotEinsumConv(QuantizedOp):
             for_lhs=for_lhs,
             qtype=qtype,
             calibration_method=calibration_method,
-            batch_axes=(),  # This function only handles DRQ and weights.
         )
       case _:
         raise ValueError(f'Unsupported op {self._op_name}.')
@@ -700,7 +715,9 @@ class DotEinsumConv(QuantizedOp):
       args[lhs_idx] = self._fake_quant_fn(args[lhs_idx], lhs_how, None)
     else:
       # possibly SRQ
-      args[lhs_idx] = self._fake_quant_act(args[lhs_idx], rule, op_id + '_lhs')
+      args[lhs_idx] = self._maybe_fake_quant(
+          args[lhs_idx], rule, op_id + '_lhs'
+      )
 
     # Fake quantize rhs.
     if aux_data.get(args[rhs_idx], _IS_ACTIVATION, False):
@@ -717,7 +734,7 @@ class DotEinsumConv(QuantizedOp):
         args[rhs_idx] = self._fake_quant_fn(args[rhs_idx], rhs_how, None)
       else:
         # possibly SRQ
-        args[rhs_idx] = self._fake_quant_act(
+        args[rhs_idx] = self._maybe_fake_quant(
             args[rhs_idx], rule, op_id + '_rhs'
         )
     elif rule and rule.weight_qtype:
