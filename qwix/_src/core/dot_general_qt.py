@@ -37,10 +37,8 @@ class DotGeneralQtConfig:
   bwd_dlhs_tile_size: int | float | None = None
   bwd_drhs_tile_size: int | float | None = None
   lhs_calibration_method: str = 'absmax'
-  lhs_batch_axes: Collection[int] = ()
   lhs_collect_quant_stat: Callable[[Any], Any] | None = None
   rhs_calibration_method: str = 'absmax'
-  rhs_batch_axes: Collection[int] = ()
   rhs_collect_quant_stat: Callable[[Any], Any] | None = None
   bwd_calibration_method: str = 'absmax'
   disable_channelwise_axes: bool = False
@@ -128,12 +126,10 @@ def _quantize_operand(
   if for_lhs:
     qtype = config.lhs_qtype
     calibration_method = config.lhs_calibration_method
-    batch_axes = config.lhs_batch_axes
     collect_quant_stat = config.lhs_collect_quant_stat
   else:
     qtype = config.rhs_qtype
     calibration_method = config.rhs_calibration_method
-    batch_axes = config.rhs_batch_axes
     collect_quant_stat = config.rhs_collect_quant_stat
 
   if not (qtype and numerics.should_quantize(operand.dtype)):
@@ -146,7 +142,6 @@ def _quantize_operand(
       qtype=qtype,
       tile_size=config.tile_size,
       calibration_method=calibration_method,
-      batch_axes=batch_axes,
   )
   if config.disable_channelwise_axes:
     how = dataclasses.replace(how, channelwise_axes=[])
@@ -156,7 +151,7 @@ def _quantize_operand(
     calibration = collect_quant_stat(calibration)
   scale, zero_point = qarray.compute_scale_zero_point(calibration, qtype)
   q_operand = qarray.quantize_with_scale_zero_point(
-      operand, how, scale, zero_point
+      operand, how.qtype, scale, zero_point
   )
 
   return q_operand, operand if config.bwd_use_original_residuals else q_operand
@@ -220,7 +215,6 @@ def dot_general_qt_bwd(
           if y_is_fwd_lhs
           else config.bwd_dlhs_tile_size,
           calibration_method=config.bwd_calibration_method,
-          batch_axes=(),
       )
       if config.disable_channelwise_axes:
         g_how = dataclasses.replace(g_how, channelwise_axes=[])
@@ -236,7 +230,6 @@ def dot_general_qt_bwd(
           if y_is_fwd_lhs
           else config.bwd_dlhs_tile_size,
           calibration_method=config.bwd_calibration_method,
-          batch_axes=(),
       )
       if config.disable_channelwise_axes:
         y_how = dataclasses.replace(y_how, channelwise_axes=[])

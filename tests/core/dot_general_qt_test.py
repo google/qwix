@@ -27,7 +27,9 @@ def _fake_quant(
 ) -> jax.Array:
   calibration = qarray.calibrate(array, how)
   scale, zero_point = qarray.compute_scale_zero_point(calibration, how.qtype)
-  q_array = qarray.quantize_with_scale_zero_point(array, how, scale, zero_point)
+  q_array = qarray.quantize_with_scale_zero_point(
+      array, how.qtype, scale, zero_point
+  )
   dq_array = qarray.dequantize(q_array)
   ste_array = qarray.clip_to_calibration(array, calibration, how.tiled_axes)
   return ste_array + jax.lax.stop_gradient(dq_array - ste_array)
@@ -47,7 +49,6 @@ def dot_general_fq(
       qtype=config.lhs_qtype,
       tile_size=config.tile_size,
       calibration_method=config.lhs_calibration_method,
-      batch_axes=config.lhs_batch_axes,
   )
   rhs_how = dot_general.get_how_to_quantize(
       dimension_numbers=dimension_numbers,
@@ -56,7 +57,6 @@ def dot_general_fq(
       qtype=config.rhs_qtype,
       tile_size=config.tile_size,
       calibration_method=config.rhs_calibration_method,
-      batch_axes=config.rhs_batch_axes,
   )
   lhs_fq = _fake_quant(lhs, lhs_how)
   rhs_fq = _fake_quant(rhs, rhs_how)

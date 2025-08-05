@@ -29,7 +29,6 @@ def get_how_to_quantize(
     qtype: jax.typing.DTypeLike,
     tile_size: int | float | None,
     calibration_method: str,
-    batch_axes: Collection[int],
 ) -> qarray.HowToQuantize:
   """Get how to quantize from dimension_numbers and remaining_dims.
 
@@ -43,7 +42,6 @@ def get_how_to_quantize(
     qtype: The logical type of the quantized value.
     tile_size: The tile size for subchannel quantization.
     calibration_method: The calibration method to use.
-    batch_axes: Batch axes used for calibration.
 
   Returns:
     How to quantize.
@@ -55,9 +53,7 @@ def get_how_to_quantize(
     ndim = ndims[1]
     contracting_axes = dimension_numbers[0][1]
 
-  channelwise_axes = sorted(
-      set(range(ndim)) - set(contracting_axes) - set(batch_axes)
-  )
+  channelwise_axes = sorted(set(range(ndim)) - set(contracting_axes))
   tiled_axes = {}
   if tile_size:
     tiled_axes = {contracting_axes[0]: tile_size}
@@ -66,7 +62,6 @@ def get_how_to_quantize(
       qtype=qtype,
       channelwise_axes=channelwise_axes,
       tiled_axes=tiled_axes,
-      batch_axes=batch_axes,
       calibration_method=calibration_method,
   )
 

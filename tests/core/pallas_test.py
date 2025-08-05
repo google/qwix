@@ -206,7 +206,6 @@ class PallasTest(parameterized.TestCase):
         qtype="int8",
         channelwise_axes=[],
         tiled_axes=tiled_axes,
-        batch_axes=[],
         calibration_method="absmax",
     )
     qx = qarray.quantize(x, how)
@@ -258,7 +257,6 @@ class PallasTest(parameterized.TestCase):
         qtype="int8",
         channelwise_axes=[0, 1],
         tiled_axes={2: 128},
-        batch_axes=[],
         calibration_method="absmax",
     )
     qx = qarray.quantize(
@@ -268,7 +266,6 @@ class PallasTest(parameterized.TestCase):
         qtype="int8",
         channelwise_axes=[2],
         tiled_axes={1: 128},
-        batch_axes=[],
         calibration_method="absmax",
     )
     qy = qarray.quantize(

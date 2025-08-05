@@ -85,7 +85,6 @@ def quantize(
       qtype=qtype,
       channelwise_axes=channelwise_axes,
       tiled_axes=tiled_axes or {},
-      batch_axes=(),
       calibration_method=calibration_method,
   )
   return qarray.quantize(array, how)

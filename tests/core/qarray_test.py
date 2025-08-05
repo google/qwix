@@ -121,7 +121,6 @@ class QArrayTest(parameterized.TestCase):
         channelwise_axes=channelwise_axes,
         tiled_axes=tiled_axes,
         calibration_method=calibration_method,
-        batch_axes=(),
     )
     q_array = qarray.quantize(array, how)
     dq_array = qarray.dequantize(q_array)
@@ -159,7 +158,6 @@ class QArrayTest(parameterized.TestCase):
         channelwise_axes=[],
         tiled_axes={},
         calibration_method='minmax',
-        batch_axes=(),
     )
     q_array = qarray.quantize(array, how)
     self.assertEqual(q_array.zero_point, jnp.array(-128, dtype=jnp.int8), array)
@@ -179,37 +177,6 @@ class QArrayTest(parameterized.TestCase):
           jnp.allclose(dq_array, array),
           f'{dq_array} != {array}\nDiff: {jnp.abs(dq_array - array)}',
       )
-
-  def test_batch_axes(self):
-    # Setting batch axes reduces the impact of outliers.
-    array = jax.random.normal(jax.random.key(42), (64, 64))
-    array = array.at[0, 0].set(100)
-    # Without batch axes
-    how = qarray.HowToQuantize(
-        qtype=jnp.int8,
-        channelwise_axes=[],
-        tiled_axes={},
-        calibration_method='absmax',
-        batch_axes=(),
-    )
-    q_array1 = qarray.quantize(array, how)
-    fq_array1 = qarray.dequantize(q_array1)
-    mae1 = jnp.abs(array - fq_array1).mean() / jnp.abs(array).mean()
-    # With batch axes set.
-    how = qarray.HowToQuantize(
-        qtype=jnp.int8,
-        channelwise_axes=[],
-        tiled_axes={},
-        calibration_method='absmax',
-        batch_axes=(0,),
-    )
-    q_array2 = qarray.quantize(array, how)
-    jax.tree.map(
-        lambda x, y: self.assertEqual(x.shape, y.shape), q_array1, q_array2
-    )
-    fq_array2 = qarray.dequantize(q_array2)
-    mae2 = jnp.abs(array - fq_array2).mean() / jnp.abs(array).mean()
-    self.assertLess(mae2, mae1)
 
   def test_get_tiled_axes(self):
     array = qarray.QArray(

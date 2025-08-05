@@ -150,7 +150,6 @@ class DotGeneralTest(parameterized.TestCase):
           qtype=lhs_qtype if for_lhs else rhs_qtype,
           channelwise_axes=(),
           tiled_axes={a: s for a, s in enumerate(tile_sizes) if s is not None},
-          batch_axes=(),
           calibration_method=calibration_method,
       )
       return qarray.quantize(array, how)

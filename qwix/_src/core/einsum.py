@@ -54,7 +54,6 @@ def get_how_to_quantize(
     qtype: jax.typing.DTypeLike,
     tile_size: int | float | None,
     calibration_method: str,
-    batch_axes: Collection[int],
 ) -> qarray.HowToQuantize:
   """Get how to quantize from an einsum string.
 
@@ -70,7 +69,6 @@ def get_how_to_quantize(
     qtype: The logical type for quantized value.
     tile_size: The tile size for subchannel quantization.
     calibration_method: The calibration method to use.
-    batch_axes: Batch axes used for calibration.
 
   Returns:
     How to quantize the lhs or rhs.
@@ -80,16 +78,15 @@ def get_how_to_quantize(
   channelwise_axes = []
   tiled_axes = {}
   for axis, name in enumerate(subs):
-    if name not in info.contractions and name not in batch_axes:
+    if name not in info.contractions:
       channelwise_axes.append(axis)
-    elif tile_size:
+    elif tile_size and not tiled_axes:  # Only tile the first contraction axis.
       tiled_axes[axis] = tile_size
 
   return qarray.HowToQuantize(
       qtype=qtype,
       channelwise_axes=channelwise_axes,
       tiled_axes=tiled_axes,
-      batch_axes=batch_axes,
       calibration_method=calibration_method,
   )
 

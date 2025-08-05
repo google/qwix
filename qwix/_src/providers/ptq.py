@@ -116,7 +116,6 @@ class PtqProvider(qconfig.QuantizationProvider):
           qtype=rule.weight_qtype,
           tile_size=rule.tile_size,
           calibration_method=rule.weight_calibration_method,
-          batch_axes=(),
       )
       rhs = _create_quantized_param(rhs, rhs_how).array
     elif rule.act_qtype is not None:  # act
@@ -125,7 +124,6 @@ class PtqProvider(qconfig.QuantizationProvider):
           qtype=rule.act_qtype,
           tile_size=rule.tile_size,
           calibration_method=rule.act_calibration_method,
-          batch_axes=rule.act_batch_axes if rule.act_static_scale else (),
       )
       rhs = _quantize_act(rhs, rhs_how, rule, op_id + '_rhs')
 
@@ -136,7 +134,6 @@ class PtqProvider(qconfig.QuantizationProvider):
           qtype=rule.act_qtype,
           tile_size=rule.tile_size,
           calibration_method=rule.act_calibration_method,
-          batch_axes=rule.act_batch_axes if rule.act_static_scale else (),
       )
       lhs = _quantize_act(lhs, lhs_how, rule, op_id + '_lhs')
     return dot_general.dot_general(
@@ -181,7 +178,6 @@ class PtqProvider(qconfig.QuantizationProvider):
           qtype=rule.weight_qtype,
           tile_size=rule.tile_size,
           calibration_method=rule.weight_calibration_method,
-          batch_axes=(),
       )
       rhs = _create_quantized_param(rhs, rhs_how).array
     elif rule.act_qtype is not None:  # act
@@ -190,7 +186,6 @@ class PtqProvider(qconfig.QuantizationProvider):
           qtype=rule.act_qtype,
           tile_size=rule.tile_size,
           calibration_method=rule.act_calibration_method,
-          batch_axes=rule.act_batch_axes if rule.act_static_scale else (),
       )
       rhs = _quantize_act(rhs, rhs_how, rule, op_id + '_rhs')
 
@@ -201,7 +196,6 @@ class PtqProvider(qconfig.QuantizationProvider):
           qtype=rule.act_qtype,
           tile_size=rule.tile_size,
           calibration_method=rule.act_calibration_method,
-          batch_axes=rule.act_batch_axes if rule.act_static_scale else (),
       )
       lhs = _quantize_act(lhs, lhs_how, rule, op_id + '_lhs')
     return einsum.einsum(einsum_str, lhs, rhs)
@@ -249,7 +243,6 @@ class PtqProvider(qconfig.QuantizationProvider):
           for_lhs=False,
           qtype=rule.weight_qtype,
           calibration_method=rule.weight_calibration_method,
-          batch_axes=(),
       )
       rhs = _create_quantized_param(rhs, rhs_how).array
 
@@ -264,7 +257,6 @@ class PtqProvider(qconfig.QuantizationProvider):
         for_lhs=True,
         qtype=rule.act_qtype,
         calibration_method=rule.act_calibration_method,
-        batch_axes=rule.act_batch_axes if rule.act_static_scale else (),
     )
     lhs = _quantize_act(lhs, lhs_how, rule, op_id + '_lhs')
     return conv_general.conv_general_dilated(
@@ -387,6 +379,10 @@ def _quantize_act(
       calibration = aggregator.get_calibration(quant_stat)
     else:
       calibration = qarray.calibrate(array, how)
+      # Apply act_batch_axes for static scale.
+      calibration = jax.tree.map(
+          lambda x: x.mean(axis=rule.act_batch_axes, keepdims=True), calibration
+      )
     nonlocal zp
     scale, zp = qarray.compute_scale_zero_point(calibration, how.qtype)
     # Wrap scale in WithAux so that quantize_params can work.
@@ -396,7 +392,9 @@ def _quantize_act(
   scale = flax_util.get_or_create_param(act_name + '_scale', init)
   if zp is not None:
     zp = flax_util.get_or_create_param(act_name + '_zero_point', lambda: zp)
-  return qarray.quantize_with_scale_zero_point(array, how, scale.array, zp)
+  return qarray.quantize_with_scale_zero_point(
+      array, how.qtype, scale.array, zp
+  )
 
 
 def _create_quantized_param(
