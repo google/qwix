@@ -103,12 +103,31 @@ def get_scale_shape(array_shape: ShapeT, how: HowToQuantize) -> ShapeT:
 def transpose_array(
     array: jax.Array, transpose: Sequence[int | None]
 ) -> jax.Array:
-  """Similar to jnp.transpose, but allows missing and new axes in the transpose list."""
+  """Enhanced version of jnp.transpose.
+
+  * It allows missing and new axes in the transpose list. The missing axes will
+    be squeezed away, and the new axes will be added with size 1.
+  * It's pallas-friendly as it will try to use reshape and simpler transpose
+    instead of transpose when possible.
+
+  Args:
+    array: The array to transpose.
+    transpose: The transpose order.
+
+  Returns:
+    The transposed array.
+  """
+  used_axes = [a for a in transpose if a is not None and array.shape[a] > 1]
+  # If used_axes is already in order, no actual transpose is needed and we can
+  # just reshape the array.
+  if sorted(used_axes) == used_axes:
+    return array.reshape(
+        [1 if a is None else array.shape[a] for a in transpose]
+    )
   # Because transpose is not generally supported in pallas kernels, we try to
   # avoid complex transposes here by calling squeeze first. For example, for
   # transpose [1, 2, None], instead of just calling transpose(1, 2, 0), we call
   # squeeze(0).expand(2).
-  used_axes = [a for a in transpose if a is not None and array.shape[a] > 1]
   return (
       array.squeeze([a for a in range(array.ndim) if a not in used_axes])
       .transpose([sum(i < a for i in used_axes) for a in used_axes])

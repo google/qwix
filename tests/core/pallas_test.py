@@ -94,6 +94,13 @@ class PallasTest(parameterized.TestCase):
           expected_new_index_map={(1, 2, 3): (1, 3, 2)},
       ),
       dict(
+          testcase_name="transpose_for_optimal",
+          arg_shape=(256, 1),
+          block_shape=(128, 1),
+          expected_new_block_shape=(1, 128),
+          expected_new_index_map={(1, 0): (0, 1)},
+      ),
+      dict(
           testcase_name="reshape",
           block_shape=(8, 8),
           arg_shape=(32, 32),

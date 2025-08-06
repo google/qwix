@@ -149,8 +149,8 @@ def _transform_block_specs_for_tpu(
   reverse_reshapes = {}
 
   for i, (spec, arg) in enumerate(zip(flatten_block_specs, flatten_args)):
-    # Check if the block shape is already divisible by 8x128.
-    if _can_fit_tpu_requirements(spec.block_shape, arg.shape):
+    # Check if the block shape is already optimal.
+    if _is_optimal_for_tpu(spec.block_shape, arg.shape):
       continue
 
     # Solution 1: try to transpose the array to put the longest axis at the end.
@@ -192,7 +192,10 @@ def _transform_block_specs_for_tpu(
     kernel_args = treedef.flatten_up_to(kernel_args)
     for i, kernel_arg in enumerate(kernel_args):
       if i in reverse_transposes:
-        kernel_args[i] = kernel_arg[...].transpose(reverse_transposes[i])
+        # Use pallas-friendly transpose.
+        kernel_args[i] = qarray.transpose_array(
+            kernel_arg[...], reverse_transposes[i]
+        )
       elif i in reverse_reshapes:
         kernel_args[i] = kernel_arg[...].reshape(reverse_reshapes[i])
     return treedef.unflatten(kernel_args)
@@ -219,3 +222,18 @@ def _can_fit_tpu_requirements(
   return (block_shape[-1] % 128 == 0 or block_shape[-1] == arg_shape[-1]) and (
       block_shape[-2] % 8 == 0 or block_shape[-2] == arg_shape[-2]
   )
+
+
+def _is_optimal_for_tpu(
+    block_shape: tuple[int | None, ...], arg_shape: tuple[int, ...]
+) -> bool:
+  """Check if the block shape is already optimal for TPU."""
+  block_shape = tuple(1 if s is None else s for s in block_shape)
+  if not _can_fit_tpu_requirements(block_shape, arg_shape):
+    # Not optimal if cannot fit the TPU requirements.
+    return False
+  if block_shape[-1] % 128 == 0 and block_shape[-2] % 8 == 0:
+    # Optimal if no padding is needed.
+    return True
+  # Optimal if the block shape is already sorted.
+  return sorted(block_shape) == list(block_shape)
