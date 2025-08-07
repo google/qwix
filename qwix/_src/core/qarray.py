@@ -117,7 +117,7 @@ def transpose_array(
   Returns:
     The transposed array.
   """
-  used_axes = [a for a in transpose if a is not None and array.shape[a] > 1]
+  used_axes = [a for a in transpose if a is not None and array.shape[a] != 1]
   # If used_axes is already in order, no actual transpose is needed and we can
   # just reshape the array.
   if sorted(used_axes) == used_axes:
