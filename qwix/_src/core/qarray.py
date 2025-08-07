@@ -320,7 +320,7 @@ def dequantize(array: QArray) -> jax.Array:
     array: The quantized array to dequantize.
 
   Returns:
-    The dequantized array with the same dtype as the input's scale.
+    The dequantized array, whose dtype is the same as the scale's dtype.
   """
   qvalue = numerics.convert_from(array.qvalue, array.qtype)
   qvalue = qvalue.astype(array.scale.dtype)

@@ -92,13 +92,17 @@ def get_how_to_quantize(
 
 
 def einsum(
-    *args, _qwix_dot_general=dot_general.dot_general, **kwargs
+    *args,
+    _qwix_dot_general=dot_general.dot_general,
+    preferred_element_type: jax.typing.DTypeLike | None = None,
+    **kwargs,
 ) -> jax.Array:
   """Quantized einsum that can take QArrays and returns floating-point jax.Array.
 
   Args:
     *args: Arguments to einsum.
     _qwix_dot_general: The dot_general function to use.
+    preferred_element_type: The preferred element type for jax.lax.dot_general.
     **kwargs: Keyword arguments to einsum.
 
   Returns:
@@ -107,22 +111,33 @@ def einsum(
   # We want to use jnp.einsum with quantized dot_general to avoid duplicating
   # the implementation. However, jnp.einsum will check the inputs to be
   # jax Arrays. To work around this, we send the qvalue to jnp.einsum and
-  # restore the actual QArray in a wrapper. preferred_element_type needs to be
-  # set so that jnp.einsum won't convert the output to some qvalue types.
+  # restore the actual QArray before actually passing them to dot_general.
   args = list(args)
   qvalue_to_qarray = {}
+  # preferred_element_type needs to be set for jnp.einsum so that it won't infer
+  # the type from qvalue x qvalue. However, if user passes None as the
+  # preferred_element_type, we want to also pass None to _qwix_dot_general so
+  # that it can infer the preferred_element_type itself.
+  user_preferred_element_type = preferred_element_type
   for i, arg in enumerate(args):
     if isinstance(arg, qarray.QArray):
       args[i] = arg.qvalue
       qvalue_to_qarray[id(arg.qvalue)] = arg
-      kwargs['preferred_element_type'] = arg.scale.dtype
+      if preferred_element_type is None:
+        preferred_element_type = arg.scale.dtype
 
   def _dot_general(*args, **kwargs):
     args = [qvalue_to_qarray.pop(id(a), a) for a in args]
+    kwargs['preferred_element_type'] = user_preferred_element_type
     return _qwix_dot_general(*args, **kwargs)
 
   # Disabling JIT is necessary so that args in _dot_general are not tracers.
   with jax.disable_jit():
-    out = jnp.einsum(*args, _dot_general=_dot_general, **kwargs)
+    out = jnp.einsum(
+        *args,
+        _dot_general=_dot_general,
+        preferred_element_type=preferred_element_type,
+        **kwargs,
+    )
   assert not qvalue_to_qarray, 'All qvalues should be consumed.'
   return out
