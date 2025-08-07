@@ -19,6 +19,7 @@ from absl.testing import parameterized
 from flax import linen as nn
 from flax import nnx
 import jax
+from jax import export
 from jax import numpy as jnp
 from jax.experimental import pallas as pl
 from qwix._src import flax_util
@@ -375,6 +376,25 @@ class PtqTest(parameterized.TestCase):
     self.assertIsInstance(variables["params"]["w1"], ptq.WithAux)
     self.assertIsInstance(variables["params"]["w2"], jax.Array)
     ptq_model.apply(variables, jnp.ones((16, 32)))
+
+  def test_symbolic_export(self):
+    """Test jax export with symbolic shape."""
+    model = nn.Dense(features=5)
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*",
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+            tile_size=4,
+        )
+    ]
+    ptq_model = qwix_model.quantize_model(model, ptq.PtqProvider(q_rules))
+    variables = ptq_model.init(jax.random.key(0), jnp.ones((16, 32)))
+    (b,) = export.symbolic_shape("b")
+    exp = export.export(jax.jit(ptq_model.apply))(
+        variables, jax.ShapeDtypeStruct((b, 32), jnp.float32)
+    )
+    self.assertEqual(exp.out_avals[0].shape, (b, 5))
 
 
 if __name__ == "__main__":
