@@ -42,6 +42,7 @@ __all__ = [
 # pylint: disable=g-multiple-import, g-importing-member
 
 from collections.abc import Collection, Mapping
+import dataclasses
 import functools
 
 import jax
@@ -61,6 +62,7 @@ def quantize(
     channelwise_axes: Collection[int] = (),
     tiled_axes: Mapping[int, int | float] | None = None,
     calibration_method: str = 'absmax',
+    scale_dtype: jax.typing.DTypeLike | None = None,
 ) -> QArray:
   """Quantize a Jax Array into QArray.
 
@@ -76,6 +78,8 @@ def quantize(
       tile size will be round(axis_size * tile_size).
     calibration_method: The calibration method to use. The format is
       "<method>[,<args>]", e.g. "absmax" or "fixed,-10,10".
+    scale_dtype: The dtype of the scale. If not given, the dtype will be the
+      same as the array's dtype.
 
   Returns:
     The quantized array.
@@ -87,7 +91,10 @@ def quantize(
       tiled_axes=tiled_axes or {},
       calibration_method=calibration_method,
   )
-  return qarray.quantize(array, how)
+  array = qarray.quantize(array, how)
+  if scale_dtype is not None:
+    array = dataclasses.replace(array, scale=array.scale.astype(scale_dtype))
+  return array
 
 
 def dot(

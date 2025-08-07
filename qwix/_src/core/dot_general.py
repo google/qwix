@@ -207,14 +207,15 @@ def _fast_dot_general(
     rhs_scale = qarray.split_axis(rhs_scale, {a: 1 for a in rhs_tiled_axes})
     rhs_scale = qarray.transpose_array(rhs_scale, rhs_scale_transpose)
 
-  # We want to override the preferred_element_type to int32 for int x int
-  # dot_general, or bfloat16/float32 for fp x fp dot_general.
-  if all('int' in x.dtype.name for x in (lhs_value, rhs_value)):
-    preferred_element_type = jnp.int32
-  elif lhs_scale is not None:
-    preferred_element_type = lhs_scale.dtype
-  elif rhs_scale is not None:
-    preferred_element_type = rhs_scale.dtype
+  if preferred_element_type is None:
+    # We want to override the preferred_element_type to int32 for int8 x int8
+    # dot_general, or bfloat16/float32 for fp8 x fp8 dot_general.
+    if all('int' in x.dtype.name for x in (lhs_value, rhs_value)):
+      preferred_element_type = jnp.int32
+    elif lhs_scale is not None:
+      preferred_element_type = lhs_scale.dtype
+    elif rhs_scale is not None:
+      preferred_element_type = rhs_scale.dtype
 
   res = jax.lax.dot_general(
       lhs_value,
@@ -319,12 +320,13 @@ def loop_dot_general(
     else:
       ca_tile_counts.append(1)
 
-  if all('int' in x.dtype.name for x in (lhs_value, rhs_value)):
-    preferred_element_type = jnp.int32
-  elif lhs_scale is not None:
-    preferred_element_type = lhs_scale.dtype
-  elif rhs_scale is not None:
-    preferred_element_type = rhs_scale.dtype
+  if preferred_element_type is None:
+    if all('int' in x.dtype.name for x in (lhs_value, rhs_value)):
+      preferred_element_type = jnp.int32
+    elif lhs_scale is not None:
+      preferred_element_type = lhs_scale.dtype
+    elif rhs_scale is not None:
+      preferred_element_type = rhs_scale.dtype
 
   lhs_scale_transpose, rhs_scale_transpose = _get_scale_transpose(
       dimension_numbers, (len(lhs_value.shape), len(rhs_value.shape))
