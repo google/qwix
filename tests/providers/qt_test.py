@@ -98,7 +98,7 @@ class QtTest(absltest.TestCase):
 
   def test_srq_jit_grad_nnx(self):
     """Test SRQ on NNX module."""
-    linear = nnx.Linear(12, 10, rngs=nnx.Rngs(0))
+    linear = nnx.Linear(12, 10, rngs=nnx.Rngs(0), param_dtype=jnp.bfloat16)
     qt_provider = qt.QtProvider([
         qconfig.QuantizationRule(
             module_path=".*",
@@ -108,7 +108,7 @@ class QtTest(absltest.TestCase):
         ),
     ])
 
-    model_input = jnp.ones((10, 12))
+    model_input = jnp.ones((10, 12), dtype=jnp.float32)
     qt_linear = qwix_model.quantize_model(linear, qt_provider, model_input)
     quant_stats = nnx.variables(qt_linear, flax_util.QuantStat)
 
