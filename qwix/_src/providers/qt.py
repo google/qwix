@@ -15,11 +15,10 @@
 
 import dataclasses
 import functools
-from typing import Any, Callable, Sequence
+from typing import Any, Callable
 
 from flax import linen as nn
 from flax import nnx
-import flax.linen.dtypes
 import jax
 from jax import numpy as jnp
 from jax.experimental import pallas as pl
@@ -51,7 +50,7 @@ class QtRule(qconfig.QuantizationRule):
 
 
 class QtProvider(qconfig.QuantizationProvider):
-  """Quantization provider for Quantized Training(QT)."""
+  """Quantization provider for Quantized Training (QT)."""
 
   def dot_general(
       self,
@@ -133,15 +132,12 @@ class QtProvider(qconfig.QuantizationProvider):
     aux_data.set(ret if unbox else ret.unbox(), 'weight_name', name)
     return ret
 
-  def promote_dtype(self, *args, **kwargs):
-    """Intercepts flax.{linen,nnx.nn}.dtypes.promote_dtype."""
-    if len(args) == 1 and isinstance(args[0], Sequence):
-      args = args[0]  # nnx version
-    ret = flax.linen.dtypes.promote_dtype(*args, **kwargs)
+  def asarray(self, a, *args, **kwargs):
+    """Intercepts jnp.asarray."""
+    ret = jnp.asarray(a, *args, **kwargs)
     # Forward weight_name aux_data.
-    for x, y in zip(ret, args):
-      if y is not None and (name := aux_data.get(y, 'weight_name', None)):
-        aux_data.set(x, 'weight_name', name)
+    if name := aux_data.get(a, 'weight_name', None):
+      aux_data.set(ret, 'weight_name', name)
     return ret
 
   def get_intercept_map(self):
@@ -156,9 +152,8 @@ class QtProvider(qconfig.QuantizationProvider):
                 pl.pallas_call(*args, **kwargs)
             )
         ),
-        'flax.linen.Module.param': self.nn_param,
-        'flax.linen.dtypes.promote_dtype': self.promote_dtype,
-        'flax.nnx.nn.dtypes.promote_dtype': self.promote_dtype,
+        'flax.linen.Module.param': self.nn_param,  # to associate weight_name.
+        'jax.numpy.asarray': self.asarray,  # to forward weight_name.
     }
 
   def process_model_inputs(
