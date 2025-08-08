@@ -28,11 +28,6 @@ from qwix._src.core import einsum
 from qwix._src.core import qarray
 
 
-def quantize_immediately_if_needed(x: jax.Array) -> jax.Array:
-  """Deprecated. This is a no op."""
-  return x
-
-
 def get_all_ops():
   """Get all the functions to intercept and the corresponding ops."""
 
