@@ -36,17 +36,24 @@ class QtRule(qconfig.QuantizationRule):
 
   # In backward pass, quantize residuals and gradients to the given type.
   bwd_qtype: jax.typing.DTypeLike | None = None
+
   # In backward pass, calibrate residuals and gradients using the given method.
   bwd_calibration_method: str = 'absmax'
+
   # In backward pass, enable subchannel for contraction axes when calculating
   # the gradient of weights. Note that the tiling is actually applied to the
   # the incoming gradient and the activation residual rather than any "weight".
   bwd_weight_grad_tile_size: int | float | None = None
+
   # If True, disable channelwise axes for both forward and backward passes.
   disable_channelwise_axes: bool = False
+
   # If True, use the original values instead of the quantized values as the
   # residuals for backward pass.
   bwd_use_original_residuals: bool = False
+
+  # Override any fields in DotGeneralQtConfig.
+  additional_qt_config: dict[str, Any] | None = None
 
 
 class QtProvider(qconfig.QuantizationProvider):
@@ -243,18 +250,32 @@ class QtProvider(qconfig.QuantizationProvider):
             self._collect_quant_stat, f'{op_id}_rhs', rule.act_batch_axes
         )
 
-    return dot_general_qt.DotGeneralQtConfig(
+    qt_config = dot_general_qt.DotGeneralQtConfig(
+        # fwd configs.
         lhs_qtype=lhs_qtype,
         rhs_qtype=rhs_qtype,
-        bwd_qtype=rule.bwd_qtype,
-        bwd_dlhs_tile_size=bwd_dlhs_tile_size,
-        bwd_drhs_tile_size=bwd_drhs_tile_size,
         tile_size=rule.tile_size,
         lhs_calibration_method=lhs_calibration_method,
-        lhs_collect_quant_stat=lhs_collect_quant_stat,
         rhs_calibration_method=rhs_calibration_method,
+        lhs_collect_quant_stat=lhs_collect_quant_stat,
         rhs_collect_quant_stat=rhs_collect_quant_stat,
-        bwd_calibration_method=rule.bwd_calibration_method,
+        # dlhs configs.
+        dlhs_lhs_qtype=rule.bwd_qtype,
+        dlhs_rhs_qtype=rule.bwd_qtype,
+        dlhs_tile_size=bwd_dlhs_tile_size,
+        dlhs_lhs_calibration_method=rule.bwd_calibration_method,
+        dlhs_rhs_calibration_method=rule.bwd_calibration_method,
+        # drhs configs.
+        drhs_lhs_qtype=rule.bwd_qtype,
+        drhs_rhs_qtype=rule.bwd_qtype,
+        drhs_tile_size=bwd_drhs_tile_size,
+        drhs_lhs_calibration_method=rule.bwd_calibration_method,
+        drhs_rhs_calibration_method=rule.bwd_calibration_method,
+        # misc.
         disable_channelwise_axes=rule.disable_channelwise_axes,
         bwd_use_original_residuals=rule.bwd_use_original_residuals,
     )
+
+    if rule.additional_qt_config:
+      qt_config = dataclasses.replace(qt_config, **rule.additional_qt_config)
+    return qt_config

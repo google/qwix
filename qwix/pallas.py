@@ -105,8 +105,8 @@ def dot(
     out_sharding=None,
 ):
   """jnp.dot with QArray support."""
-  a_ndim = len(a.shape)
-  b_ndim = len(b.shape)
+  a_ndim = a.ndim
+  b_ndim = b.ndim
   if a_ndim == 0 or b_ndim == 0:
     contract_dims = ((), ())
   elif b_ndim == 1:
