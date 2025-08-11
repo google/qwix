@@ -54,6 +54,17 @@ class DotGeneralTest(parameterized.TestCase):
           expected_mae=0.107422,
       ),
       dict(
+          testcase_name='fp8_tiled_ra',
+          lhs_shape=(4, 128, 256),
+          lhs_tile_sizes=(1, 1, 128),
+          lhs_qtype=jnp.float8_e4m3fn,
+          rhs_shape=(256, 256),
+          rhs_tile_sizes=(128, 128),  # deepseek style.
+          rhs_qtype=jnp.float8_e4m3fn,
+          dimension_numbers=(([2], [0]), ([], [])),
+          expected_mae=0.0361328,
+      ),
+      dict(
           testcase_name='nf4',
           lhs_shape=(128, 512, 4),
           lhs_tile_sizes=(1, None, 1),

@@ -122,6 +122,26 @@ def _broadcast_axes(
   return jnp.broadcast_to(array, target_shape)
 
 
+def multiply_with_generic_broadcast(x: jax.Array, y: jax.Array):
+  """Multiply two arrays with generic broadcast."""
+  assert x.ndim == y.ndim
+  x_shape, y_shape, o_shape = [], [], []
+  for a, b in zip(x.shape, y.shape):
+    o_shape.append(max(a, b))
+    if a == b or a == 1 or b == 1:
+      x_shape.append(a)
+      y_shape.append(b)
+    elif a % b == 0:
+      x_shape.extend((b, a // b))
+      y_shape.extend((b, 1))
+    elif b % a == 0:
+      x_shape.extend((a, 1))
+      y_shape.extend((a, b // a))
+    else:
+      raise ValueError(f'Cannot broadcast between {x.shape} {y.shape}')
+  return (x.reshape(x_shape) * y.reshape(y_shape)).reshape(o_shape)
+
+
 def _fast_dot_general(
     lhs: qarray.MaybeQArray,
     rhs: qarray.MaybeQArray,
@@ -156,15 +176,11 @@ def _fast_dot_general(
 
   (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dimension_numbers
 
-  if set(lhs_tiled_axes) - set(lhs_ca) or set(rhs_tiled_axes) - set(rhs_ca):
-    raise ValueError(
-        'Only contracting axes can be tiled for now.'
-        f' {lhs_tiled_axes=} {rhs_tiled_axes=} {dimension_numbers=}'
-    )
-
   # Figure out the tiled axes to use for the dot_general. For greater
   # flexibility, we allow a non-tiled axis to be contracted with a tiled axis.
   # However, if both axes are tiled, their tile sizes must be the same.
+  lhs_tiled_ca = {}
+  rhs_tiled_ca = {}
   for l, r in zip(lhs_ca, rhs_ca):
     lhs_tile_size = lhs_tiled_axes.get(l)
     rhs_tile_size = rhs_tiled_axes.get(r)
@@ -174,26 +190,26 @@ def _fast_dot_general(
           f' {lhs_tiled_axes=} {rhs_tiled_axes=} {dimension_numbers=}'
       )
     if lhs_tile_size or rhs_tile_size:
-      lhs_tiled_axes[l] = lhs_tile_size or rhs_tile_size
-      rhs_tiled_axes[r] = lhs_tile_size or rhs_tile_size
+      lhs_tiled_ca[l] = lhs_tile_size or rhs_tile_size
+      rhs_tiled_ca[r] = lhs_tile_size or rhs_tile_size
 
   # Split lhs/rhs_value for tiled axes.
-  lhs_value = qarray.split_axis(lhs_value, lhs_tiled_axes)
-  rhs_value = qarray.split_axis(rhs_value, rhs_tiled_axes)
+  lhs_value = qarray.split_axis(lhs_value, lhs_tiled_ca)
+  rhs_value = qarray.split_axis(rhs_value, rhs_tiled_ca)
 
   # Split lhs/rhs_zero_point for tiled axes.
   if lhs_zero_point is not None:
     lhs_zero_point = qarray.split_axis(
-        lhs_zero_point, {a: 1 for a in lhs_tiled_axes}
+        lhs_zero_point, {a: 1 for a in lhs_tiled_ca}
     )
   if rhs_zero_point is not None:
     rhs_zero_point = qarray.split_axis(
-        rhs_zero_point, {a: 1 for a in rhs_tiled_axes}
+        rhs_zero_point, {a: 1 for a in rhs_tiled_ca}
     )
 
   # Update dimension_numbers and get sum_axes for tiled axes.
-  lhs_ca, lhs_ba, sum_axes = _apply_tiling(lhs_ca, lhs_ba, lhs_tiled_axes)
-  rhs_ca, rhs_ba, _ = _apply_tiling(rhs_ca, rhs_ba, rhs_tiled_axes)
+  lhs_ca, lhs_ba, sum_axes = _apply_tiling(lhs_ca, lhs_ba, lhs_tiled_ca)
+  rhs_ca, rhs_ba, _ = _apply_tiling(rhs_ca, rhs_ba, rhs_tiled_ca)
   dimension_numbers = (lhs_ca, rhs_ca), (lhs_ba, rhs_ba)
 
   # Transpose lhs/rhs_scale. This works for tiled axes too.
@@ -201,10 +217,10 @@ def _fast_dot_general(
       dimension_numbers, (len(lhs_value.shape), len(rhs_value.shape))
   )
   if lhs_scale is not None:
-    lhs_scale = qarray.split_axis(lhs_scale, {a: 1 for a in lhs_tiled_axes})
+    lhs_scale = qarray.split_axis(lhs_scale, {a: 1 for a in lhs_tiled_ca})
     lhs_scale = qarray.transpose_array(lhs_scale, lhs_scale_transpose)
   if rhs_scale is not None:
-    rhs_scale = qarray.split_axis(rhs_scale, {a: 1 for a in rhs_tiled_axes})
+    rhs_scale = qarray.split_axis(rhs_scale, {a: 1 for a in rhs_tiled_ca})
     rhs_scale = qarray.transpose_array(rhs_scale, rhs_scale_transpose)
 
   if preferred_element_type is None:
@@ -245,9 +261,9 @@ def _fast_dot_general(
     )
 
   if lhs_scale is not None:
-    res *= lhs_scale
+    res = multiply_with_generic_broadcast(res, lhs_scale)
   if rhs_scale is not None:
-    res *= rhs_scale
+    res = multiply_with_generic_broadcast(res, rhs_scale)
   if sum_axes:
     res = jnp.sum(res, axis=sum_axes)
   return res
@@ -296,12 +312,6 @@ def loop_dot_general(
 
   lhs_ca, rhs_ca = dimension_numbers[0]
 
-  if set(lhs_tiled_axes) - set(lhs_ca) or set(rhs_tiled_axes) - set(rhs_ca):
-    raise ValueError(
-        'Only contracting axes can be tiled for now.'
-        f' {lhs_tiled_axes=} {rhs_tiled_axes=} {dimension_numbers=}'
-    )
-
   # Allow non-tiled axes to be contracted with tiled axes.
   ca_tile_counts = []  # number of tiles for each contracting axis.
   for l, r in zip(lhs_ca, rhs_ca):
@@ -314,8 +324,6 @@ def loop_dot_general(
       )
     tile_size = lhs_tile_size or rhs_tile_size
     if tile_size is not None:
-      lhs_tiled_axes[l] = tile_size
-      rhs_tiled_axes[r] = tile_size
       ca_tile_counts.append(lhs_value.shape[l] // tile_size)
     else:
       ca_tile_counts.append(1)
@@ -358,13 +366,13 @@ def loop_dot_general(
         **kwargs,
     )
     if lhs_scale is not None:
-      out *= qarray.transpose_array(
-          take_slice(lhs_scale, lhs_ca, ca_tile_indices), lhs_scale_transpose
-      )
+      scale = take_slice(lhs_scale, lhs_ca, ca_tile_indices)
+      scale = qarray.transpose_array(scale, lhs_scale_transpose)
+      out = multiply_with_generic_broadcast(out, scale)
     if rhs_scale is not None:
-      out *= qarray.transpose_array(
-          take_slice(rhs_scale, rhs_ca, ca_tile_indices), rhs_scale_transpose
-      )
+      scale = take_slice(rhs_scale, rhs_ca, ca_tile_indices)
+      scale = qarray.transpose_array(scale, rhs_scale_transpose)
+      out = multiply_with_generic_broadcast(out, scale)
     acc = out if acc is None else acc + out
   assert acc is not None
   return acc
