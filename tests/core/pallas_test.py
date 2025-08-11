@@ -331,7 +331,7 @@ class PallasTest(parameterized.TestCase):
           lhs_shape=(8, 16, 512),
           lhs_scale_shape=(8, 16, 4),
           rhs_shape=(512, 256),
-          rhs_scale_shape=(4, 256),
+          rhs_scale_shape=(4, 2),
           dimension_numbers=(([2], [0]), ([], [])),
       ),
   )
