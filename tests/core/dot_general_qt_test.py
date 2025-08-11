@@ -152,9 +152,12 @@ class DotGeneralQtTest(parameterized.TestCase):
     config = dot_general_qt.DotGeneralQtConfig(
         lhs_qtype=lhs_qtype,
         rhs_qtype=rhs_qtype,
-        bwd_qtype=bwd_qtype,
+        dlhs_lhs_qtype=bwd_qtype,
+        dlhs_rhs_qtype=bwd_qtype,
+        drhs_lhs_qtype=bwd_qtype,
+        drhs_rhs_qtype=bwd_qtype,
         tile_size=tile_size,
-        bwd_drhs_tile_size=bwd_drhs_tile_size,
+        drhs_tile_size=bwd_drhs_tile_size,
     )
 
     def loss_fn_fq(lhs_arr, rhs_arr):

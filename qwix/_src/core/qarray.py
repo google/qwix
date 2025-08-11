@@ -51,6 +51,7 @@ class QArray:
 
   # Array-like methods.
   shape = property(lambda self: self.qvalue.shape)
+  ndim = property(lambda self: self.qvalue.ndim)
 
 
 @dataclasses.dataclass(slots=True, frozen=True, kw_only=True)
