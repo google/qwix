@@ -89,13 +89,11 @@ def _update_dimension_numbers_for_backward(
   #   x: output gradient, dlhs if for_dlhs, drhs otherwise.
   #   y: residual, rhs if for_dlhs, lhs otherwise.
   if for_dlhs:
+    (x_ca, y_ca), (x_ba, y_ba) = fwd_dimension_numbers
     x_ndim, y_ndim = fwd_ndims
-    x_ca, y_ca = fwd_dimension_numbers[0]
-    x_ba, y_ba = fwd_dimension_numbers[1]
   else:
+    (y_ca, x_ca), (y_ba, x_ba) = fwd_dimension_numbers
     y_ndim, x_ndim = fwd_ndims
-    y_ca, x_ca = fwd_dimension_numbers[0]
-    y_ba, x_ba = fwd_dimension_numbers[1]
 
   x_ra = tuple(sorted(set(range(x_ndim)) - set(x_ca) - set(x_ba)))
   y_ra = tuple(sorted(set(range(y_ndim)) - set(y_ca) - set(y_ba)))
