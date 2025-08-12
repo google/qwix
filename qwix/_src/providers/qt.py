@@ -21,11 +21,9 @@ from flax import linen as nn
 from flax import nnx
 import jax
 from jax import numpy as jnp
-from jax.experimental import pallas as pl
 from qwix._src import aux_data
 from qwix._src import averaging
 from qwix._src import flax_util
-from qwix._src import interception
 from qwix._src import qconfig
 from qwix._src.core import dot_general_qt
 
@@ -149,16 +147,10 @@ class QtProvider(qconfig.QuantizationProvider):
 
   def get_intercept_map(self):
     """Used for interception."""
-    return {
+    return super().get_intercept_map() | {
         # TODO(jiwonshin): add support for quantized conv_general_dilated.
         'jax.lax.dot_general': self.dot_general,
         'jax.numpy.einsum': self.einsum,
-        # Disable interception for ops in pallas_call.
-        'jax.experimental.pallas.pallas_call': (
-            lambda *args, **kwargs: interception.disable_interceptions(
-                pl.pallas_call(*args, **kwargs)
-            )
-        ),
         'flax.linen.Module.param': self.nn_param,  # to associate weight_name.
         'jax.numpy.asarray': self.asarray,  # to forward weight_name.
     }

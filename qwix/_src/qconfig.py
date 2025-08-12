@@ -13,16 +13,17 @@
 # limitations under the License.
 """Model-level quantization config."""
 
-import abc
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Sequence
 import dataclasses
 import re
 from typing import Any
 
 from absl import logging
 import jax
+from jax.experimental import pallas as pl
 from qwix._src import aux_data
 from qwix._src import flax_util
+from qwix._src import interception
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -36,9 +37,9 @@ class QuantizationRule:
   # A regex for matching the module path.
   module_path: str = '.*'
 
-  # The ops this rule applies to, which is a sequence of op names, e.g. einsum.
-  # If not set, the rule applies to all ops.
-  op_names: Sequence[str] = ()
+  # The ops this rule applies to, which is a collection of op names, e.g.,
+  # einsum. If not set, the rule applies to all ops.
+  op_names: Collection[str] = ()
 
   ########################################################
   ### "Configs" that specify the quantization behavior.
@@ -88,7 +89,13 @@ class QuantizationRule:
   act_batch_axes: Collection[int] = (0,)
 
 
-class QuantizationProvider(metaclass=abc.ABCMeta):
+def get_current_rule(op_name: str) -> QuantizationRule | None:
+  """Returns the current quantization rule if intercepted, or None otherwise."""
+  del op_name
+  return None
+
+
+class QuantizationProvider:
   """Interface for model integration.
 
   A provider can be either explicitly called by model authors, or implicitly
@@ -114,10 +121,20 @@ class QuantizationProvider(metaclass=abc.ABCMeta):
       rule = dataclasses.replace(rule, act_calibration_method='absmax')
     return rule
 
-  @abc.abstractmethod
-  def get_intercept_map(self) -> Mapping[str, Callable[..., Any]]:
+  def get_intercept_map(self) -> dict[str, Callable[..., Any]]:
     """Returns the intercept map for interception.wrap_func_intercepted."""
-    ...
+    # Common functions that are intercepted by all quantization providers.
+    return {
+        'qwix._src.qconfig.get_current_rule': (
+            lambda op: self._get_current_rule_and_op_id(op, only_rule=True)[0]
+        ),
+        # Disable interception for ops in pallas_call.
+        'jax.experimental.pallas.pallas_call': (
+            lambda *args, **kwargs: interception.disable_interceptions(
+                pl.pallas_call(*args, **kwargs)
+            )
+        ),
+    }
 
   def process_model_inputs(
       self, model: Any, model_args: Sequence[Any], model_kwargs: dict[str, Any]
@@ -131,14 +148,19 @@ class QuantizationProvider(metaclass=abc.ABCMeta):
     return model_output
 
   def _get_current_rule_and_op_id(
-      self, op_name: str, repeated_call: bool = False
-  ) -> tuple[QuantizationRule | None, str]:
+      self,
+      op_name: str,
+      *,
+      only_rule: bool = False,
+      repeated_call: bool = False,
+  ) -> tuple[QuantizationRule | None, str | None]:
     """Returns the quantization rule and a unique op id for given op.
 
     This function is intended to be called by subclasses.
 
     Args:
       op_name: The name of the op.
+      only_rule: If True, only return the rule and not the op id.
       repeated_call: If True, use the previous op id. This is useful when this
         function is called multiple times for the same op.
 
@@ -155,6 +177,8 @@ class QuantizationProvider(metaclass=abc.ABCMeta):
         rule_idx = idx
         break
     rule = self._rules[rule_idx] if rule_idx is not None else None
+    if only_rule:
+      return rule, None
 
     # Always generate op_id regardless of whether a rule is found.
     module = flax_util.get_current_module()

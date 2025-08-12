@@ -37,6 +37,7 @@ __all__ = [
     'pallas_call',
     'QArray',
     'dequantize',
+    'get_current_rule',
 ]
 
 # pylint: disable=g-multiple-import, g-importing-member
@@ -51,6 +52,7 @@ from qwix._src.core.dot_general import loop_dot_general as dot_general
 from qwix._src.core.einsum import einsum as _einsum
 from qwix._src.core.pallas import pallas_call
 from qwix._src.core.qarray import QArray, dequantize
+from qwix._src.qconfig import get_current_rule
 
 einsum = functools.partial(_einsum, _qwix_dot_general=dot_general)
 

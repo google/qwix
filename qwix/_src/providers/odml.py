@@ -110,8 +110,9 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
 
   def get_intercept_map(self):
     """Used for interception."""
-    intercept_map = {'flax.linen.Module.param': self.nn_param}
-    # Compile the policy into the intercept map.
+    intercept_map = super().get_intercept_map()
+    intercept_map['flax.linen.Module.param'] = self.nn_param
+    # Add all the ops to the intercept map.
     for name, op in self._ops.items():
       op: Type[odml_ops.QuantizedOp]
       intercept_map[name] = op(
