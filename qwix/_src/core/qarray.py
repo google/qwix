@@ -14,11 +14,17 @@
 """Quantized Array."""
 
 import dataclasses
+import functools
 from typing import Collection, Mapping, Sequence, TypeAlias
 import flax.struct
 import jax
 from jax import numpy as jnp
 from qwix._src.core import numerics
+
+
+# ---------------------------------------------
+# QArray definition and common functions.
+# ---------------------------------------------
 
 
 @flax.struct.dataclass
@@ -52,6 +58,124 @@ class QArray:
   # Array-like methods.
   shape = property(lambda self: self.qvalue.shape)
   ndim = property(lambda self: self.qvalue.ndim)
+
+  def reshape(self, *new_shape) -> 'QArray':
+    return reshape(self, *new_shape)
+
+  def transpose(self, *args) -> 'QArray':
+    return jax.tree.map(lambda x: x.transpose(*args), self)
+
+  def __getitem__(self, idx) -> 'QArray':
+    return rewriting_take(self, idx)
+
+
+def reshape(array: QArray, *new_shape) -> QArray:
+  """Reshapes the array, which is not always feasible."""
+  if len(new_shape) == 1:
+    try:
+      new_shape = tuple(new_shape[0])
+    except TypeError:
+      pass
+
+  prod = lambda s: functools.reduce(lambda x, y: x * y, s, 1)
+
+  old_shape = array.shape
+  if prod(old_shape) != prod(new_shape):
+    raise ValueError(f'Cannot reshape {old_shape} into {new_shape}.')
+
+  # Group the old shape and the new shape. e.g. for (2, 2, 6) -> (4, 1, 3, 2),
+  # the groups are (2, 2) -> (4,) and (6,) -> (3, 2) with 1 ignored.
+  groups = []
+  last_group_old, last_group_new = [], []
+  i, j = 0, 0
+  while i < len(old_shape) or j < len(new_shape):
+    # INVARIANT: if prod(last_group_old) == prod(last_group_new), they
+    # must be both empty.
+    if prod(last_group_old) < prod(last_group_new):
+      last_group_old.append(old_shape[i])
+      i += 1
+    elif prod(last_group_old) > prod(last_group_new):
+      last_group_new.append(new_shape[j])
+      j += 1
+    elif i < len(old_shape) and (
+        j >= len(new_shape) or old_shape[i] <= new_shape[j]
+    ):
+      last_group_old.append(old_shape[i])
+      i += 1
+    elif j < len(new_shape):
+      last_group_new.append(new_shape[j])
+      j += 1
+    if prod(last_group_old) == prod(last_group_new):
+      groups.append((tuple(last_group_old), tuple(last_group_new)))
+      last_group_old, last_group_new = [], []
+  assert not last_group_old and not last_group_new
+
+  def reshape_by_groups(x: jax.Array) -> jax.Array:
+    i = 0
+    target_shape = []
+    for old, new in groups:
+      actual_shape = x.shape[i : i + len(old)]
+      actual_size = prod(actual_shape)
+      if actual_shape == old:
+        target_shape.extend(new)
+      elif actual_size == 1:
+        target_shape.extend(1 for _ in new)
+      elif actual_size == actual_shape[0] and new[0] % actual_shape[0] == 0:
+        # Channelwise-preserving reshape, e.g.
+        #   qvalue: (2, 2, 6) -> (4, 3, 2)
+        #   scale:  (2, 1, 3) -> (2, 3, 1)  OK
+        #   scale:  (1, 2, 2) -> NOT OK
+        target_shape.extend([actual_shape[0]] + [1] * (len(new) - 1))
+      else:
+        raise ValueError(
+            f'Cannot reshape {old_shape} into {new_shape} for {x.shape}.'
+        )
+      i += len(old)
+    return x.reshape(target_shape)
+
+  return jax.tree.map(reshape_by_groups, array)
+
+
+def rewriting_take(array: QArray, idx) -> QArray:
+  """Returns array[*idx]."""
+  try:
+    idx = list(idx)
+  except TypeError:
+    idx = [idx]
+
+  actual_len = sum(i is not None and i is not Ellipsis for i in idx)
+  if Ellipsis in idx:
+    assert idx.count(Ellipsis) == 1
+    index = idx.index(Ellipsis)
+    idx[index : index + 1] = [slice(None)] * (array.ndim - actual_len)
+  else:
+    idx += [slice(None)] * (array.ndim - actual_len)
+
+  def take(x: jax.Array) -> jax.Array:
+    actual_idx = []
+    i = 0
+    for a, b in zip(array.shape, x.shape):
+      while idx[i] is None:
+        actual_idx.append(None)
+        i += 1
+      if a == b or idx[i] == slice(None):
+        actual_idx.append(idx[i])
+      elif isinstance(idx[i], int):
+        actual_idx.append(idx[i] // (a // b))
+      elif b == 1:
+        actual_idx.append(slice(None))
+      else:
+        raise ValueError(f'Unsupported indexing {idx} for {array.shape}.')
+      i += 1
+    actual_idx.extend(idx[i:])
+    return x[tuple(actual_idx)]
+
+  return jax.tree.map(take, array)
+
+
+# ---------------------------------------------
+# Quantization and dequantization of QArray.
+# ---------------------------------------------
 
 
 @dataclasses.dataclass(slots=True, frozen=True, kw_only=True)

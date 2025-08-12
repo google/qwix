@@ -192,7 +192,7 @@ class PallasTest(parameterized.TestCase):
 
     def dequantize_kernel(scalar_ref, q_ref, out_ref):
       del scalar_ref  # Unused.
-      out_ref[...] = qarray.dequantize(jax.tree.map(lambda x: x[...], q_ref))
+      out_ref[...] = qarray.dequantize(q_ref[...])
 
     def dequantize_pallas(q: qarray.QArray):
       block_shape = (1,) * (q.qvalue.ndim - 2) + bs
@@ -228,9 +228,7 @@ class PallasTest(parameterized.TestCase):
         acc_ref[...] = jnp.zeros_like(acc_ref)
 
       acc_ref[...] += dot_general.loop_dot_general(
-          jax.tree.map(lambda x: x[...], x_ref),
-          jax.tree.map(lambda x: x[...], y_ref),
-          (((1,), (0,)), ((), ())),
+          x_ref[...], y_ref[...], (((1,), (0,)), ((), ()))
       )
 
       @pl.when(pl.program_id(3) == nsteps - 1)
@@ -351,11 +349,7 @@ class PallasTest(parameterized.TestCase):
     """Test what kind of dot_general can be called in pallas kernels."""
 
     def pl_kernel(x, y, o):
-      o[...] = dot_general.loop_dot_general(
-          jax.tree.map(lambda x: x[...], x),
-          jax.tree.map(lambda x: x[...], y),
-          dimension_numbers,
-      )
+      o[...] = dot_general.loop_dot_general(x[...], y[...], dimension_numbers)
 
     if lhs_scale_shape is None:
       lhs = self._make_array(lhs_shape, lhs_dtype)

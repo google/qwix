@@ -187,6 +187,55 @@ class QArrayTest(parameterized.TestCase):
     )
     self.assertEqual(qarray.get_tiled_axes(array), {1: 32, 2: 8})
 
+  def test_array_methods(self):
+    array = self._make_array((2, 2, 6))
+    q_array = qarray.quantize(
+        array,
+        qarray.HowToQuantize(
+            qtype=jnp.int8,
+            channelwise_axes=[0],
+            tiled_axes={2: 2},
+            calibration_method='absmax',
+        ),
+    )
+    self.assertEqual(q_array.scale.shape, (2, 1, 3))
+    self.assertEqual(q_array.shape, (2, 2, 6))
+    self.assertEqual(q_array.ndim, 3)
+
+    with self.subTest('reshape'):
+      reshaped_array = q_array.reshape(4, 1, 3, 2)
+      self.assertEqual(reshaped_array.shape, (4, 1, 3, 2))
+      self.assertEqual(reshaped_array.scale.shape, (2, 1, 3, 1))
+      self.assertTrue(
+          jnp.array_equal(
+              qarray.dequantize(reshaped_array),
+              qarray.dequantize(q_array).reshape(4, 1, 3, 2),
+          )
+      )
+      self.assertEqual(q_array.reshape(2, 1, 2, 6).scale.shape, (2, 1, 1, 3))
+      self.assertEqual(q_array.reshape(1, 4, 6).scale.shape, (1, 2, 3))
+      self.assertEqual(reshaped_array.reshape(4, 6).scale.shape, (2, 3))
+
+    with self.subTest('transpose'):
+      transposed_array = q_array.transpose(1, 2, 0)
+      self.assertEqual(transposed_array.shape, (2, 6, 2))
+      self.assertEqual(transposed_array.scale.shape, (1, 3, 2))
+
+    with self.subTest('slice'):
+      sliced_array = q_array[..., 1]
+      self.assertEqual(sliced_array.shape, (2, 2))
+      self.assertEqual(sliced_array.scale.shape, (2, 1))
+      self.assertTrue(
+          jnp.array_equal(
+              qarray.dequantize(sliced_array),
+              qarray.dequantize(q_array)[..., 1],
+          )
+      )
+      self.assertEqual(q_array[0:1, 1:2, 4].scale.shape, (1, 1))
+      self.assertEqual(q_array[0].scale.shape, (1, 3))
+      self.assertEqual(q_array[..., None].scale.shape, (2, 1, 3, 1))
+      self.assertEqual(q_array[None].scale.shape, (1, 2, 1, 3))
+
 
 if __name__ == '__main__':
   absltest.main()
