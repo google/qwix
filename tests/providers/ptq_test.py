@@ -355,6 +355,7 @@ class PtqTest(parameterized.TestCase):
         w1 = self.param("w1", nn.initializers.ones, (x.shape[-1], 1))
         w2 = self.param("w2", nn.initializers.ones, (1, x.shape[-1]))
         out_shape = jax.ShapeDtypeStruct(x.shape, x.dtype)
+        assert qconfig.get_current_rule("dot_general") is not None
 
         @functools.partial(pl.pallas_call, out_shape=out_shape, interpret=True)
         def pallas_dot(x, y, out):
