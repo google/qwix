@@ -378,6 +378,11 @@ def loop_dot_general(
   return acc
 
 
+# If a contracting dimension has a tile size smaller than this threshold, tiled
+# dot general will be inefficient and we should dequantize the input first.
+MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT = 128
+
+
 def dot_general(
     lhs: qarray.MaybeQArray,
     rhs: qarray.MaybeQArray,
@@ -399,18 +404,21 @@ def dot_general(
   Returns:
     a floating-point jax.Array.
   """
-  can_optimize = True
+  should_dequant_on_output = True
+  for operand, ca in zip((lhs, rhs), dimension_numbers[0]):
+    if isinstance(operand, qarray.QArray):
+      # qtypes like nf4 cannot be dequantized on output.
+      if not numerics.can_dequant_on_output(operand.qtype):
+        should_dequant_on_output = False
+      # If a contracting dimension is tiled too small, tiled dot general will
+      # be inefficient and we should dequantize the input first.
+      for axis in ca:
+        if operand.scale.shape[axis] > 1:
+          tile_size = operand.qvalue.shape[axis] // operand.scale.shape[axis]
+          if tile_size < MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT:
+            should_dequant_on_output = False
 
-  if isinstance(lhs, qarray.QArray) and not numerics.can_dequant_on_output(
-      lhs.qtype
-  ):
-    can_optimize = False
-  if isinstance(rhs, qarray.QArray) and not numerics.can_dequant_on_output(
-      rhs.qtype
-  ):
-    can_optimize = False
-
-  if can_optimize:
+  if should_dequant_on_output:
     return _fast_dot_general(
         lhs,
         rhs,

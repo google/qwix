@@ -211,7 +211,7 @@ class EinsumTest(parameterized.TestCase):
           rhs_shape=(256, 16, 128),
           tile_size=1 / 4,
           lhs_asymmetric=True,
-          expected_rel_mae=0.00982666,
+          expected_rel_mae=0.00970459,
       ),
       dict(
           testcase_name='symmetric_subchannel_nf4',
@@ -335,6 +335,31 @@ class EinsumTest(parameterized.TestCase):
         ).dtype,
         jnp.float32,
     )
+
+  def test_dequant_on_inputs(self):
+    lhs = self._make_array((16, 128, 128), jnp.bfloat16)
+    rhs = self._make_array((128, 128, 16), jnp.bfloat16)
+    lhs = qarray.quantize(
+        lhs,
+        qarray.HowToQuantize(
+            qtype=jnp.int8,
+            channelwise_axes=(0, 1),
+            tiled_axes={},
+            calibration_method='absmax',
+        ),
+    )
+    rhs = qarray.quantize(
+        rhs,
+        qarray.HowToQuantize(
+            qtype=jnp.int8,
+            channelwise_axes=(0, 2),
+            tiled_axes={},
+            calibration_method='absmax',
+        ),
+    )
+    out = einsum.einsum('TNH,NHD -> TD', lhs, rhs)
+    self.assertEqual(out.shape, (16, 16))
+    self.assertEqual(out.dtype, jnp.bfloat16)
 
 
 if __name__ == '__main__':
