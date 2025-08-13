@@ -134,6 +134,17 @@ class DotGeneralTest(parameterized.TestCase):
           equivalent_einsum_str='abcde,edfa->abcf',
           expected_mae=0.00958252,
       ),
+      dict(
+          testcase_name='dequant_on_input',
+          lhs_shape=(16, 128, 128),
+          lhs_tile_sizes=(1, 1, None),
+          lhs_qtype=jnp.int8,
+          rhs_shape=(128, 128, 16),
+          rhs_tile_sizes=(1, None, 1),
+          rhs_qtype=jnp.int8,
+          dimension_numbers=(([1, 2], [0, 1]), ([], [])),
+          expected_mae=0.0090332,
+      ),
   )
   def test_dot_general(
       self,
@@ -150,6 +161,9 @@ class DotGeneralTest(parameterized.TestCase):
       expected_mae: float,
       equivalent_einsum_str: str | None = None,
   ):
+    # Use a small tile size limit during testing.
+    dot_general.MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT = 16
+
     lhs = self._make_array(lhs_shape, lhs_asymmetric)
     rhs = self._make_array(rhs_shape, rhs_asymmetric)
 
