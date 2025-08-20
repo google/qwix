@@ -293,12 +293,12 @@ def update_boxed(
     if value is not None:
       boxed = boxed.replace(value)
     shape = boxed.value.shape
-    axes = boxed.get_metadata().get('sharding', None)
+    axes = boxed.get_metadata().get('sharding_names', None)
     if isinstance(axes, (list, tuple)):
       axes = update_sharding(
           axes, shape=shape, split=split, merge=merge, transpose=transpose
       )
-      setattr(boxed, 'sharding', axes)
+      setattr(boxed, 'sharding_names', axes)
   elif isinstance(boxed, jax.Array):  # not boxed.
     if value is not None:
       boxed = value

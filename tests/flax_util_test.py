@@ -175,12 +175,12 @@ class FlaxUtilTest(parameterized.TestCase):
     updated = flax_util.update_boxed(boxed, value=jnp.ones((4, 8)), merge=[0])
     self.assertIsInstance(updated, nnx.Param)
     self.assertEqual(updated.value.shape, (4, 8))
-    self.assertEqual(updated.sharding, ("a", "b"))
+    self.assertEqual(updated.sharding_names, ("a", "b"))
 
     boxed = nnx.Param(jnp.ones((2, 2, 8)), sharding=("a", None, "b"))
     updated = flax_util.update_boxed(boxed, transpose=[2, 0, None])
     self.assertIsInstance(updated, nnx.Param)
-    self.assertEqual(updated.sharding, ("b", "a", None))
+    self.assertEqual(updated.sharding_names, ("b", "a", None))
 
 
 if __name__ == "__main__":
