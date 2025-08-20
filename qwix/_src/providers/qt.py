@@ -17,7 +17,6 @@ import dataclasses
 import functools
 from typing import Any, Callable
 
-from flax import core
 from flax import linen as nn
 from flax import nnx
 import jax
@@ -27,8 +26,6 @@ from qwix._src import averaging
 from qwix._src import flax_util
 from qwix._src import qconfig
 from qwix._src.core import dot_general_qt
-
-FrozenDict = core.FrozenDict
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -54,7 +51,7 @@ class QtRule(qconfig.QuantizationRule):
   bwd_use_original_residuals: bool = False
 
   # Override any fields in DotGeneralQtConfig.
-  additional_qt_config: FrozenDict[str, Any] | None = None
+  additional_qt_config: dict[str, Any] | None = None
 
 
 class QtProvider(qconfig.QuantizationProvider):
