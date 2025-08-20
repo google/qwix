@@ -15,7 +15,7 @@
 
 import dataclasses
 import functools
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from flax import linen as nn
 from flax import nnx
@@ -51,7 +51,7 @@ class QtRule(qconfig.QuantizationRule):
   bwd_use_original_residuals: bool = False
 
   # Override any fields in DotGeneralQtConfig.
-  additional_qt_config: dict[str, Any] | None = None
+  additional_qt_config: Mapping[str, Any] | None = None
 
 
 class QtProvider(qconfig.QuantizationProvider):
