@@ -252,7 +252,9 @@ def dot_general_qt_bwd(
         g_how = dataclasses.replace(g_how, channelwise_axes=[])
       g = qarray.quantize(g, g_how)
 
-    if not y_qtype and isinstance(y, qarray.QArray):
+    if y_qtype is not None:
+      assert isinstance(y, qarray.QArray), 'y should be quantized in fwd pass.'
+    elif isinstance(y, qarray.QArray):
       y = qarray.dequantize(y)
 
     grad_res = dot_general.dot_general(g, y, bwd_dnums)
@@ -271,7 +273,7 @@ def dot_general_qt(
     dimension_numbers: jax.lax.DotDimensionNumbers,
     config: DotGeneralQtConfig,
 ) -> jax.Array:
-  """Quantized dot_general using a simple, hashable config dataclass."""
+  """Quantized dot_general with backpropagation support."""
   result, _ = dot_general_qt_fwd(lhs, rhs, dimension_numbers, config)
   return result
 

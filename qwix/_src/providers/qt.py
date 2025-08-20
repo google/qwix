@@ -32,15 +32,16 @@ from qwix._src.core import dot_general_qt
 class QtRule(qconfig.QuantizationRule):
   """QuantizationRule with all settings specific to Quantized Training (QT)."""
 
-  # In backward pass, quantize residuals and gradients to the given type.
+  # In backward pass, quantize the gradients to the given type. If set, the
+  # residuals will also be quantized with the same qtype as in the forward pass.
   bwd_qtype: jax.typing.DTypeLike | None = None
 
-  # In backward pass, calibrate residuals and gradients using the given method.
+  # In backward pass, calibrate the gradients using the given method.
   bwd_calibration_method: str = 'absmax'
 
   # In backward pass, enable subchannel for contraction axes when calculating
   # the gradient of weights. Note that the tiling is actually applied to the
-  # the incoming gradient and the activation residual rather than any "weight".
+  # the incoming gradient and the residual activation rather than any "weight".
   bwd_weight_grad_tile_size: int | float | None = None
 
   # If True, disable channelwise axes for both forward and backward passes.
@@ -206,11 +207,9 @@ class QtProvider(qconfig.QuantizationProvider):
     lhs_qtype = None
     lhs_calibration_method = None
     lhs_is_weight = aux_data.get(lhs, 'weight_name', None) is not None
-    bwd_dlhs_tile_size = None
     lhs_collect_quant_stat = None
 
     if lhs_is_weight:
-      bwd_dlhs_tile_size = rule.bwd_weight_grad_tile_size
       if rule.weight_qtype is not None:
         lhs_qtype = rule.weight_qtype
         lhs_calibration_method = rule.weight_calibration_method
@@ -226,11 +225,9 @@ class QtProvider(qconfig.QuantizationProvider):
     rhs_qtype = None
     rhs_calibration_method = None
     rhs_is_weight = aux_data.get(rhs, 'weight_name', None) is not None
-    bwd_drhs_tile_size = None
     rhs_collect_quant_stat = None
 
     if rhs_is_weight:
-      bwd_drhs_tile_size = rule.bwd_weight_grad_tile_size
       if rule.weight_qtype is not None:
         rhs_qtype = rule.weight_qtype
         rhs_calibration_method = rule.weight_calibration_method
@@ -241,6 +238,20 @@ class QtProvider(qconfig.QuantizationProvider):
         rhs_collect_quant_stat = functools.partial(
             self._collect_quant_stat, f'{op_id}_rhs', rule.act_batch_axes
         )
+
+    # bwd config, which is only enabled when bwd_qtype is set.
+    dlhs_rhs_qtype = None
+    dlhs_tile_size = None
+    drhs_rhs_qtype = None
+    drhs_tile_size = None
+
+    if rule.bwd_qtype is not None:
+      dlhs_rhs_qtype = rhs_qtype  # dlhs_rhs is the residual rhs.
+      drhs_rhs_qtype = lhs_qtype  # drhs_rhs is the residual lhs.
+      if lhs_is_weight:
+        dlhs_tile_size = rule.bwd_weight_grad_tile_size
+      if rhs_is_weight:
+        drhs_tile_size = rule.bwd_weight_grad_tile_size
 
     qt_config = dot_general_qt.DotGeneralQtConfig(
         # fwd configs.
@@ -253,16 +264,16 @@ class QtProvider(qconfig.QuantizationProvider):
         rhs_collect_quant_stat=rhs_collect_quant_stat,
         # dlhs configs.
         dlhs_lhs_qtype=rule.bwd_qtype,
-        dlhs_rhs_qtype=rule.bwd_qtype,
-        dlhs_tile_size=bwd_dlhs_tile_size,
+        dlhs_rhs_qtype=dlhs_rhs_qtype,
+        dlhs_tile_size=dlhs_tile_size,
         dlhs_lhs_calibration_method=rule.bwd_calibration_method,
-        dlhs_rhs_calibration_method=rule.bwd_calibration_method,
+        dlhs_rhs_calibration_method=rhs_calibration_method,
         # drhs configs.
         drhs_lhs_qtype=rule.bwd_qtype,
-        drhs_rhs_qtype=rule.bwd_qtype,
-        drhs_tile_size=bwd_drhs_tile_size,
+        drhs_rhs_qtype=drhs_rhs_qtype,
+        drhs_tile_size=drhs_tile_size,
         drhs_lhs_calibration_method=rule.bwd_calibration_method,
-        drhs_rhs_calibration_method=rule.bwd_calibration_method,
+        drhs_rhs_calibration_method=lhs_calibration_method,
         # misc.
         disable_channelwise_axes=rule.disable_channelwise_axes,
         bwd_use_original_residuals=rule.bwd_use_original_residuals,
