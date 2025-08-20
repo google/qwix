@@ -29,6 +29,7 @@ from qwix._src.providers import ptq
 from qwix._src.providers import qt
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
+P = jax.sharding.PartitionSpec
 
 
 class PtqTest(parameterized.TestCase):
@@ -143,6 +144,7 @@ class PtqTest(parameterized.TestCase):
     ptq_dense.apply({"params": quantized_params}, model_input)
 
   def test_nnx_ptq(self):
+    mesh = jax.make_mesh((2, 2), ("contraction", "remaining"))
     q_rules = [
         qconfig.QuantizationRule(
             module_path=".*", weight_qtype=jnp.int8, tile_size=4
@@ -155,51 +157,63 @@ class PtqTest(parameterized.TestCase):
         out_features=5,
         rngs=nnx.Rngs(0),
         kernel_init=nnx.with_partitioning(
-            nnx.initializers.lecun_normal(), ("contraction", "remaining")
+            nnx.initializers.lecun_normal(), ("contraction", None)
         ),
     )
+
+    unsharded_state = nnx.state(fp_linear)
+    sharding = nnx.get_named_sharding(unsharded_state, mesh)
+    sharded_state = jax.device_put(unsharded_state, sharding)
+    nnx.update(fp_linear, sharded_state)
     # Weight quantization method 1: use quantize_model to convert both the
     # model and params, i.e., implicit quantization.
-    ptq_linear = qwix_model.quantize_model(
-        fp_linear,
-        ptq.PtqProvider(q_rules),
-        model_input,
-    )
-    # Test PTQ param structure.
-    qw = ptq_linear.kernel
-    self.assertIsInstance(qw, ptq.WithAux)
-    self.assertEqual(qw.weight_name, "kernel")
-    qw = qw.array
-    self.assertEqual(qw.qvalue.dtype, jnp.int8)
-    self.assertEqual(qw.qvalue.shape, (12, 5))
-    self.assertEqual(qw.qvalue.sharding, ("contraction", "remaining"))
-    self.assertEqual(qw.scale.shape, (3, 5))
-    self.assertEqual(qw.scale.sharding, ("contraction", "remaining"))
+    with mesh:
+      ptq_linear = qwix_model.quantize_model(
+          fp_linear,
+          ptq.PtqProvider(q_rules),
+          model_input,
+      )
+      # Test PTQ param structure.
+      qw = ptq_linear.kernel
+      self.assertIsInstance(qw, ptq.WithAux)
+      self.assertEqual(qw.weight_name, "kernel")
+      qw = qw.array
+      self.assertEqual(qw.qvalue.dtype, jnp.int8)
+      self.assertEqual(qw.qvalue.shape, (12, 5))
+      self.assertEqual(
+          qw.qvalue.sharding,
+          jax.sharding.NamedSharding(mesh, P()),
+      )
+      self.assertEqual(qw.scale.shape, (3, 5))
+      self.assertEqual(
+          qw.scale.sharding,
+          jax.sharding.NamedSharding(mesh, P()),
+      )
 
-    # Weight quantization method 2: call quantize_model in eval_shape and
-    # quantize_params.
-    abs_ptq_linear = nnx.eval_shape(
-        lambda: qwix_model.quantize_model(
-            fp_linear,
-            ptq.PtqProvider(q_rules),
-            model_input,
-        ),
-    )
-    # Test manual quantize_params.
-    orig_params = nnx.state(fp_linear, nnx.Param)
-    orig_params = nnx.to_pure_dict(orig_params)
-    quantized_params = ptq.quantize_params(orig_params, abs_ptq_linear)
-    # quantized_params can be updated to abs_ptq_linear.
-    nnx.update(abs_ptq_linear, quantized_params)
-    # Ensure that the model can be called.
-    abs_ptq_linear(model_input)
+      # Weight quantization method 2: call quantize_model in eval_shape and
+      # quantize_params.
+      abs_ptq_linear = nnx.eval_shape(
+          lambda: qwix_model.quantize_model(
+              fp_linear,
+              ptq.PtqProvider(q_rules),
+              model_input,
+          ),
+      )
+      # Test manual quantize_params.
+      orig_params = nnx.state(fp_linear, nnx.Param)
+      orig_params = nnx.to_pure_dict(orig_params)
+      quantized_params = ptq.quantize_params(orig_params, abs_ptq_linear)
+      # quantized_params can be updated to abs_ptq_linear.
+      nnx.update(abs_ptq_linear, quantized_params)
+      # Ensure that the model can be called.
+      abs_ptq_linear(model_input)
 
-    # The two methods should produce the same result.
-    jax.tree.map_with_path(
-        lambda kp, x, y: self.assertTrue(jnp.allclose(x, y), f"{kp} {x} {y}"),
-        nnx.state(abs_ptq_linear),
-        nnx.state(ptq_linear),
-    )
+      # The two methods should produce the same result.
+      jax.tree.map_with_path(
+          lambda kp, x, y: self.assertTrue(jnp.allclose(x, y), f"{kp} {x} {y}"),
+          nnx.state(abs_ptq_linear),
+          nnx.state(ptq_linear),
+      )
 
   def test_nnx_einsum_sharding_ptq(self):
     mesh = jax.make_mesh((2, 2), ("fsdp", "tp"))
@@ -226,10 +240,22 @@ class PtqTest(parameterized.TestCase):
     sharding = nnx.get_named_sharding(unsharded_state, mesh)
     sharded_state = jax.device_put(unsharded_state, sharding)
     nnx.update(fp_einsum, sharded_state)
-    self.assertEqual(fp_einsum.kernel.sharding, ("fsdp", "tp", None))
-    self.assertEqual(fp_einsum.kernel.value.sharding.spec, ("fsdp", "tp", None))
-    self.assertEqual(fp_einsum.bias.sharding, ("tp", None))
-    self.assertEqual(fp_einsum.bias.value.sharding.spec, ("tp", None))
+    self.assertEqual(
+        fp_einsum.kernel.sharding,
+        jax.sharding.NamedSharding(mesh, P("fsdp", "tp", None)),
+    )
+    self.assertEqual(
+        fp_einsum.kernel.value.sharding.spec,
+        P("fsdp", "tp", None),
+    )
+    self.assertEqual(
+        fp_einsum.bias.sharding,
+        jax.sharding.NamedSharding(mesh, P("tp", None)),
+    )
+    self.assertEqual(
+        fp_einsum.bias.value.sharding.spec,
+        P("tp", None),
+    )
 
     # PTQ method 1: use quantize_model to convert both the model and params.
     ptq_einsum = qwix_model.quantize_model(
@@ -249,11 +275,23 @@ class PtqTest(parameterized.TestCase):
     qw = qw.array
     self.assertEqual(qw.qvalue.dtype, jnp.int8)
     self.assertEqual(qw.qvalue.shape, (16, 8, 10))
-    self.assertEqual(qw.qvalue.sharding, ("fsdp", "tp", None))
-    self.assertEqual(get_canonical_pspec(qw.qvalue.value), qw.qvalue.sharding)
+    self.assertEqual(
+        qw.qvalue.sharding,
+        jax.sharding.NamedSharding(mesh, P("fsdp", "tp")),
+    )
+    self.assertEqual(
+        get_canonical_pspec(qw.qvalue.value),
+        P("fsdp", "tp", None),
+    )
     self.assertEqual(qw.scale.shape, (4, 8, 10))
-    self.assertEqual(qw.scale.sharding, ("fsdp", "tp", None))
-    self.assertEqual(get_canonical_pspec(qw.scale.value), qw.scale.sharding)
+    self.assertEqual(
+        qw.scale.sharding,
+        jax.sharding.NamedSharding(mesh, P("fsdp", "tp")),
+    )
+    self.assertEqual(
+        get_canonical_pspec(qw.scale.value),
+        P("fsdp", "tp", None),
+    )
 
     # PTQ method 2: call quantize_model in eval_shape and quantize_params.
     abs_ptq_einsum = nnx.eval_shape(
