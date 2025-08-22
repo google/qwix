@@ -344,10 +344,14 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
       raise ValueError('A scale factor is required for RMS calibration.')
     return {'absmax': (rms * args[0]).reshape(shape)}
   elif method == 'fixed':
-    if len(args) != 2:
+    if len(args) not in (1, 2):
       raise ValueError('A fixed range is required for fixed calibration.')
+    if len(args) == 1:
+      args = (-args[0], args[0])
     if args[0] > 0 or args[1] < 0 or args[0] >= args[1]:
       raise ValueError('The range must contain 0 and be non-empty.')
+    # Fixed calibration is always per-tensor.
+    shape = tuple(1 for _ in shape)
     if args[0] + args[1] == 0:
       return {'absmax': jnp.full(shape, args[1], array.dtype)}
     return {
