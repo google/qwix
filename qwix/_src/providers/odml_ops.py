@@ -697,6 +697,16 @@ class DotEinsumConv(QuantizedOp):
     ):
       raise NotAnActivationError
 
+    is_drq = rule and rule.act_qtype and not rule.act_static_scale
+    rhs_is_activation = aux_data.get(args[rhs_idx], _IS_ACTIVATION, False)
+
+    if is_drq and rhs_is_activation:
+      # If both inputs are activations and need DRQ, we don't quantize them
+      # because DRQ on both inputs is not supported.
+      out = self._call_original_op(*args, **kwargs)
+      aux_data.set(out, _ALLOW_FUSION, True)
+      return self._fake_quant_output(out, rule)
+
     # Fake quantize lhs.
     if rule and rule.act_qtype and not rule.act_static_scale:
       # DRQ allows per-channel quantization for activations.
@@ -715,7 +725,7 @@ class DotEinsumConv(QuantizedOp):
       )
 
     # Fake quantize rhs.
-    if aux_data.get(args[rhs_idx], _IS_ACTIVATION, False):
+    if rhs_is_activation:
       # rhs is an activation.
       if rule and rule.act_qtype and not rule.act_static_scale:
         # DRQ.
