@@ -697,9 +697,16 @@ class DotEinsumConv(QuantizedOp):
     ):
       raise NotAnActivationError
 
+    rhs_is_activation = aux_data.get(args[rhs_idx], _IS_ACTIVATION, False)
+
     # Fake quantize lhs.
-    if rule and rule.act_qtype and not rule.act_static_scale:
-      # DRQ allows per-channel quantization for activations.
+    if (
+        rule
+        and rule.act_qtype
+        and not rule.act_static_scale
+        and not rhs_is_activation  # DRQ is only supported for act x weight.
+    ):
+      # Use DRQ which allows per-channel quantization for activations.
       lhs_how = self._get_how_to_quantize(
           for_lhs=True,
           qtype=rule.act_qtype,
@@ -715,23 +722,10 @@ class DotEinsumConv(QuantizedOp):
       )
 
     # Fake quantize rhs.
-    if aux_data.get(args[rhs_idx], _IS_ACTIVATION, False):
-      # rhs is an activation.
-      if rule and rule.act_qtype and not rule.act_static_scale:
-        # DRQ.
-        rhs_how = self._get_how_to_quantize(
-            for_lhs=False,
-            qtype=rule.act_qtype,
-            calibration_method=rule.act_calibration_method,
-            args=args,
-            kwargs=kwargs,
-        )
-        args[rhs_idx] = self._fake_quant_fn(args[rhs_idx], rhs_how, None)
-      else:
-        # possibly SRQ
-        args[rhs_idx] = self._maybe_fake_quant(
-            args[rhs_idx], rule, op_id + '_rhs'
-        )
+    if rhs_is_activation:
+      args[rhs_idx] = self._maybe_fake_quant(
+          args[rhs_idx], rule, op_id + '_rhs'
+      )
     elif rule and rule.weight_qtype:
       assert aux_data.get(args[rhs_idx], _WEIGHT_NAME, None)
       rhs_how = self._get_how_to_quantize(

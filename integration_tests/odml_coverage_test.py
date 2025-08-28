@@ -35,6 +35,7 @@ jax.config.update('jax_threefry_partitionable', False)
 
 
 srq_test_cases = []
+drq_test_cases = []
 
 
 def srq_test_case(cls):
@@ -42,7 +43,13 @@ def srq_test_case(cls):
   return cls
 
 
+def drq_test_case(cls):
+  drq_test_cases.append({'testcase_name': cls.__name__, 'model': cls()})
+  return cls
+
+
 @srq_test_case
+@drq_test_case
 class CNN(nn.Module):
   """A simple CNN model."""
 
@@ -80,8 +87,14 @@ class CNN(nn.Module):
       'int_op_count': 7,
   }
 
+  drq_expected_ops_summary = {
+      'quantize_op_count': 0,
+      'dequantize_op_count': 0,
+  }
+
 
 @srq_test_case
+@drq_test_case
 class Transformer(nn.Module):
   """A simple Transformer model."""
 
@@ -113,7 +126,11 @@ class Transformer(nn.Module):
 
   def create_input(self):
     return jax.random.randint(
-        jax.random.key(0), (1, 100), minval=0, maxval=100, dtype=jnp.int32
+        jax.random.key(0),
+        (1, 10),
+        minval=0,
+        maxval=self.vocab_size,
+        dtype=jnp.int32,
     )
 
   expected_quant_stats_keys = {
@@ -147,6 +164,19 @@ class Transformer(nn.Module):
       'mean0',
       'Dense_4/dot_general0_lhs',
       'final_output0',
+  }
+
+  # x.mean(axis=1) is not quantized correctly and produces
+  # "dq -> fp_sum -> fp_div -> q".
+  expected_ops_summary = {
+      'quantize_op_count': 1,
+      'dequantize_op_count': 2,  # mean and final_output.
+      'fp_op_count': 2,  # fp_sum and fp_div in mean.
+  }
+
+  drq_expected_ops_summary = {
+      'quantize_op_count': 0,
+      'dequantize_op_count': 1,  # dequantize the embedding output.
   }
 
 
@@ -494,7 +524,7 @@ class OdmlTest(parameterized.TestCase):
           testcase_name='CNN',
           model=CNN(),
       ),
-      # FIXME: this triggers an undefined-behavior error.
+      # TODO(b/441761069): this triggers an undefined-behavior error.
       # dict(
       #     testcase_name='Transformer',
       #     model=Transformer(),
@@ -576,7 +606,8 @@ class OdmlTest(parameterized.TestCase):
         },
     )
 
-  def test_drq_cnn(self):
+  @parameterized.named_parameters(*drq_test_cases)
+  def test_drq(self, model: nn.Module):
     rules = [
         qconfig.QuantizationRule(
             weight_qtype=jnp.int8,
@@ -587,7 +618,6 @@ class OdmlTest(parameterized.TestCase):
         ),
     ]
     qat_provider = odml.OdmlQatProvider(rules)
-    model = CNN()
     model_input = model.create_input()
     qat_model = qwix_model.quantize_model(model, qat_provider)
     variables = qat_model.init(jax.random.key(0), model_input)
@@ -607,13 +637,18 @@ class OdmlTest(parameterized.TestCase):
     )
     self._save_edge_model(edge_model)
 
-    with self.subTest('ops_summary'):
-      interpreter = edge_model._interpreter_builder()
-      ops_summary = self._summarize_ops_details(interpreter._get_ops_details())
-      # There should be no quantize/dequantize ops because rhs are folded into
-      # the ops in DRQ.
-      expected_ops_summary = {'quantize_op_count': 0, 'dequantize_op_count': 0}
-      self.assertDictContainsSubset(expected_ops_summary, ops_summary)
+    if hasattr(model, 'drq_expected_ops_summary'):
+      with self.subTest('ops_summary'):
+        interpreter = edge_model._interpreter_builder()
+        ops_summary = self._summarize_ops_details(
+            interpreter._get_ops_details()
+        )
+        self.assertDictContainsSubset(
+            model.drq_expected_ops_summary, ops_summary
+        )
+
+    if self._testMethodName == 'test_drq_Transformer':
+      return  # TODO(b/441761069): this triggers an XNNPack RuntimeError.
 
     edge_result = edge_model(model_input)
     fp_result = jax.jit(model.apply)(variables, model_input)
