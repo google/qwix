@@ -15,7 +15,7 @@
 
 import dataclasses
 import functools
-from typing import Collection, Mapping, Sequence, TypeAlias
+from typing import Callable, Collection, Mapping, Sequence, TypeAlias
 import flax.struct
 import jax
 from jax import numpy as jnp
@@ -340,6 +340,28 @@ def get_tiled_axes(array: QArray) -> dict[int, int]:
   return tiled_axes
 
 
+def call_with_generic_broadcast(
+    op: Callable[[jax.Array, jax.Array], jax.Array], x: jax.Array, y: jax.Array
+):
+  """Call an element-wise binary op with generic broadcast."""
+  assert x.ndim == y.ndim
+  x_shape, y_shape, o_shape = [], [], []
+  for a, b in zip(x.shape, y.shape):
+    o_shape.append(max(a, b))
+    if a == b or a == 1 or b == 1:
+      x_shape.append(a)
+      y_shape.append(b)
+    elif a % b == 0:
+      x_shape.extend((b, a // b))
+      y_shape.extend((b, 1))
+    elif b % a == 0:
+      x_shape.extend((a, 1))
+      y_shape.extend((a, b // a))
+    else:
+      raise ValueError(f'Cannot broadcast between {x.shape} {y.shape}')
+  return op(x.reshape(x_shape), y.reshape(y_shape)).reshape(o_shape)
+
+
 def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
   """Calibrates the array.
 
@@ -465,17 +487,11 @@ def quantize_with_scale_zero_point(
   # dequantize() uses the scale dtype to reconstruct the original array.
   scale = scale.astype(array.dtype)
 
-  tiled_axes = {}
-  for i, (j, k) in enumerate(zip(array.shape, scale.shape)):
-    if j != k and k != 1:
-      tiled_axes[i] = j // k
-  tiled_array = split_axis(array, tiled_axes)
-  tiled_scale = split_axis(scale, {a: 1 for a in tiled_axes})
-  qvalue = tiled_array / tiled_scale
+  qvalue = call_with_generic_broadcast(jnp.divide, array, scale)
   if zero_point is not None:
-    tiled_zero_point = split_axis(zero_point, {a: 1 for a in tiled_axes})
-    qvalue = qvalue + tiled_zero_point.astype(qvalue.dtype)
-  qvalue = qvalue.reshape(array.shape)
+    qvalue = call_with_generic_broadcast(
+        jnp.add, qvalue, zero_point.astype(qvalue.dtype)
+    )
   qvalue = numerics.convert_to(qvalue, qtype)
   return QArray(qvalue, scale, zero_point, qtype)
 
@@ -502,18 +518,11 @@ def dequantize(array: QArray) -> jax.Array:
   validate_qarray(array)
   qvalue = numerics.convert_from(array.qvalue, array.qtype)
   qvalue = qvalue.astype(array.scale.dtype)
-  tiled_axes = get_tiled_axes(array)
-  if not tiled_axes:
-    if array.zero_point is not None:
-      qvalue -= array.zero_point.astype(array.scale.dtype)
-    return qvalue * array.scale
-  original_shape = qvalue.shape
-  qvalue = split_axis(qvalue, tiled_axes)
-  scale = split_axis(array.scale, {a: 1 for a in tiled_axes})
   if array.zero_point is not None:
-    zero_point = split_axis(array.zero_point, {a: 1 for a in tiled_axes})
-    qvalue -= zero_point.astype(scale.dtype)
-  return (qvalue * scale).reshape(original_shape)
+    qvalue = call_with_generic_broadcast(
+        jnp.subtract, qvalue, array.zero_point.astype(qvalue.dtype)
+    )
+  return call_with_generic_broadcast(jnp.multiply, qvalue, array.scale)
 
 
 def clip_to_calibration(

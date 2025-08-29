@@ -122,26 +122,6 @@ def _broadcast_axes(
   return jnp.broadcast_to(array, target_shape)
 
 
-def multiply_with_generic_broadcast(x: jax.Array, y: jax.Array):
-  """Multiply two arrays with generic broadcast."""
-  assert x.ndim == y.ndim
-  x_shape, y_shape, o_shape = [], [], []
-  for a, b in zip(x.shape, y.shape):
-    o_shape.append(max(a, b))
-    if a == b or a == 1 or b == 1:
-      x_shape.append(a)
-      y_shape.append(b)
-    elif a % b == 0:
-      x_shape.extend((b, a // b))
-      y_shape.extend((b, 1))
-    elif b % a == 0:
-      x_shape.extend((a, 1))
-      y_shape.extend((a, b // a))
-    else:
-      raise ValueError(f'Cannot broadcast between {x.shape} {y.shape}')
-  return (x.reshape(x_shape) * y.reshape(y_shape)).reshape(o_shape)
-
-
 def _fast_dot_general(
     lhs: qarray.MaybeQArray,
     rhs: qarray.MaybeQArray,
@@ -243,27 +223,35 @@ def _fast_dot_general(
 
   if lhs_zero_point is not None:
     # TODO(zhuyunx): This value can be constant folded in SRQ scenarios.
-    res -= jax.lax.dot_general(
-        _broadcast_axes(lhs_zero_point, lhs_value.shape, lhs_ca + lhs_ba),
-        rhs_value,
-        dimension_numbers=dimension_numbers,
-        preferred_element_type=preferred_element_type,
-        **kwargs,
+    res = qarray.call_with_generic_broadcast(
+        jnp.subtract,
+        res,
+        jax.lax.dot_general(
+            _broadcast_axes(lhs_zero_point, lhs_value.shape, lhs_ca + lhs_ba),
+            rhs_value,
+            dimension_numbers=dimension_numbers,
+            preferred_element_type=preferred_element_type,
+            **kwargs,
+        ),
     )
 
   if rhs_zero_point is not None:
-    res -= jax.lax.dot_general(
-        lhs_value,
-        _broadcast_axes(rhs_zero_point, rhs_value.shape, rhs_ca + rhs_ba),
-        dimension_numbers=dimension_numbers,
-        preferred_element_type=preferred_element_type,
-        **kwargs,
+    res = qarray.call_with_generic_broadcast(
+        jnp.subtract,
+        res,
+        jax.lax.dot_general(
+            lhs_value,
+            _broadcast_axes(rhs_zero_point, rhs_value.shape, rhs_ca + rhs_ba),
+            dimension_numbers=dimension_numbers,
+            preferred_element_type=preferred_element_type,
+            **kwargs,
+        ),
     )
 
   if lhs_scale is not None:
-    res = multiply_with_generic_broadcast(res, lhs_scale)
+    res = qarray.call_with_generic_broadcast(jnp.multiply, res, lhs_scale)
   if rhs_scale is not None:
-    res = multiply_with_generic_broadcast(res, rhs_scale)
+    res = qarray.call_with_generic_broadcast(jnp.multiply, res, rhs_scale)
   if sum_axes:
     res = jnp.sum(res, axis=sum_axes)
   return res
@@ -368,11 +356,11 @@ def loop_dot_general(
     if lhs_scale is not None:
       scale = take_slice(lhs_scale, lhs_ca, ca_tile_indices)
       scale = qarray.transpose_array(scale, lhs_scale_transpose)
-      out = multiply_with_generic_broadcast(out, scale)
+      out = qarray.call_with_generic_broadcast(jnp.multiply, out, scale)
     if rhs_scale is not None:
       scale = take_slice(rhs_scale, rhs_ca, ca_tile_indices)
       scale = qarray.transpose_array(scale, rhs_scale_transpose)
-      out = multiply_with_generic_broadcast(out, scale)
+      out = qarray.call_with_generic_broadcast(jnp.multiply, out, scale)
     acc = out if acc is None else acc + out
   assert acc is not None
   return acc
