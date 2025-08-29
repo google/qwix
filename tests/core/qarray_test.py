@@ -180,10 +180,8 @@ class QArrayTest(parameterized.TestCase):
 
   def test_get_tiled_axes(self):
     array = qarray.QArray(
-        qvalue=jnp.ones((10, 256, 16)),
+        qvalue=jnp.ones((10, 256, 16), jnp.int8),
         scale=jnp.ones((10, 8, 2)),
-        zero_point=None,
-        qtype=jnp.int8,
     )
     self.assertEqual(qarray.get_tiled_axes(array), {1: 32, 2: 8})
 
@@ -235,6 +233,14 @@ class QArrayTest(parameterized.TestCase):
       self.assertEqual(q_array[0].scale.shape, (1, 3))
       self.assertEqual(q_array[..., None].scale.shape, (2, 1, 3, 1))
       self.assertEqual(q_array[None].scale.shape, (1, 2, 1, 3))
+
+    with self.assertRaises(ValueError):
+      qarray.validate_qarray(
+          qarray.QArray(
+              qvalue=jnp.ones((10, 10), jnp.int8),
+              scale=jnp.ones((10, 3), jnp.float32),
+          )
+      )
 
 
 if __name__ == '__main__':

@@ -407,6 +407,7 @@ def dot_general(
   should_dequant_on_output = True
   for operand, ca in zip((lhs, rhs), dimension_numbers[0]):
     if isinstance(operand, qarray.QArray):
+      qarray.validate_qarray(operand)
       # qtypes like nf4 cannot be dequantized on output.
       if not numerics.can_dequant_on_output(operand.qtype):
         should_dequant_on_output = False
