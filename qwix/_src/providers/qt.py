@@ -15,7 +15,7 @@
 
 import dataclasses
 import functools
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from flax import linen as nn
 from flax import nnx
@@ -25,6 +25,7 @@ from qwix._src import aux_data
 from qwix._src import averaging
 from qwix._src import flax_util
 from qwix._src import qconfig
+from qwix._src.core import conv_general_qt
 from qwix._src.core import dot_general_qt
 
 
@@ -32,8 +33,7 @@ from qwix._src.core import dot_general_qt
 class QtRule(qconfig.QuantizationRule):
   """QuantizationRule with all settings specific to Quantized Training (QT)."""
 
-  # In backward pass, quantize the gradients to the given type. If set, the
-  # residuals will also be quantized with the same qtype as in the forward pass.
+  # In backward pass, quantize the gradients to the given type.
   bwd_qtype: jax.typing.DTypeLike | None = None
 
   # In backward pass, calibrate the gradients using the given method.
@@ -121,6 +121,52 @@ class QtProvider(qconfig.QuantizationProvider):
           out_sharding=out_sharding,
       )
 
+  def conv_general_dilated(
+      self,
+      lhs: jax.Array,
+      rhs: jax.Array,
+      window_strides: Sequence[int],
+      padding: str | Sequence[tuple[int, int]],
+      lhs_dilation: Sequence[int] | None = None,
+      rhs_dilation: Sequence[int] | None = None,
+      dimension_numbers: jax.lax.ConvGeneralDilatedDimensionNumbers = None,
+      feature_group_count: int = 1,
+      batch_group_count: int = 1,
+      precision: jax.lax.PrecisionLike = None,
+      preferred_element_type: jax.typing.DTypeLike | None = None,
+  ) -> jax.Array:
+    """QT conv_general_dilated."""
+    rule, op_id = self._get_current_rule_and_op_id('conv_general_dilated')
+    if rule is None or rule.weight_qtype is None:
+      return jax.lax.conv_general_dilated(
+          lhs,
+          rhs,
+          window_strides,
+          padding,
+          lhs_dilation=lhs_dilation,
+          rhs_dilation=rhs_dilation,
+          dimension_numbers=dimension_numbers,
+          feature_group_count=feature_group_count,
+          batch_group_count=batch_group_count,
+          precision=precision,
+          preferred_element_type=preferred_element_type,
+      )
+    if rule.tile_size:
+      raise ValueError('subchannel is not supported for conv_general_dilated.')
+    config = self._create_conv_general_qt_config(rule, op_id, lhs, rhs)
+    return conv_general_qt.conv_general_qt(
+        lhs,
+        rhs,
+        config,
+        window_strides,
+        padding,
+        lhs_dilation,
+        rhs_dilation,
+        dimension_numbers,
+        feature_group_count,
+        batch_group_count,
+    )
+
   def nn_param(
       self,
       module: nn.Module,
@@ -149,7 +195,7 @@ class QtProvider(qconfig.QuantizationProvider):
   def get_intercept_map(self):
     """Used for interception."""
     return super().get_intercept_map() | {
-        # TODO(jiwonshin): add support for quantized conv_general_dilated.
+        'jax.lax.conv_general_dilated': self.conv_general_dilated,
         'jax.lax.dot_general': self.dot_general,
         'jax.numpy.einsum': self.einsum,
         'flax.linen.Module.param': self.nn_param,  # to associate weight_name.
@@ -191,6 +237,63 @@ class QtProvider(qconfig.QuantizationProvider):
       quant_stat.value = aggregator.update(quant_stat.value, calibration)
 
     return aggregator.get_calibration(quant_stat.value, calibration)
+
+  def _create_conv_general_qt_config(
+      self,
+      rule: qconfig.QuantizationRule,
+      op_id: str,
+      lhs: jax.Array,
+      rhs: jax.Array,
+  ) -> conv_general_qt.ConvGeneralQtConfig:
+    """Creates a ConvGeneralQtConfig for conv_general_dilated."""
+    if not isinstance(rule, QtRule):
+      rule = QtRule(**dataclasses.asdict(rule))
+
+    assert (
+        rule.weight_qtype == rule.act_qtype
+    ), 'For conv_general_qt, weight_qtype and act_qtype must be the same.'
+    assert (
+        rule.weight_calibration_method == rule.act_calibration_method
+    ), 'For conv_general_qt, weight and act calibration methods must match.'
+
+    fwd_qtype = rule.weight_qtype
+    fwd_calibration_method = rule.weight_calibration_method
+
+    lhs_is_weight = aux_data.get(lhs, 'weight_name', None) is not None
+    lhs_collect_quant_stat = None
+    if (
+        not lhs_is_weight
+        and rule.act_qtype is not None
+        and rule.act_static_scale
+    ):
+      lhs_collect_quant_stat = functools.partial(
+          self._collect_quant_stat, f'{op_id}_lhs', rule.act_batch_axes
+      )
+
+    rhs_is_weight = aux_data.get(rhs, 'weight_name', None) is not None
+    rhs_collect_quant_stat = None
+    if (
+        not rhs_is_weight
+        and rule.act_qtype is not None
+        and rule.act_static_scale
+    ):
+      rhs_collect_quant_stat = functools.partial(
+          self._collect_quant_stat, f'{op_id}_rhs', rule.act_batch_axes
+      )
+
+    return conv_general_qt.ConvGeneralQtConfig(
+        # fwd configs.
+        fwd_qtype=fwd_qtype,
+        fwd_calibration_method=fwd_calibration_method,
+        lhs_collect_quant_stat=lhs_collect_quant_stat,
+        rhs_collect_quant_stat=rhs_collect_quant_stat,
+        # bwd configs.
+        bwd_qtype=rule.bwd_qtype,
+        bwd_calibration_method=rule.bwd_calibration_method,
+        # misc.
+        disable_channelwise_axes=rule.disable_channelwise_axes,
+        bwd_use_original_residuals=rule.bwd_use_original_residuals,
+    )
 
   def _create_dot_general_qt_config(
       self,
