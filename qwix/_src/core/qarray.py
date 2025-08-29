@@ -47,13 +47,16 @@ class QArray:
     zero_point: The quantization value that represents the exact floating-point
       value 0, or None if in symmetric quantization.
     qtype: The logical type of the qvalue, which could be different from the
-      dtype used for storage in qvalue.
+      dtype used for storage in qvalue. If None, the qvalue's dtype will be used
+      as the logical type.
   """
 
   qvalue: jax.Array
   scale: jax.Array
-  zero_point: jax.Array | None
-  qtype: jax.typing.DTypeLike = flax.struct.field(pytree_node=False)
+  zero_point: jax.Array | None = None
+  qtype: jax.typing.DTypeLike = flax.struct.field(
+      pytree_node=False, default=None
+  )
 
   # Array-like methods.
   shape = property(lambda self: self.qvalue.shape)
@@ -67,6 +70,10 @@ class QArray:
 
   def __getitem__(self, idx) -> 'QArray':
     return rewriting_take(self, idx)
+
+  def __post_init__(self):
+    if self.qtype is None:
+      object.__setattr__(self, 'qtype', self.qvalue.dtype)
 
 
 def reshape(array: QArray, *new_shape) -> QArray:
@@ -171,6 +178,44 @@ def rewriting_take(array: QArray, idx) -> QArray:
     return x[tuple(actual_idx)]
 
   return jax.tree.map(take, array)
+
+
+def validate_qarray(array: QArray):
+  """Validates the internal consistency of a QArray."""
+  if not isinstance(array.qvalue, jax.Array):
+    return  # don't check if qvalue is nn.Partitioned, pl.BlockSpec, etc.
+  if array.qvalue.ndim != array.scale.ndim:
+    raise ValueError(
+        f'Scale {array.scale.shape} should have the same rank as qvalue'
+        f' {array.qvalue.shape}.'
+    )
+  if not all(a % b == 0 for a, b in zip(array.qvalue.shape, array.scale.shape)):
+    raise ValueError(
+        f'Scale {array.scale.shape} should be broadcastable to qvalue'
+        f' {array.qvalue.shape}.'
+    )
+  if array.qvalue.dtype.itemsize > 1:
+    raise ValueError(f'{array.qvalue.dtype} is not a valid type for qvalue.')
+  if array.scale.dtype not in (jnp.bfloat16, jnp.float32, jnp.float64):
+    raise ValueError(f'{array.scale.dtype} is not a valid type for scale.')
+  if array.zero_point is not None:
+    if array.zero_point.ndim != array.qvalue.ndim:
+      raise ValueError(
+          f'Zero point {array.zero_point.shape} should have the same rank as'
+          f' qvalue {array.qvalue.shape}.'
+      )
+    if not all(
+        a % b == 0 for a, b in zip(array.qvalue.shape, array.zero_point.shape)
+    ):
+      raise ValueError(
+          f'Zero point {array.zero_point.shape} should be broadcastable to'
+          f' qvalue {array.qvalue.shape}.'
+      )
+    if array.zero_point.dtype != array.qvalue.dtype:
+      raise ValueError(
+          f'Zero point {array.zero_point.dtype} should have the same dtype as'
+          f' qvalue {array.qvalue.dtype}.'
+      )
 
 
 # ---------------------------------------------
@@ -420,7 +465,10 @@ def quantize_with_scale_zero_point(
   # dequantize() uses the scale dtype to reconstruct the original array.
   scale = scale.astype(array.dtype)
 
-  tiled_axes = get_tiled_axes(QArray(array, scale, zero_point, qtype))
+  tiled_axes = {}
+  for i, (j, k) in enumerate(zip(array.shape, scale.shape)):
+    if j != k and k != 1:
+      tiled_axes[i] = j // k
   tiled_array = split_axis(array, tiled_axes)
   tiled_scale = split_axis(scale, {a: 1 for a in tiled_axes})
   qvalue = tiled_array / tiled_scale
@@ -451,6 +499,7 @@ def dequantize(array: QArray) -> jax.Array:
   Returns:
     The dequantized array, whose dtype is the same as the scale's dtype.
   """
+  validate_qarray(array)
   qvalue = numerics.convert_from(array.qvalue, array.qtype)
   qvalue = qvalue.astype(array.scale.dtype)
   tiled_axes = get_tiled_axes(array)
