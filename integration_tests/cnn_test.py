@@ -18,7 +18,6 @@ The majority of this file is copied from flax/examples/mnist/train.py.
 
 import functools
 from typing import Any, Mapping
-import unittest
 
 from absl import logging
 from absl.testing import absltest
@@ -174,7 +173,6 @@ def evaluate(cnn: CNN, variables: Mapping[str, Any]):
   return accuracy
 
 
-@unittest.skip('Disabling these tests until we add quantized convolution.')
 class CnnTest(parameterized.TestCase):
 
   def test_drq(self):
