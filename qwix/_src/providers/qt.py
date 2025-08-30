@@ -33,7 +33,8 @@ from qwix._src.core import dot_general_qt
 class QtRule(qconfig.QuantizationRule):
   """QuantizationRule with all settings specific to Quantized Training (QT)."""
 
-  # In backward pass, quantize the gradients to the given type.
+  # In backward pass, quantize the gradients to the given type. If set, the
+  # residuals will also be quantized with the same qtype as in the forward pass.
   bwd_qtype: jax.typing.DTypeLike | None = None
 
   # In backward pass, calibrate the gradients using the given method.
@@ -249,12 +250,27 @@ class QtProvider(qconfig.QuantizationProvider):
     if not isinstance(rule, QtRule):
       rule = QtRule(**dataclasses.asdict(rule))
 
-    assert (
-        rule.weight_qtype == rule.act_qtype
-    ), 'For conv_general_qt, weight_qtype and act_qtype must be the same.'
-    assert (
-        rule.weight_calibration_method == rule.act_calibration_method
-    ), 'For conv_general_qt, weight and act calibration methods must match.'
+    if rule.weight_qtype != rule.act_qtype:
+      raise ValueError(
+          'conv_general_qt requires the same weight_qtype and act_qtype.'
+      )
+    if rule.weight_calibration_method != rule.act_calibration_method:
+      # This is not strictly required, but ConvGeneralQtConfig doesn't support
+      # individual configurations for now.
+      raise ValueError(
+          'conv_general_qt requires the same weight_calibration_method and'
+          ' act_calibration_method.'
+      )
+    if rule.bwd_qtype is not None:
+      if rule.bwd_qtype != rule.weight_qtype:
+        raise ValueError(
+            'conv_general_qt requires the same bwd_qtype as weight_qtype.'
+        )
+      if rule.bwd_calibration_method != rule.weight_calibration_method:
+        raise ValueError(
+            'conv_general_qt requires the same bwd_calibration_method as'
+            ' weight_calibration_method.'
+        )
 
     fwd_qtype = rule.weight_qtype
     fwd_calibration_method = rule.weight_calibration_method
