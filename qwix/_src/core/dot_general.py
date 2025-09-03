@@ -316,13 +316,15 @@ def loop_dot_general(
     else:
       ca_tile_counts.append(1)
 
-  if preferred_element_type is None:
-    if all('int' in x.dtype.name for x in (lhs_value, rhs_value)):
-      preferred_element_type = jnp.int32
-    elif lhs_scale is not None:
-      preferred_element_type = lhs_scale.dtype
-    elif rhs_scale is not None:
-      preferred_element_type = rhs_scale.dtype
+  acc_dtype = None
+  if all('int' in x.dtype.name for x in (lhs_value, rhs_value)):
+    acc_dtype = jnp.int32
+  elif preferred_element_type is not None:
+    acc_dtype = preferred_element_type
+  elif lhs_scale is not None:
+    acc_dtype = lhs_scale.dtype
+  elif rhs_scale is not None:
+    acc_dtype = rhs_scale.dtype
 
   lhs_scale_transpose, rhs_scale_transpose = _get_scale_transpose(
       dimension_numbers, (len(lhs_value.shape), len(rhs_value.shape))
@@ -350,9 +352,11 @@ def loop_dot_general(
         take_slice(lhs_value, lhs_ca, ca_tile_indices),
         take_slice(rhs_value, rhs_ca, ca_tile_indices),
         dimension_numbers=dimension_numbers,
-        preferred_element_type=preferred_element_type,
+        preferred_element_type=acc_dtype,
         **kwargs,
     )
+    if preferred_element_type is not None:
+      out = out.astype(preferred_element_type)
     if lhs_scale is not None:
       scale = take_slice(lhs_scale, lhs_ca, ca_tile_indices)
       scale = qarray.transpose_array(scale, lhs_scale_transpose)
