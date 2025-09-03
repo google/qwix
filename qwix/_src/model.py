@@ -99,7 +99,9 @@ def quantize_linen_model(
 
     # Step 1: unwrap if needed.
     wrapped = False
-    if hasattr(method, "method_handler_wrapped"):
+    # This is a while loop because the method may be wrapped e.g. by nn.jit as
+    # jit(wrap_method_once(method)). We discard the jit decorator for now.
+    while hasattr(method, "method_handler_wrapped"):
       # Apply interception to the unwrapped method so that input/output
       # transformations are called inside a proper linen scope.
       method = method.__wrapped__
