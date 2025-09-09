@@ -143,6 +143,7 @@ class PtqTest(parameterized.TestCase):
     ptq_dense.apply({"params": quantized_params}, model_input)
 
   def test_nnx_ptq(self):
+    mesh = jax.make_mesh((2, 2), ("contraction", "remaining"))
     q_rules = [
         qconfig.QuantizationRule(
             module_path=".*", weight_qtype=jnp.int8, tile_size=4
@@ -150,41 +151,43 @@ class PtqTest(parameterized.TestCase):
     ]
 
     model_input = jnp.ones((10, 12))
-    fp_linear = nnx.Linear(
-        in_features=12,
-        out_features=5,
-        rngs=nnx.Rngs(0),
-        kernel_init=nnx.with_partitioning(
-            nnx.initializers.lecun_normal(), ("contraction", "remaining")
-        ),
-    )
-    # Weight quantization method 1: use quantize_model to convert both the
-    # model and params, i.e., implicit quantization.
-    ptq_linear = qwix_model.quantize_model(
-        fp_linear,
-        ptq.PtqProvider(q_rules),
-        model_input,
-    )
+    with jax.set_mesh(mesh):
+      fp_linear = nnx.Linear(
+          in_features=12,
+          out_features=6,
+          rngs=nnx.Rngs(0),
+          kernel_init=nnx.with_partitioning(
+              nnx.initializers.lecun_normal(), ("contraction", "remaining")
+          ),
+      )
+      # Weight quantization method 1: use quantize_model to convert both the
+      # model and params, i.e., implicit quantization.
+      ptq_linear = qwix_model.quantize_model(
+          fp_linear,
+          ptq.PtqProvider(q_rules),
+          model_input,
+      )
     # Test PTQ param structure.
     qw = ptq_linear.kernel
     self.assertIsInstance(qw, ptq.WithAux)
     self.assertEqual(qw.weight_name, "kernel")
     qw = qw.array
     self.assertEqual(qw.qvalue.dtype, jnp.int8)
-    self.assertEqual(qw.qvalue.shape, (12, 5))
+    self.assertEqual(qw.qvalue.shape, (12, 6))
     self.assertEqual(qw.qvalue.sharding_names, ("contraction", "remaining"))
-    self.assertEqual(qw.scale.shape, (3, 5))
+    self.assertEqual(qw.scale.shape, (3, 6))
     self.assertEqual(qw.scale.sharding_names, ("contraction", "remaining"))
 
     # Weight quantization method 2: call quantize_model in eval_shape and
     # quantize_params.
-    abs_ptq_linear = nnx.eval_shape(
-        lambda: qwix_model.quantize_model(
-            fp_linear,
-            ptq.PtqProvider(q_rules),
-            model_input,
-        ),
-    )
+    with jax.set_mesh(mesh):
+      abs_ptq_linear = nnx.eval_shape(
+          lambda: qwix_model.quantize_model(
+              fp_linear,
+              ptq.PtqProvider(q_rules),
+              model_input,
+          ),
+      )
     # Test manual quantize_params.
     orig_params = nnx.state(fp_linear, nnx.Param)
     orig_params = nnx.to_pure_dict(orig_params)
@@ -210,16 +213,17 @@ class PtqTest(parameterized.TestCase):
     ]
 
     model_input = jnp.ones((10, 1, 16))
-    fp_einsum = nnx.Einsum(
-        "btd,dnh->btnh",
-        (16, 8, 10),
-        (8, 10),
-        rngs=nnx.Rngs(0),
-        kernel_init=nnx.with_partitioning(
-            nnx.initializers.lecun_normal(), ("fsdp", "tp", None)
-        ),
-        bias_init=nnx.with_partitioning(nnx.initializers.zeros, ("tp", None)),
-    )
+    with jax.set_mesh(mesh):
+      fp_einsum = nnx.Einsum(
+          "btd,dnh->btnh",
+          (16, 8, 10),
+          (8, 10),
+          rngs=nnx.Rngs(0),
+          kernel_init=nnx.with_partitioning(
+              nnx.initializers.lecun_normal(), ("fsdp", "tp", None)
+          ),
+          bias_init=nnx.with_partitioning(nnx.initializers.zeros, ("tp", None)),
+      )
 
     # Shard the fp_einsum model in-place.
     unsharded_state = nnx.state(fp_einsum)
@@ -231,12 +235,13 @@ class PtqTest(parameterized.TestCase):
     self.assertEqual(fp_einsum.bias.sharding_names, ("tp", None))
     self.assertEqual(fp_einsum.bias.value.sharding.spec, ("tp", None))
 
-    # PTQ method 1: use quantize_model to convert both the model and params.
-    ptq_einsum = qwix_model.quantize_model(
-        fp_einsum,
-        ptq.PtqProvider(q_rules),
-        model_input,
-    )
+    with jax.set_mesh(mesh):
+      # PTQ method 1: use quantize_model to convert both the model and params.
+      ptq_einsum = qwix_model.quantize_model(
+          fp_einsum,
+          ptq.PtqProvider(q_rules),
+          model_input,
+      )
 
     def get_canonical_pspec(x: jax.Array):
       """The sharding.spec may be shorter than the ndim."""
@@ -256,13 +261,14 @@ class PtqTest(parameterized.TestCase):
     self.assertEqual(get_canonical_pspec(qw.scale.value), ("fsdp", "tp", None))
 
     # PTQ method 2: call quantize_model in eval_shape and quantize_params.
-    abs_ptq_einsum = nnx.eval_shape(
-        lambda: qwix_model.quantize_model(
-            fp_einsum,
-            ptq.PtqProvider(q_rules),
-            model_input,
-        ),
-    )
+    with jax.set_mesh(mesh):
+      abs_ptq_einsum = nnx.eval_shape(
+          lambda: qwix_model.quantize_model(
+              fp_einsum,
+              ptq.PtqProvider(q_rules),
+              model_input,
+          ),
+      )
     # Test manual quantize_params.
     orig_params = nnx.state(fp_einsum, nnx.Param)
     orig_params = nnx.to_pure_dict(orig_params)

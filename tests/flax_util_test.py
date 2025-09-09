@@ -146,41 +146,45 @@ class FlaxUtilTest(parameterized.TestCase):
     self.assertIsInstance(variables["lora_b"], nnx.LoRAParam)
 
   def test_unbox(self):
-    array = jnp.ones((4, 8))
-    boxed = {
-        "unboxed": array,
-        "nn": nn.Partitioned(array, names=("a", "b")),
-        "nnx": nnx.Param(array, sharding=("a", "b")),
-    }
-    unboxed = flax_util.unbox(boxed)
-    self.assertIs(unboxed["unboxed"], array)
-    self.assertIs(unboxed["nn"], array)
-    self.assertIs(unboxed["nnx"], array)
+    mesh = jax.make_mesh((1, 1), ("a", "b"))
+    with jax.set_mesh(mesh):
+      array = jnp.ones((4, 8))
+      boxed = {
+          "unboxed": array,
+          "nn": nn.Partitioned(array, names=("a", "b")),
+          "nnx": nnx.Param(array, sharding=("a", "b")),
+      }
+      unboxed = flax_util.unbox(boxed)
+    np.testing.assert_array_equal(unboxed["unboxed"], array)
+    np.testing.assert_array_equal(unboxed["nn"], array)
+    np.testing.assert_array_equal(unboxed["nnx"], array)
 
   def test_update_boxed(self):
+    mesh = jax.make_mesh((1, 1), ("a", "b"))
     unboxed = jnp.ones((4, 8))
     value = jnp.zeros((4, 8))
     self.assertIs(flax_util.update_boxed(unboxed), unboxed)
     self.assertIs(flax_util.update_boxed(unboxed, value=value), value)
 
-    boxed = nn.Partitioned(jnp.ones((4, 8)), names=("a", "b"))
-    updated = flax_util.update_boxed(
-        boxed, value=jnp.ones((2, 2, 8)), split=[0]
-    )
-    self.assertIsInstance(updated, nn.Partitioned)
-    self.assertEqual(updated.value.shape, (2, 2, 8))
-    self.assertEqual(updated.names, ("a", None, "b"))
+    with jax.set_mesh(mesh):
+      boxed = nn.Partitioned(jnp.ones((4, 8)), names=("a", "b"))
+      updated = flax_util.update_boxed(
+          boxed, value=jnp.ones((2, 2, 8)), split=[0]
+      )
+      self.assertIsInstance(updated, nn.Partitioned)
+      self.assertEqual(updated.value.shape, (2, 2, 8))
+      self.assertEqual(updated.names, ("a", None, "b"))
 
-    boxed = nnx.Param(jnp.ones((2, 2, 8)), sharding=("a", None, "b"))
-    updated = flax_util.update_boxed(boxed, value=jnp.ones((4, 8)), merge=[0])
-    self.assertIsInstance(updated, nnx.Param)
-    self.assertEqual(updated.value.shape, (4, 8))
-    self.assertEqual(updated.sharding_names, ("a", "b"))
+      boxed = nnx.Param(jnp.ones((2, 2, 8)), sharding=("a", None, "b"))
+      updated = flax_util.update_boxed(boxed, value=jnp.ones((4, 8)), merge=[0])
+      self.assertIsInstance(updated, nnx.Param)
+      self.assertEqual(updated.value.shape, (4, 8))
+      self.assertEqual(updated.sharding_names, ("a", "b"))
 
-    boxed = nnx.Param(jnp.ones((2, 2, 8)), sharding=("a", None, "b"))
-    updated = flax_util.update_boxed(boxed, transpose=[2, 0, None])
-    self.assertIsInstance(updated, nnx.Param)
-    self.assertEqual(updated.sharding_names, ("b", "a", None))
+      boxed = nnx.Param(jnp.ones((2, 2, 8)), sharding=("a", None, "b"))
+      updated = flax_util.update_boxed(boxed, transpose=[2, 0, None])
+      self.assertIsInstance(updated, nnx.Param)
+      self.assertEqual(updated.sharding_names, ("b", "a", None))
 
 
 if __name__ == "__main__":

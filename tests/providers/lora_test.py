@@ -218,16 +218,17 @@ class LoraTest(parameterized.TestCase):
   ):
     """Test QLoRA on nnx.Einsum module param with sharding."""
     mesh = jax.make_mesh((2, 2), ("fsdp", "tp"))
-    einsum = nnx.Einsum(
-        "btd,dnh->btnh",
-        (16, 8, 10),
-        (8, 10),
-        rngs=nnx.Rngs(0),
-        kernel_init=nnx.with_partitioning(
-            nnx.initializers.lecun_normal(), ("fsdp", "tp", None)
-        ),
-        bias_init=nnx.with_partitioning(nnx.initializers.zeros, ("tp", None)),
-    )
+    with jax.set_mesh(mesh):
+      einsum = nnx.Einsum(
+          "btd,dnh->btnh",
+          (16, 8, 10),
+          (8, 10),
+          rngs=nnx.Rngs(0),
+          kernel_init=nnx.with_partitioning(
+              nnx.initializers.lecun_normal(), ("fsdp", "tp", None)
+          ),
+          bias_init=nnx.with_partitioning(nnx.initializers.zeros, ("tp", None)),
+      )
     if apply_sharding_to_base_model:
       # Apply sharding on the base model.
       self._shard_nnx_model(einsum, mesh)
@@ -248,7 +249,8 @@ class LoraTest(parameterized.TestCase):
         mesh, shd.PartitionSpec("fsdp", None, None)
     )
     model_input = jax.device_put(jnp.ones((16, 4, 16)), input_sharding)
-    lora_einsum = lora.apply_lora_to_model(einsum, lora_provider, model_input)
+    with jax.set_mesh(mesh):
+      lora_einsum = lora.apply_lora_to_model(einsum, lora_provider, model_input)
     self.assertEqual(lora_einsum.kernel_lora_einsum_str, "btd,dr,rnh->btnh")
 
     if not apply_sharding_to_base_model:
@@ -367,17 +369,19 @@ class LoraTest(parameterized.TestCase):
   )
   def test_lora_conv_nnx(self, qtype):
     """Test LoRA on nnx.Conv module."""
-    conv = nnx.Conv(
-        in_features=16,
-        out_features=32,
-        kernel_size=(3, 3),
-        kernel_init=nnx.with_partitioning(
-            nnx.initializers.zeros, (None, None, "in", "out")
-        ),
-        rngs=nnx.Rngs(0),
-    )
-    # Shard the module on a 2x2 mesh.
-    self._shard_nnx_model(conv, jax.make_mesh((2, 2), ("in", "out")))
+    mesh = jax.make_mesh((2, 2), ("in", "out"))
+    with jax.set_mesh(mesh):
+      conv = nnx.Conv(
+          in_features=16,
+          out_features=32,
+          kernel_size=(3, 3),
+          kernel_init=nnx.with_partitioning(
+              nnx.initializers.zeros, (None, None, "in", "out")
+          ),
+          rngs=nnx.Rngs(0),
+      )
+      # Shard the module on a 2x2 mesh.
+      self._shard_nnx_model(conv, jax.make_mesh((2, 2), ("in", "out")))
     # Check the sharding of both the metadata and the actual jax.Array.
     self.assertEqual(conv.kernel.sharding_names, (None, None, "in", "out"))
     self.assertEqual(conv.kernel.value.sharding.spec, (None, None, "in", "out"))
@@ -389,7 +393,8 @@ class LoraTest(parameterized.TestCase):
         alpha=1.0,
     )
     model_input = jnp.ones((1, 8, 8, 16))
-    lora_conv = lora.apply_lora_to_model(conv, lora_provider, model_input)
+    with jax.set_mesh(mesh):
+      lora_conv = lora.apply_lora_to_model(conv, lora_provider, model_input)
     lora_a = lora_conv.kernel_lora_a
     lora_b = lora_conv.kernel_lora_b
     self.assertIsInstance(lora_a, nnx.LoRAParam)
