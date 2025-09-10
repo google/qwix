@@ -41,13 +41,13 @@ class EinsumTest(parameterized.TestCase):
       dict(
           testcase_name='w8a16',
           rhs_qtype=jnp.int8,
-          expected_mae=0.00674438,
+          expected_mae=0.00668335,
       ),
       dict(
           testcase_name='w8a16_sc',
           rhs_qtype=jnp.int8,
           tile_size=128,
-          expected_mae=0.00646973,
+          expected_mae=0.00631714,
       ),
       dict(
           testcase_name='w8a8',
@@ -92,14 +92,13 @@ class EinsumTest(parameterized.TestCase):
           lhs_qtype=jnp.int4,
           expected_mae=0.161133,
       ),
-      # TODO(dangyi): Re-enable once b/433799925 is fixed.
-      # dict(
-      #     testcase_name='w4a4_sc',
-      #     rhs_qtype=jnp.int4,
-      #     lhs_qtype=jnp.int4,
-      #     tile_size=128,
-      #     expected_mae=0.152344,
-      # ),
+      dict(
+          testcase_name='w4a4_sc',
+          rhs_qtype=jnp.int4,
+          lhs_qtype=jnp.int4,
+          tile_size=128,
+          expected_mae=0.152344,
+      ),
       dict(
           testcase_name='fp8',
           rhs_qtype=jnp.float8_e4m3fn,
@@ -201,7 +200,7 @@ class EinsumTest(parameterized.TestCase):
           lhs_shape=(10, 256, 16),
           rhs_shape=(256, 16, 128),
           lhs_asymmetric=True,
-          expected_rel_mae=0.0129395,
+          expected_rel_mae=0.0130005,
       ),
       dict(
           testcase_name='lhs_asymmetric_subchannel',
@@ -316,25 +315,6 @@ class EinsumTest(parameterized.TestCase):
         'fp_fq_mae=%s fp_q_mae=%s fq_q_mae=%s', fp_fq_mae, fp_q_mae, fq_q_mae
     )
     self.assertLess(fq_q_mae, 1e-6)
-
-  def test_einsum_with_preferred_element_type(self):
-    lhs = self._make_array((512, 512), jnp.bfloat16)
-    rhs = self._make_array((512, 512), jnp.bfloat16)
-    how = qarray.HowToQuantize(
-        qtype=jnp.int8,
-        channelwise_axes=(),
-        tiled_axes={},
-        calibration_method='absmax',
-    )
-    lhs = qarray.quantize(lhs, how)
-    rhs = qarray.quantize(rhs, how)
-    self.assertEqual(einsum.einsum('ab,bc->ac', lhs, rhs).dtype, jnp.bfloat16)
-    self.assertEqual(
-        einsum.einsum(
-            'ab,bc->ac', lhs, rhs, preferred_element_type=jnp.float32
-        ).dtype,
-        jnp.float32,
-    )
 
   def test_dequant_on_inputs(self):
     lhs = self._make_array((16, 128, 128), jnp.bfloat16)

@@ -212,6 +212,11 @@ def _fast_dot_general(
       preferred_element_type = lhs_scale.dtype
     elif rhs_scale is not None:
       preferred_element_type = rhs_scale.dtype
+  else:
+    if lhs_scale is not None:
+      lhs_scale = lhs_scale.astype(preferred_element_type)
+    if rhs_scale is not None:
+      rhs_scale = rhs_scale.astype(preferred_element_type)
 
   res = jax.lax.dot_general(
       lhs_value,
@@ -355,8 +360,6 @@ def loop_dot_general(
         preferred_element_type=acc_dtype,
         **kwargs,
     )
-    if preferred_element_type is not None:
-      out = out.astype(preferred_element_type)
     if lhs_scale is not None:
       scale = take_slice(lhs_scale, lhs_ca, ca_tile_indices)
       scale = qarray.transpose_array(scale, lhs_scale_transpose)
@@ -367,6 +370,8 @@ def loop_dot_general(
       out = qarray.call_with_generic_broadcast(jnp.multiply, out, scale)
     acc = out if acc is None else acc + out
   assert acc is not None
+  if preferred_element_type is not None:
+    acc = acc.astype(preferred_element_type)
   return acc
 
 
@@ -396,22 +401,37 @@ def dot_general(
   Returns:
     a floating-point jax.Array.
   """
-  should_dequant_on_output = True
+  # We need to choose between slow_dot_general, which dequantizes first and
+  # then computes in floating-point types, and fast_dot_general, which
+  # computes in quantized types first and then dequantize.
+  use_fast_dot_general = True
   for operand, ca in zip((lhs, rhs), dimension_numbers[0]):
-    if isinstance(operand, qarray.QArray):
-      qarray.validate_qarray(operand)
-      # qtypes like nf4 cannot be dequantized on output.
-      if not numerics.can_dequant_on_output(operand.qtype):
-        should_dequant_on_output = False
-      # If a contracting dimension is tiled too small, tiled dot general will
-      # be inefficient and we should dequantize the input first.
-      for axis in ca:
-        if operand.scale.shape[axis] > 1:
-          tile_size = operand.qvalue.shape[axis] // operand.scale.shape[axis]
-          if tile_size < MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT:
-            should_dequant_on_output = False
+    if not isinstance(operand, qarray.QArray):
+      # Always dequantize on inputs if any of the operands is not a QArray,
+      # because XLA is able to fuse the dequantize and the matmul. The slow path
+      # is usually not slower than the fast path, since both use fp matmul, and
+      # will be significantly faster when subchannel or zero_point is used.
+      use_fast_dot_general = False
+      break
 
-  if should_dequant_on_output:
+    qarray.validate_qarray(operand)
+
+    # qtypes like nf4 cannot be dequantized on output.
+    if not numerics.can_dequant_on_output(operand.qtype):
+      use_fast_dot_general = False
+      break
+
+    # If a contracting dimension is tiled too small, tiled dot general will
+    # be inefficient and we should dequantize the input first. This is critical
+    # when a contracting dimension is channelwise quantized, e.g. tile_size=1.
+    for axis in ca:
+      if operand.scale.shape[axis] > 1:
+        tile_size = operand.qvalue.shape[axis] // operand.scale.shape[axis]
+        if tile_size < MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT:
+          use_fast_dot_general = False
+          break
+
+  if use_fast_dot_general:
     return _fast_dot_general(
         lhs,
         rhs,
