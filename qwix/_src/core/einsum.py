@@ -114,21 +114,20 @@ def einsum(
   # restore the actual QArray before actually passing them to dot_general.
   args = list(args)
   qvalue_to_qarray = {}
+
   # preferred_element_type needs to be set for jnp.einsum so that it won't infer
-  # the type from qvalue x qvalue. However, if user passes None as the
-  # preferred_element_type, we want to also pass None to _qwix_dot_general so
-  # that it can infer the preferred_element_type itself.
-  user_preferred_element_type = preferred_element_type
+  # the type from qvalue x qvalue.
+  scale_dtypes = []
   for i, arg in enumerate(args):
     if isinstance(arg, qarray.QArray):
       args[i] = arg.qvalue
       qvalue_to_qarray[id(arg.qvalue)] = arg
-      if preferred_element_type is None:
-        preferred_element_type = arg.scale.dtype
+      scale_dtypes.append(arg.scale.dtype)
+  if preferred_element_type is None and scale_dtypes:
+    preferred_element_type = jnp.result_type(*scale_dtypes)
 
   def _dot_general(*args, **kwargs):
     args = [qvalue_to_qarray.pop(id(a), a) for a in args]
-    kwargs['preferred_element_type'] = user_preferred_element_type
     return _qwix_dot_general(*args, **kwargs)
 
   # Disabling JIT is necessary so that args in _dot_general are not tracers.
