@@ -61,6 +61,7 @@ class QArray:
   # Array-like methods.
   shape = property(lambda self: self.qvalue.shape)
   ndim = property(lambda self: self.qvalue.ndim)
+  dtype = property(lambda self: self.scale.dtype)
   T = property(lambda self: self.transpose())
 
   def reshape(self, *new_shape) -> 'QArray':
