@@ -181,14 +181,16 @@ def quantize_nnx_model(
   model.__class__ = type(model_class.__name__, (model_class,), new_fields)
 
   # Unlike linen module, nnx module does not have scope or path attribute, we
-  # need to flatten the root module and set the path for the root module and
-  # modules nested in it.
+  # need to iterate over all modules and set the path for them.
   for path, module in model.iter_modules():
     module.qwix_path = path
     # Disable quant_stats update for the first call.
     module.disable_quant_stats_update = True
 
-  getattr(model, call_method)(*model_inputs, **model_inputs_kwargs)
+  # Because nnx modules are stateful, we need to call them once to initialize
+  # them (convert weights, create quant_stats) unless users explicitly opt out.
+  if not model_inputs_kwargs.get("skip_nnx_init"):
+    getattr(model, call_method)(*model_inputs, **model_inputs_kwargs)
 
   # Enable quant_stats update for subsequent calls.
   for _, module in model.iter_modules():

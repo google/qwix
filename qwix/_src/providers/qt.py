@@ -105,12 +105,25 @@ class QtProvider(qconfig.QuantizationProvider):
       )
     if not isinstance(einsum_str, str) or len(operands) != 2:
       raise ValueError(f'Unsupported einsum format: {einsum_str=} {operands=}')
-    lhs, rhs = operands
-    config = self._create_dot_general_qt_config(rule, op_id, lhs, rhs)
 
-    custom_dot_general = lambda *args, **kwargs: dot_general_qt.dot_general_qt(
-        *args[:3], config
-    )
+    def custom_dot_general(
+        lhs,
+        rhs,
+        dimension_numbers,
+        precision,
+        preferred_element_type,
+        **kwargs,
+    ):
+      # TODO(dangyi): support preferred_element_type.
+      del precision, preferred_element_type, kwargs
+      return dot_general_qt.dot_general_qt(
+          lhs,
+          rhs,
+          dimension_numbers,
+          # lhs and rhs might be flipped by einsum so we cannot use the operands
+          # from the einsum call.
+          self._create_dot_general_qt_config(rule, op_id, lhs, rhs),
+      )
 
     with jax.disable_jit():
       return jnp.einsum(

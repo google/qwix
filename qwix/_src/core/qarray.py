@@ -262,7 +262,7 @@ def get_scale_shape(array_shape: ShapeT, how: HowToQuantize) -> ShapeT:
       tile_size = how.tiled_axes[axis]
       if isinstance(tile_size, float):
         tile_size = round(dim * tile_size)
-      if dim % tile_size != 0:
+      if tile_size <= 0 or dim % tile_size != 0:
         raise ValueError(f'{array_shape} cannot be tiled as {how.tiled_axes}.')
       scale_shape.append(dim // tile_size)
     else:
