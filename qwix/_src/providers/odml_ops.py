@@ -66,11 +66,13 @@ def get_all_ops():
   #   l2_norm_full_name = l2_norm.__module__ + '.' + l2_norm.__name__
   #   provider._ops[l2_norm_full_name] = provider._ops['jax.numpy.tanh']
 
+  partial = functools.partial
   quantize = lambda *a, **k: functools.partial(QuantizedOp, input_idx=a, **k)
 
   ops = {
       # go/keep-sorted start
       'flax.linen.BatchNorm.__call__': BatchNorm,
+      'flax.linen.Dropout.__call__': partial(TransparentOp, input_idx=[1]),
       'flax.linen.GroupNorm.__call__': quantize(1, op_name='norm_op'),
       'flax.linen.LayerNorm.__call__': quantize(1, op_name='norm_op'),
       'flax.linen.avg_pool': OnlyInputOp,
@@ -80,7 +82,7 @@ def get_all_ops():
       'flax.linen.silu': Silu,
       'flax.linen.softmax': Softmax,
       'flax.linen.swish': Silu,
-      'jax._src.numpy.indexing.rewriting_take': OnlyInputOp,  # a.__getitem__
+      'jax._src.numpy.indexing.rewriting_take': Take,  # a.__getitem__
       'jax.custom_jvp.__call__': CustomJvpCall,  # this is only for relu.
       'jax.image.resize': OnlyInputOp,
       'jax.lax.broadcast_in_dim': TransparentOp,
@@ -274,8 +276,8 @@ class QuantizedOp:
   ) -> jax.Array:
     """Fake quantize the array based on the given rule.
 
-    Most of the time array is an activation, but it could also be a weight that
-    is not consumed by dot_general/conv/einsum, e.g. jnp.take.
+    This function assumes the array is an activation, unless it has weight_name
+    aux_data, e.g., in jnp.take.
 
     Args:
       array: The array to quantize.
@@ -570,7 +572,7 @@ class Concatenate(QuantizedOp):
 
 
 class Take(OnlyInputOp):
-  """jax.numpy.take."""
+  """jax.numpy.take or rewriting_take."""
 
   input_idx = [0, 1]
 
@@ -691,22 +693,22 @@ class DotEinsumConv(QuantizedOp):
     rule, op_id = self._get_rule_and_op_id_fn(self._op_name)
     args = list(args)
 
-    # Check if the lhs is an activation.
-    if self.check_activation and not aux_data.get(
-        args[lhs_idx], _IS_ACTIVATION, False
-    ):
+    lhs_is_activation = aux_data.get(args[lhs_idx], _IS_ACTIVATION, False)
+    lhs_is_weight = aux_data.get(args[lhs_idx], _WEIGHT_NAME, None) is not None
+    rhs_is_activation = aux_data.get(args[rhs_idx], _IS_ACTIVATION, False)
+    rhs_is_weight = aux_data.get(args[rhs_idx], _WEIGHT_NAME, None) is not None
+    assert lhs_is_activation + lhs_is_weight <= 1
+    assert rhs_is_activation + rhs_is_weight <= 1
+
+    # Check for strict mode.
+    if self.check_activation and not lhs_is_activation and not lhs_is_weight:
       raise NotAnActivationError
 
-    rhs_is_activation = aux_data.get(args[rhs_idx], _IS_ACTIVATION, False)
-
     # Fake quantize lhs.
-    if (
-        rule
-        and rule.act_qtype
-        and not rule.act_static_scale
-        and not rhs_is_activation  # DRQ is only supported for act x weight.
+    if (rule and rule.act_qtype and not rule.act_static_scale) and (
+        lhs_is_activation and rhs_is_weight  # DRQ only supports act x weight.
     ):
-      # Use DRQ which allows per-channel quantization for activations.
+      # Handle DRQ, which allows per-channel quantization for activations.
       lhs_how = self._get_how_to_quantize(
           for_lhs=True,
           qtype=rule.act_qtype,
@@ -716,18 +718,14 @@ class DotEinsumConv(QuantizedOp):
       )
       args[lhs_idx] = self._fake_quant_fn(args[lhs_idx], lhs_how, None)
     else:
-      # possibly SRQ
+      # Assume lhs is an activation or a weight but not a constant.
       args[lhs_idx] = self._maybe_fake_quant(
           args[lhs_idx], rule, op_id + '_lhs'
       )
 
     # Fake quantize rhs.
-    if rhs_is_activation:
-      args[rhs_idx] = self._maybe_fake_quant(
-          args[rhs_idx], rule, op_id + '_rhs'
-      )
-    elif rule and rule.weight_qtype:
-      assert aux_data.get(args[rhs_idx], _WEIGHT_NAME, None)
+    if rule and rule.weight_qtype and rhs_is_weight:
+      # Weights on RHS can be per-channel quantized.
       rhs_how = self._get_how_to_quantize(
           for_lhs=False,
           qtype=rule.weight_qtype,
@@ -738,6 +736,10 @@ class DotEinsumConv(QuantizedOp):
       if self.disable_per_channel_weights:
         rhs_how = dataclasses.replace(rhs_how, channelwise_axes=())
       args[rhs_idx] = self._fake_quant_fn(args[rhs_idx], rhs_how, None)
+    elif rhs_is_activation:
+      args[rhs_idx] = self._maybe_fake_quant(
+          args[rhs_idx], rule, op_id + '_rhs'
+      )
 
     out = self._call_original_op(*args, **kwargs)
     aux_data.set(out, _ALLOW_FUSION, True)
