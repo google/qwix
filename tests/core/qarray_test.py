@@ -242,6 +242,15 @@ class QArrayTest(parameterized.TestCase):
           )
       )
 
+    with self.subTest('swapaxes'):
+      swapaxes_array = q_array.swapaxes(1, 2)
+      self.assertEqual(swapaxes_array.shape, (2, 6, 2))
+      self.assertEqual(swapaxes_array.scale.shape, (2, 3, 1))
+
+    with self.subTest('astype'):
+      astype_array = q_array.astype(jnp.float32)
+      self.assertEqual(astype_array.scale.dtype, jnp.float32)
+
 
 if __name__ == '__main__':
   absltest.main()

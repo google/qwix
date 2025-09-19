@@ -61,6 +61,7 @@ class QArray:
   # Array-like methods.
   shape = property(lambda self: self.qvalue.shape)
   ndim = property(lambda self: self.qvalue.ndim)
+  T = property(lambda self: self.transpose())
 
   def reshape(self, *new_shape) -> 'QArray':
     return reshape(self, *new_shape)
@@ -74,6 +75,13 @@ class QArray:
   def __post_init__(self):
     if self.qtype is None:
       object.__setattr__(self, 'qtype', self.qvalue.dtype)
+
+  def astype(self, dtype: jax.typing.DTypeLike) -> 'QArray':
+    """Cast the dequant type to the given dtype."""
+    return dataclasses.replace(self, scale=self.scale.astype(dtype))
+
+  def swapaxes(self, axis1: int, axis2: int) -> 'QArray':
+    return jax.tree.map(lambda x: x.swapaxes(axis1, axis2), self)
 
 
 def reshape(array: QArray, *new_shape) -> QArray:
