@@ -407,12 +407,17 @@ def dot_general(
   use_fast_dot_general = True
   for operand, ca in zip((lhs, rhs), dimension_numbers[0]):
     if not isinstance(operand, qarray.QArray):
-      # Always dequantize on inputs if any of the operands is not a QArray,
-      # because XLA is able to fuse the dequantize and the matmul. The slow path
-      # is usually not slower than the fast path, since both use fp matmul, and
-      # will be significantly faster when subchannel or zero_point is used.
-      use_fast_dot_general = False
-      break
+      if numerics.should_quantize(operand.dtype):
+        # Always dequantize on inputs if any of the operands is in bf16/fp32,
+        # because XLA is able to fuse the dequantize and the matmul. The slow
+        # path is usually not slower than the fast path, since both use fp
+        # matmul, and will be significantly faster when subchannel or zero_point
+        # is used.
+        use_fast_dot_general = False
+        break
+      # For raw arrays in lower precision, e.g. fp8, int4, bool, using fast path
+      # may be beneficial.
+      continue
 
     qarray.validate_qarray(operand)
 
