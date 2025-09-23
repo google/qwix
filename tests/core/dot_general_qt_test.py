@@ -100,7 +100,7 @@ class DotGeneralQtTest(parameterized.TestCase):
           rhs_qtype='float8_e4m3',
           bwd_qtype='float8_e4m3',
           expected_mae_fq_out=0.0002,
-          expected_mae_fq_grads=0.02,
+          expected_mae_fq_grads=0.03,
           expected_mae_fp_out=0.04,
           expected_mae_fp_grads=0.04,
       ),
@@ -152,10 +152,8 @@ class DotGeneralQtTest(parameterized.TestCase):
     config = dot_general_qt.DotGeneralQtConfig(
         lhs_qtype=lhs_qtype,
         rhs_qtype=rhs_qtype,
-        dlhs_lhs_qtype=bwd_qtype,
-        dlhs_rhs_qtype=bwd_qtype,
-        drhs_lhs_qtype=bwd_qtype,
-        drhs_rhs_qtype=bwd_qtype,
+        dlhs_grad_qtype=bwd_qtype,
+        drhs_grad_qtype=bwd_qtype,
         tile_size=tile_size,
         drhs_tile_size=bwd_drhs_tile_size,
     )
@@ -196,6 +194,7 @@ class DotGeneralQtTest(parameterized.TestCase):
         mae(qt_out, fp_out),
         mae(qt_grads[0], fp_grads[0]),
         mae(qt_grads[1], fp_grads[1]),
+        flush=True,
     )
 
     # fq and QT results should be close.
@@ -207,6 +206,46 @@ class DotGeneralQtTest(parameterized.TestCase):
     self.assertLessEqual(mae(qt_out, fp_out), expected_mae_fp_out)
     self.assertLessEqual(mae(qt_grads[0], fp_grads[0]), expected_mae_fp_grads)
     self.assertLessEqual(mae(qt_grads[1], fp_grads[1]), expected_mae_fp_grads)
+
+  def test_verify_jaxpr(self):
+    """Verify quantized training with full int8 via checking the jaxpr."""
+
+    def mlp(x, w1, w2, w3):
+      dnum = (((2,), (0,)), ((), ()))
+      config = dot_general_qt.DotGeneralQtConfig(
+          lhs_qtype='int8',
+          rhs_qtype='int8',
+          dlhs_grad_qtype='int8',
+          drhs_grad_qtype='int8',
+      )
+      qt_matmul = lambda x, w: dot_general_qt.dot_general_qt(x, w, dnum, config)
+      return qt_matmul(jax.nn.relu(qt_matmul(x, w1)) * qt_matmul(x, w2), w3)
+
+    def train_step(x, weights):
+      loss_fn = lambda weights: jnp.sum(mlp(x, *weights))
+      loss, grads = jax.value_and_grad(loss_fn)(weights)
+      weights = jax.tree.map(lambda w, g: w - g * 0.01, weights, grads)
+      return loss, weights
+
+    jaxpr = jax.make_jaxpr(train_step)(
+        jax.ShapeDtypeStruct((16, 1024, 2048), jnp.bfloat16),
+        (
+            jax.ShapeDtypeStruct((2048, 7168), jnp.bfloat16),
+            jax.ShapeDtypeStruct((2048, 7168), jnp.bfloat16),
+            jax.ShapeDtypeStruct((7168, 2048), jnp.bfloat16),
+        ),
+    )
+
+    dot_general_count = 0
+    for eqn in jaxpr.eqns:
+      if eqn.primitive.name == 'dot_general':
+        dot_general_count += 1
+        self.assertEqual(eqn.invars[0].aval.dtype, jnp.int8)
+        self.assertEqual(eqn.invars[1].aval.dtype, jnp.int8)
+        self.assertEqual(eqn.outvars[0].aval.dtype, jnp.int32)
+    # 3 fwd dot_general and 6 bwd dot_general. Only 4 of the 6 bwd dot_general
+    # are actually used but the jaxpr includes all of them.
+    self.assertEqual(dot_general_count, 9)
 
 
 if __name__ == '__main__':

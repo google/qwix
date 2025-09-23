@@ -372,14 +372,10 @@ class QtProvider(qconfig.QuantizationProvider):
         )
 
     # bwd config, which is only enabled when bwd_qtype is set.
-    dlhs_rhs_qtype = None
     dlhs_tile_size = None
-    drhs_rhs_qtype = None
     drhs_tile_size = None
 
     if rule.bwd_qtype is not None:
-      dlhs_rhs_qtype = rhs_qtype  # dlhs_rhs is the residual rhs.
-      drhs_rhs_qtype = lhs_qtype  # drhs_rhs is the residual lhs.
       if lhs_is_weight:
         dlhs_tile_size = rule.bwd_weight_grad_tile_size
       if rhs_is_weight:
@@ -395,17 +391,13 @@ class QtProvider(qconfig.QuantizationProvider):
         lhs_collect_quant_stat=lhs_collect_quant_stat,
         rhs_collect_quant_stat=rhs_collect_quant_stat,
         # dlhs configs.
-        dlhs_lhs_qtype=rule.bwd_qtype,
-        dlhs_rhs_qtype=dlhs_rhs_qtype,
+        dlhs_grad_qtype=rule.bwd_qtype,
+        dlhs_grad_calibration_method=rule.bwd_calibration_method,
         dlhs_tile_size=dlhs_tile_size,
-        dlhs_lhs_calibration_method=rule.bwd_calibration_method,
-        dlhs_rhs_calibration_method=rhs_calibration_method,
         # drhs configs.
-        drhs_lhs_qtype=rule.bwd_qtype,
-        drhs_rhs_qtype=drhs_rhs_qtype,
+        drhs_grad_qtype=rule.bwd_qtype,
         drhs_tile_size=drhs_tile_size,
-        drhs_lhs_calibration_method=rule.bwd_calibration_method,
-        drhs_rhs_calibration_method=lhs_calibration_method,
+        drhs_grad_calibration_method=rule.bwd_calibration_method,
         # misc.
         disable_channelwise_axes=rule.disable_channelwise_axes,
         bwd_use_original_residuals=rule.bwd_use_original_residuals,
