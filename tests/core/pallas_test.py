@@ -68,7 +68,7 @@ class PallasTest(parameterized.TestCase):
         zero_point=None,
         qtype="int8",
     )
-    new_block_spec = pallas._update_block_specs_for_qarray(block_spec, array)
+    new_block_spec = pallas.update_block_specs_for_qarray(block_spec, array)
     self.assertIsInstance(new_block_spec, qarray.QArray)
     self.assertEqual(new_block_spec.qvalue, block_spec)
     self.assertIsInstance(new_block_spec.scale, pl.BlockSpec)
@@ -118,7 +118,7 @@ class PallasTest(parameterized.TestCase):
     block_spec = pl.BlockSpec(block_shape, lambda *args: tuple(args))
     arg = jnp.zeros(arg_shape, dtype=jnp.float32)
     new_block_spec, new_array, restore_fn = (
-        pallas._transform_block_specs_for_tpu(block_spec, arg)
+        pallas.transform_block_specs_for_tpu(block_spec, arg)
     )
     self.assertTrue(
         pallas._can_fit_tpu_requirements(

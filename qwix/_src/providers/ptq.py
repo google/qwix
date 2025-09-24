@@ -115,7 +115,7 @@ class PtqProvider(qconfig.QuantizationProvider):
           tile_size=rule.tile_size,
           calibration_method=rule.weight_calibration_method,
       )
-      rhs = _create_quantized_param(rhs, rhs_how).array
+      rhs = create_quantized_param(rhs, rhs_how).array
     elif rule.act_qtype is not None:  # act
       rhs_how = get_how_to_quantize(
           for_lhs=False,
@@ -123,7 +123,7 @@ class PtqProvider(qconfig.QuantizationProvider):
           tile_size=rule.tile_size,
           calibration_method=rule.act_calibration_method,
       )
-      rhs = _quantize_act(rhs, rhs_how, rule, op_id + '_rhs')
+      rhs = quantize_act(rhs, rhs_how, rule, op_id + '_rhs')
 
     # Prepare lhs.
     if rule.act_qtype is not None:
@@ -133,7 +133,7 @@ class PtqProvider(qconfig.QuantizationProvider):
           tile_size=rule.tile_size,
           calibration_method=rule.act_calibration_method,
       )
-      lhs = _quantize_act(lhs, lhs_how, rule, op_id + '_lhs')
+      lhs = quantize_act(lhs, lhs_how, rule, op_id + '_lhs')
     return dot_general.dot_general(
         lhs, rhs, dimension_numbers, out_sharding=out_sharding
     )
@@ -177,7 +177,7 @@ class PtqProvider(qconfig.QuantizationProvider):
           tile_size=rule.tile_size,
           calibration_method=rule.weight_calibration_method,
       )
-      rhs = _create_quantized_param(rhs, rhs_how).array
+      rhs = create_quantized_param(rhs, rhs_how).array
     elif rule.act_qtype is not None:  # act
       rhs_how = get_how_to_quantize(
           for_lhs=False,
@@ -185,7 +185,7 @@ class PtqProvider(qconfig.QuantizationProvider):
           tile_size=rule.tile_size,
           calibration_method=rule.act_calibration_method,
       )
-      rhs = _quantize_act(rhs, rhs_how, rule, op_id + '_rhs')
+      rhs = quantize_act(rhs, rhs_how, rule, op_id + '_rhs')
 
     # Prepare lhs.
     if rule.act_qtype is not None:
@@ -195,7 +195,7 @@ class PtqProvider(qconfig.QuantizationProvider):
           tile_size=rule.tile_size,
           calibration_method=rule.act_calibration_method,
       )
-      lhs = _quantize_act(lhs, lhs_how, rule, op_id + '_lhs')
+      lhs = quantize_act(lhs, lhs_how, rule, op_id + '_lhs')
     return einsum.einsum(einsum_str, lhs, rhs)
 
   def conv_general_dilated(
@@ -242,7 +242,7 @@ class PtqProvider(qconfig.QuantizationProvider):
           qtype=rule.weight_qtype,
           calibration_method=rule.weight_calibration_method,
       )
-      rhs = _create_quantized_param(rhs, rhs_how).array
+      rhs = create_quantized_param(rhs, rhs_how).array
 
     # Prepare lhs.
     if rule.act_qtype != rule.weight_qtype:
@@ -256,7 +256,7 @@ class PtqProvider(qconfig.QuantizationProvider):
         qtype=rule.act_qtype,
         calibration_method=rule.act_calibration_method,
     )
-    lhs = _quantize_act(lhs, lhs_how, rule, op_id + '_lhs')
+    lhs = quantize_act(lhs, lhs_how, rule, op_id + '_lhs')
     return conv_general.conv_general_dilated(
         lhs,
         rhs,
@@ -349,7 +349,7 @@ class PtqProvider(qconfig.QuantizationProvider):
     return model, model_args, model_kwargs
 
 
-def _quantize_act(
+def quantize_act(
     array: jax.Array,
     how: qarray.HowToQuantize,
     rule: qconfig.QuantizationRule,
@@ -389,7 +389,7 @@ def _quantize_act(
   )
 
 
-def _create_quantized_param(
+def create_quantized_param(
     value: jax.Array, how: qarray.HowToQuantize
 ) -> WithAux[qarray.QArray]:
   """Creates the quantized param and replaces the original param in the module.
