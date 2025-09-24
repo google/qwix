@@ -32,7 +32,7 @@ class QtTest(absltest.TestCase):
 
   def test_dot_general_grad(self):
     qt_provider = qt.QtProvider([])
-    rule = qconfig.QuantizationRule(
+    rule = qt.QtRule(
         module_path=".*",
         weight_qtype=jnp.int8,
         act_qtype=jnp.int8,
