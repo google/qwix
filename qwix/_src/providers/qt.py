@@ -59,6 +59,12 @@ class QtRule(qconfig.QuantizationRule):
 class QtProvider(qconfig.QuantizationProvider):
   """Quantization provider for Quantized Training (QT)."""
 
+  def _init_rule(self, rule: qconfig.QuantizationRule) -> QtRule:
+    rule = super()._init_rule(rule)
+    if not isinstance(rule, QtRule):
+      rule = QtRule(**dataclasses.asdict(rule))
+    return rule
+
   def dot_general(
       self,
       lhs: jax.Array,
@@ -260,8 +266,7 @@ class QtProvider(qconfig.QuantizationProvider):
       rhs: jax.Array,
   ) -> conv_general_qt.ConvGeneralQtConfig:
     """Creates a ConvGeneralQtConfig for conv_general_dilated."""
-    if not isinstance(rule, QtRule):
-      rule = QtRule(**dataclasses.asdict(rule))
+    assert isinstance(rule, QtRule), '_init_rule should have been called.'
 
     if rule.weight_qtype != rule.act_qtype:
       raise ValueError(
@@ -332,8 +337,7 @@ class QtProvider(qconfig.QuantizationProvider):
       rhs: jax.Array,
   ) -> dot_general_qt.DotGeneralQtConfig:
     """Creates a DotGeneralQtConfig for dot_general and einsum."""
-    if not isinstance(rule, QtRule):
-      rule = QtRule(**dataclasses.asdict(rule))
+    assert isinstance(rule, QtRule), '_init_rule should have been called.'
 
     # LHS configs based on whether it's a weight or an activation.
     lhs_qtype = None
