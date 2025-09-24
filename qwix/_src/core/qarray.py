@@ -66,6 +66,14 @@ class QArray:
   def reshape(self, *new_shape) -> 'QArray':
     return reshape(self, *new_shape)
 
+  def swapaxes(self, axis1: int, axis2: int) -> 'QArray':
+    def _swap(x):
+      if x is None:
+        return None
+      return jnp.swapaxes(x, axis1, axis2)
+
+    return jax.tree.map(_swap, self)
+
   def transpose(self, *args) -> 'QArray':
     return jax.tree.map(lambda x: x.transpose(*args), self)
 
