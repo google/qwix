@@ -61,10 +61,10 @@ def pallas_call(
   def wrapper(*args):
     num_scalar_prefetch = getattr(grid_spec, "num_scalar_prefetch", 0)
 
-    in_specs = _update_block_specs_for_qarray(
+    in_specs = update_block_specs_for_qarray(
         grid_spec.in_specs, args[num_scalar_prefetch:]
     )
-    in_specs, new_args, restore_fn = _transform_block_specs_for_tpu(
+    in_specs, new_args, restore_fn = transform_block_specs_for_tpu(
         in_specs, args[num_scalar_prefetch:]
     )
     args = args[:num_scalar_prefetch] + new_args
@@ -87,7 +87,7 @@ def pallas_call(
   return wrapper
 
 
-def _update_block_specs_for_qarray(block_specs: Any, args: Any) -> Any:
+def update_block_specs_for_qarray(block_specs: Any, args: Any) -> Any:
   """Update block specs for QArray arguments."""
 
   def _update_block_spec(spec: pl.BlockSpec, arg):
@@ -119,7 +119,7 @@ def _update_block_specs_for_qarray(block_specs: Any, args: Any) -> Any:
   return jax.tree.map(_update_block_spec, block_specs, args)
 
 
-def _transform_block_specs_for_tpu(
+def transform_block_specs_for_tpu(
     block_specs: Any, args: Any
 ) -> tuple[Any, Any, Callable[..., Any]]:
   """Transform block specs and arguments so that they can be used on TPU.

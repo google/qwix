@@ -286,7 +286,7 @@ def transpose_array(
   * It allows missing and new axes in the transpose list. The missing axes will
     be squeezed away, and the new axes will be added with size 1.
   * It's pallas-friendly as it will try to use reshape and simpler transpose
-    instead of transpose when possible.
+    instead of direct transpose when possible.
 
   Args:
     array: The array to transpose.

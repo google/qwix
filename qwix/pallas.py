@@ -35,6 +35,8 @@ __all__ = [
     'dot_general',
     'einsum',
     'pallas_call',
+    'transform_block_specs_for_tpu',
+    'update_block_specs_for_qarray',
     'QArray',
     'dequantize',
     'get_current_rule',
@@ -50,7 +52,7 @@ import jax
 from qwix._src.core import qarray
 from qwix._src.core.dot_general import loop_dot_general as dot_general
 from qwix._src.core.einsum import einsum as _einsum
-from qwix._src.core.pallas import pallas_call
+from qwix._src.core.pallas import pallas_call, transform_block_specs_for_tpu, update_block_specs_for_qarray
 from qwix._src.core.qarray import QArray, dequantize
 from qwix._src.qconfig import get_current_rule
 
