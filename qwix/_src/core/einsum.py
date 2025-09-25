@@ -108,23 +108,23 @@ def einsum(
   Returns:
     The result of the einsum, a floating-point jax.Array.
   """
+  # preferred_element_type has to be set for jnp.einsum so that it won't infer
+  # the type from qvalue x qvalue.
+  _, preferred_element_type = qarray.get_accumulator_and_result_type(
+      *[a for a in args if isinstance(a, qarray.MaybeQArray)],
+      preferred_element_type=preferred_element_type,
+  )
+
   # We want to use jnp.einsum with quantized dot_general to avoid duplicating
   # the implementation. However, jnp.einsum will check the inputs to be
   # jax Arrays. To work around this, we send the qvalue to jnp.einsum and
   # restore the actual QArray before actually passing them to dot_general.
   args = list(args)
   qvalue_to_qarray = {}
-
-  # preferred_element_type needs to be set for jnp.einsum so that it won't infer
-  # the type from qvalue x qvalue.
-  scale_dtypes = []
   for i, arg in enumerate(args):
     if isinstance(arg, qarray.QArray):
       args[i] = arg.qvalue
       qvalue_to_qarray[id(arg.qvalue)] = arg
-      scale_dtypes.append(arg.scale.dtype)
-  if preferred_element_type is None and scale_dtypes:
-    preferred_element_type = jnp.result_type(*scale_dtypes)
 
   def _dot_general(*args, **kwargs):
     args = [qvalue_to_qarray.pop(id(a), a) for a in args]

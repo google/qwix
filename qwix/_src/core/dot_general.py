@@ -203,20 +203,9 @@ def _fast_dot_general(
     rhs_scale = qarray.split_axis(rhs_scale, {a: 1 for a in rhs_tiled_ca})
     rhs_scale = qarray.transpose_array(rhs_scale, rhs_scale_transpose)
 
-  if preferred_element_type is None:
-    # We want to override the preferred_element_type to int32 for int8 x int8
-    # dot_general, or bfloat16/float32 for fp8 x fp8 dot_general.
-    if all('int' in x.dtype.name for x in (lhs_value, rhs_value)):
-      preferred_element_type = jnp.int32
-    elif lhs_scale is not None:
-      preferred_element_type = lhs_scale.dtype
-    elif rhs_scale is not None:
-      preferred_element_type = rhs_scale.dtype
-  else:
-    if lhs_scale is not None:
-      lhs_scale = lhs_scale.astype(preferred_element_type)
-    if rhs_scale is not None:
-      rhs_scale = rhs_scale.astype(preferred_element_type)
+  preferred_element_type, result_type = qarray.get_accumulator_and_result_type(
+      lhs, rhs, preferred_element_type=preferred_element_type
+  )
 
   res = jax.lax.dot_general(
       lhs_value,
@@ -259,7 +248,7 @@ def _fast_dot_general(
     res = qarray.call_with_generic_broadcast(jnp.multiply, res, rhs_scale)
   if sum_axes:
     res = jnp.sum(res, axis=sum_axes)
-  return res
+  return res.astype(result_type)
 
 
 def _slow_dot_general(
@@ -321,15 +310,9 @@ def loop_dot_general(
     else:
       ca_tile_counts.append(1)
 
-  acc_dtype = None
-  if all('int' in x.dtype.name for x in (lhs_value, rhs_value)):
-    acc_dtype = jnp.int32
-  elif preferred_element_type is not None:
-    acc_dtype = preferred_element_type
-  elif lhs_scale is not None:
-    acc_dtype = lhs_scale.dtype
-  elif rhs_scale is not None:
-    acc_dtype = rhs_scale.dtype
+  preferred_element_type, result_type = qarray.get_accumulator_and_result_type(
+      lhs, rhs, preferred_element_type=preferred_element_type
+  )
 
   lhs_scale_transpose, rhs_scale_transpose = _get_scale_transpose(
       dimension_numbers, (len(lhs_value.shape), len(rhs_value.shape))
@@ -357,7 +340,7 @@ def loop_dot_general(
         take_slice(lhs_value, lhs_ca, ca_tile_indices),
         take_slice(rhs_value, rhs_ca, ca_tile_indices),
         dimension_numbers=dimension_numbers,
-        preferred_element_type=acc_dtype,
+        preferred_element_type=preferred_element_type,
         **kwargs,
     )
     if lhs_scale is not None:
@@ -370,9 +353,7 @@ def loop_dot_general(
       out = qarray.call_with_generic_broadcast(jnp.multiply, out, scale)
     acc = out if acc is None else acc + out
   assert acc is not None
-  if preferred_element_type is not None:
-    acc = acc.astype(preferred_element_type)
-  return acc
+  return acc.astype(result_type)
 
 
 # If a contracting dimension has a tile size smaller than this threshold, tiled

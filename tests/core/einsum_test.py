@@ -200,7 +200,7 @@ class EinsumTest(parameterized.TestCase):
           lhs_shape=(10, 256, 16),
           rhs_shape=(256, 16, 128),
           lhs_asymmetric=True,
-          expected_rel_mae=0.0130005,
+          expected_rel_mae=0.0129395,
       ),
       dict(
           testcase_name='lhs_asymmetric_subchannel',

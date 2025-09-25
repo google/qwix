@@ -297,6 +297,8 @@ def transpose_array(
   Returns:
     The transposed array.
   """
+  if any(l > 1 for a, l in enumerate(array.shape) if a not in transpose):
+    raise ValueError(f'Cannot transpose {array.shape} as {transpose}.')
   used_axes = [a for a in transpose if a is not None and array.shape[a] != 1]
   # If used_axes is already in order, no actual transpose is needed and we can
   # just reshape the array.
@@ -553,3 +555,46 @@ def clip_to_calibration(
   else:
     raise ValueError(f'Unsupported calibration: {calibration}')
   return array.reshape(original_shape)
+
+
+def get_accumulator_and_result_type(
+    *args: MaybeQArray,
+    preferred_element_type: jax.typing.DTypeLike | None,
+) -> tuple[jax.typing.DTypeLike, jax.typing.DTypeLike]:
+  """jnp.result_type for QArray.
+
+  Accumulator type is the dtype used for the dot_general computation.
+  Result type is the dtype of the final result.
+
+  Args:
+    *args: The arguments to dot_general.
+    preferred_element_type: The preferred element type for dot_general.
+
+  Returns:
+    A tuple of the accumulator type and the result type.
+  """
+  qvalue_dtypes, dequant_dtypes = [], []
+  for arg in args:
+    if isinstance(arg, QArray):
+      qvalue_dtypes.append(arg.qvalue.dtype)  # note qtype can be different.
+      dequant_dtypes.append(arg.scale.dtype)
+    else:
+      qvalue_dtypes.append(arg.dtype)
+      dequant_dtypes.append(arg.dtype)
+
+  # Result type should only depend on dequant_dtype and preferred_element_type.
+  result_type = preferred_element_type
+  if result_type is None:
+    # There's no dtype promotion path for fp8 or lower, and int4 or lower.
+    # We manually upcast them to bf16 or int32.
+    for i, t in enumerate(dequant_dtypes):
+      if t.itemsize <= 1:
+        dequant_dtypes[i] = jnp.int32 if 'int' in t.name else jnp.bfloat16
+    result_type = jnp.result_type(*dequant_dtypes)
+
+  # Accumulator type should be the same as result type except for int x int.
+  accumulator_type = result_type
+  if all('int' in t.name for t in qvalue_dtypes):
+    accumulator_type = jnp.int32
+
+  return accumulator_type, result_type
