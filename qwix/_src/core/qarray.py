@@ -241,17 +241,19 @@ class HowToQuantize:
   qtype: jax.typing.DTypeLike
   # Channelwise axes will have individual scales, which has the same effect
   # as setting their tile sizes to 1 in tiled_axes.
-  channelwise_axes: Collection[int]
+  channelwise_axes: Collection[int] = ()
   # Tiled axes have subchannel quantization enabled. The value is a mapping
   # from the tiled axis to the tile size. If the tile size is a float, it has
   # to be "1 / tile_count" and the actual tile size will be
   # round(axis_size * tile_size). Note that 1 and 1.0 have very different
   # meanings: a tile size of 1 means to use per-channel scale, while a
   # tile size of 1.0 means to use shared scale.
-  tiled_axes: Mapping[int, int | float]
+  tiled_axes: Mapping[int, int | float] = dataclasses.field(
+      default_factory=dict
+  )
   # The calibration method to use. The format is <method>[,<args>], e.g.
   # "absmax" or "fixed,-10,10". Check calibrate() for supported methods.
-  calibration_method: str
+  calibration_method: str = 'absmax'
 
 
 ShapeT: TypeAlias = Sequence[int]

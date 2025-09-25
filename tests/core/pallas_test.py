@@ -211,9 +211,7 @@ class PallasTest(parameterized.TestCase):
     x = jax.random.uniform(jax.random.key(0), input_shape, jnp.float32)
     how = qarray.HowToQuantize(
         qtype="int8",
-        channelwise_axes=[],
         tiled_axes=tiled_axes,
-        calibration_method="absmax",
     )
     qx = qarray.quantize(x, how)
     self.assertTrue(jnp.allclose(dequantize_pallas(qx), qarray.dequantize(qx)))
@@ -262,7 +260,6 @@ class PallasTest(parameterized.TestCase):
         qtype="int8",
         channelwise_axes=[0, 1],
         tiled_axes={2: 128},
-        calibration_method="absmax",
     )
     qx = qarray.quantize(
         jax.random.uniform(jax.random.key(0), (4, 256, 256), jnp.float32), x_how
@@ -271,7 +268,6 @@ class PallasTest(parameterized.TestCase):
         qtype="int8",
         channelwise_axes=[2],
         tiled_axes={1: 128},
-        calibration_method="absmax",
     )
     qy = qarray.quantize(
         jax.random.uniform(jax.random.key(1), (4, 256, 256), jnp.float32), y_how
