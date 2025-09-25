@@ -177,6 +177,7 @@ def conv_general_dilated(
     dimension_numbers: jax.lax.ConvGeneralDilatedDimensionNumbers = None,
     feature_group_count: int = 1,
     batch_group_count: int = 1,
+    # TODO(dangyi): Add preferred_element_type.
 ) -> jax.Array:
   """Dispatches to fast or slow conv_general_dilated depending on the inputs."""
   if isinstance(lhs, qarray.QArray) and isinstance(rhs, qarray.QArray):
