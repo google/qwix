@@ -275,12 +275,7 @@ class EinsumTest(parameterized.TestCase):
     fp_res = jnp.einsum(
         einsum_str, lhs, rhs, precision=jax.lax.Precision.HIGHEST
     )
-    how = qarray.HowToQuantize(
-        qtype=jnp.int8,
-        channelwise_axes=(),
-        tiled_axes={},
-        calibration_method='absmax',
-    )
+    how = qarray.HowToQuantize(qtype=jnp.int8)
     lhs = qarray.quantize(lhs, how)
     rhs = qarray.quantize(rhs, how)
 
@@ -321,21 +316,11 @@ class EinsumTest(parameterized.TestCase):
     rhs = self._make_array((128, 128, 16), jnp.bfloat16)
     lhs = qarray.quantize(
         lhs,
-        qarray.HowToQuantize(
-            qtype=jnp.int8,
-            channelwise_axes=(0, 1),
-            tiled_axes={},
-            calibration_method='absmax',
-        ),
+        qarray.HowToQuantize(qtype=jnp.int8, channelwise_axes=(0, 1)),
     )
     rhs = qarray.quantize(
         rhs,
-        qarray.HowToQuantize(
-            qtype=jnp.int8,
-            channelwise_axes=(0, 2),
-            tiled_axes={},
-            calibration_method='absmax',
-        ),
+        qarray.HowToQuantize(qtype=jnp.int8, channelwise_axes=(0, 2)),
     )
     out = einsum.einsum('TNH,NHD -> TD', lhs, rhs)
     self.assertEqual(out.shape, (16, 16))

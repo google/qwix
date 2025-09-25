@@ -153,12 +153,7 @@ class QArrayTest(parameterized.TestCase):
       array += jax.random.uniform(
           jax.random.key(42), array.shape, minval=-1e-7, maxval=1e-7
       )
-    how = qarray.HowToQuantize(
-        qtype=jnp.int8,
-        channelwise_axes=[],
-        tiled_axes={},
-        calibration_method='minmax',
-    )
+    how = qarray.HowToQuantize(qtype=jnp.int8, calibration_method='minmax')
     q_array = qarray.quantize(array, how)
     self.assertEqual(q_array.zero_point, jnp.array(-128, dtype=jnp.int8), array)
     expected_q_array = jnp.arange(-128, 128, dtype=jnp.int8)
