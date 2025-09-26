@@ -19,6 +19,22 @@ from jax import numpy as jnp
 from qwix._src.core import qarray
 
 
+def get_how_to_quantize(
+    *, for_lhs: bool, qtype: jax.typing.DTypeLike
+) -> qarray.HowToQuantize:
+  """Gets quantization parameters for ragged_dot operands."""
+  if for_lhs:
+    # lhs shape [M, K]: contracting axis=1, channelwise axis=0
+    channelwise_axes = [0]
+  else:
+    # rhs shape [G, K, N]: contracting axis=1, channelwise axes=0, 2
+    channelwise_axes = [0, 2]
+  return qarray.HowToQuantize(
+      qtype=qtype,
+      channelwise_axes=channelwise_axes,
+  )
+
+
 def _fast_ragged_dot(
     lhs: qarray.MaybeQArray,
     rhs: qarray.MaybeQArray,

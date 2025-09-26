@@ -153,10 +153,7 @@ def reshape(array: QArray, *new_shape) -> QArray:
 
 def rewriting_take(array: QArray, idx) -> QArray:
   """Returns array[*idx]."""
-  try:
-    idx = list(idx)
-  except TypeError:
-    idx = [idx]
+  idx = list(idx) if isinstance(idx, tuple | list) else [idx]
 
   actual_len = sum(i is not None and i is not Ellipsis for i in idx)
   if Ellipsis in idx:
@@ -175,10 +172,10 @@ def rewriting_take(array: QArray, idx) -> QArray:
         i += 1
       if a == b or idx[i] == slice(None):
         actual_idx.append(idx[i])
+      elif b == 1:
+        actual_idx.append(slice(None) if isinstance(idx[i], slice) else 0)
       elif isinstance(idx[i], int):
         actual_idx.append(idx[i] // (a // b))
-      elif b == 1:
-        actual_idx.append(slice(None))
       else:
         raise ValueError(f'Unsupported indexing {idx} for {array.shape}.')
       i += 1
