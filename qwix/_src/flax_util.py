@@ -327,3 +327,20 @@ def _check_shape(value: Any, init_fn: Callable[[], Any]):
   abs_init_value = jax.eval_shape(lambda: unbox(init_fn()))
   if abs_value != abs_init_value:
     raise ValueError(f'{abs_value} != {abs_init_value}')
+
+
+def make_rng(rng_stream: str) -> jax.Array:
+  """Returns a random key from rng stream."""
+
+  # Get random key.
+  module = get_current_module()
+  if isinstance(module, nn.Module):
+    key = module.make_rng(rng_stream)
+  elif isinstance(module, nnx.Module):
+    if rng_stream != 'stochastic_rounding':
+      raise ValueError(f'Unsupported nnx rng_stream: {rng_stream}')
+    key = module.rngs.stochastic_rounding()
+  else:
+    raise ValueError('Current module is not known.')
+
+  return key

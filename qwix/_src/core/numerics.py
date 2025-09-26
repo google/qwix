@@ -13,8 +13,14 @@
 # limitations under the License.
 """Numerics for quantization."""
 
+from typing import Callable, Sequence
 import jax
 from jax import numpy as jnp
+
+# A function that generates noise for stochastic rounding.
+# args:  shape: The shape of the noise to generate.
+# returns: An array of noise with the given shape with channelwise noise axes.
+NoiseFn = Callable[[Sequence[int]], jax.Array]
 
 
 def should_quantize(dtype: jax.typing.DTypeLike) -> bool:
@@ -64,7 +70,11 @@ def get_symmetric_bound(qtype: jax.typing.DTypeLike) -> float:
         return jnp.iinfo(qtype).max + 0.5
 
 
-def convert_to(x: jax.Array, qtype: jax.typing.DTypeLike) -> jax.Array:
+def convert_to(
+    x: jax.Array,
+    qtype: jax.typing.DTypeLike,
+    noise_fn: NoiseFn | None = None,
+) -> jax.Array:
   """Rounds and converts x to the given qtype."""
   match qtype:
     case 'nf4':
@@ -84,8 +94,15 @@ def convert_to(x: jax.Array, qtype: jax.typing.DTypeLike) -> jax.Array:
       try:
         finfo = jnp.finfo(qtype)
       except ValueError:
+        finfo = None
+      if finfo is None:
         # dtype is an integer type. We need to round manually but clipping can
         # be handled by "astype".
+        if noise_fn is not None:
+          # Stochastic rounding is done in fp32 to avoid bias from bf16, e.g.
+          # round(bf16(41)-bf16(0.4)) ~= round(40.5) = 40, rather than
+          # round(41-0.4) = round(40.6) = 41.
+          x = x.astype(jnp.float32) + noise_fn(x.shape)
         return jnp.round(x).astype(qtype)
       # dtype is a floating point type. No rounding needed, but we need to
       # clip to the range to avoid inf or nan (e.g. for e4m3fn).
