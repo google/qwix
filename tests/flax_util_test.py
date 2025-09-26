@@ -186,6 +186,37 @@ class FlaxUtilTest(parameterized.TestCase):
       self.assertIsInstance(updated, nnx.Param)
       self.assertEqual(updated.sharding_names, ("b", "a", None))
 
+  def test_make_rng_linen(self):
+    class MyModule(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        key = flax_util.make_rng("stochastic_rounding")
+        return key
+
+    key = jax.random.PRNGKey(0)
+    module = MyModule()
+    variables = module.init(
+        {"params": key, "stochastic_rounding": key}, jnp.ones((1,))
+    )
+    rng_key = module.apply(
+        variables, jnp.ones((1,)), rngs={"stochastic_rounding": key}
+    )
+    self.assertEqual(rng_key.shape, (2,))
+
+  def test_make_rng_nnx(self):
+    class MyModule(nnx.Module):
+
+      def __init__(self, *, rngs: nnx.Rngs):
+        self.rngs = rngs
+
+      def __call__(self):
+        return flax_util.make_rng("stochastic_rounding")
+
+    module = MyModule(rngs=nnx.Rngs(stochastic_rounding=0))
+    key = module()
+    self.assertEqual(key.shape, ())
+
 
 if __name__ == "__main__":
   absltest.main()

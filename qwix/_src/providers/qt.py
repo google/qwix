@@ -27,6 +27,7 @@ from qwix._src import flax_util
 from qwix._src import qconfig
 from qwix._src.core import conv_general_qt
 from qwix._src.core import dot_general_qt
+from qwix._src.core import stochastic_rounding
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -51,6 +52,13 @@ class QtRule(qconfig.QuantizationRule):
   # If True, use the original values instead of the quantized values as the
   # residuals for backward pass.
   bwd_use_original_residuals: bool = False
+
+  # Use stochastic rounding for the gradients. (Only 'uniform' is supported.)
+  bwd_stochastic_rounding: str | None = None
+
+  # Use channelwise noise for stochastic rounding. By default, it will generate
+  # noise for the 0th dimension and broadcast it over remaining dimensions.
+  channelwise_noise_axes: Sequence[int] = (0,)
 
   # Override any fields in DotGeneralQtConfig.
   additional_qt_config: Mapping[str, Any] | None = None
@@ -385,6 +393,26 @@ class QtProvider(qconfig.QuantizationProvider):
       if rhs_is_weight:
         drhs_tile_size = rule.bwd_weight_grad_tile_size
 
+    if rule.bwd_stochastic_rounding == 'uniform':
+      dlhs_stochastic_rounding_noise_fn = functools.partial(
+          stochastic_rounding.uniform_noise,
+          key=flax_util.make_rng('stochastic_rounding'),
+          channelwise_noise_axes=rule.channelwise_noise_axes,
+      )
+      drhs_stochastic_rounding_noise_fn = functools.partial(
+          stochastic_rounding.uniform_noise,
+          key=flax_util.make_rng('stochastic_rounding'),
+          channelwise_noise_axes=rule.channelwise_noise_axes,
+      )
+    elif rule.bwd_stochastic_rounding is not None:
+      raise ValueError(
+          'Stochastic rounding should be "uniform" or None, got:'
+          f' {rule.bwd_stochastic_rounding}'
+      )
+    else:
+      dlhs_stochastic_rounding_noise_fn = None
+      drhs_stochastic_rounding_noise_fn = None
+
     qt_config = dot_general_qt.DotGeneralQtConfig(
         # fwd configs.
         lhs_qtype=lhs_qtype,
@@ -405,6 +433,8 @@ class QtProvider(qconfig.QuantizationProvider):
         # misc.
         disable_channelwise_axes=rule.disable_channelwise_axes,
         bwd_use_original_residuals=rule.bwd_use_original_residuals,
+        dlhs_stochastic_rounding_noise_fn=dlhs_stochastic_rounding_noise_fn,
+        drhs_stochastic_rounding_noise_fn=drhs_stochastic_rounding_noise_fn,
     )
 
     if rule.additional_qt_config:

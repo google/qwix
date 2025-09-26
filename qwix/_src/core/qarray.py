@@ -254,6 +254,8 @@ class HowToQuantize:
   # The calibration method to use. The format is <method>[,<args>], e.g.
   # "absmax" or "fixed,-10,10". Check calibrate() for supported methods.
   calibration_method: str = 'absmax'
+  # Noise function to use for stochastic rounding.
+  noise_fn: numerics.NoiseFn | None = None
 
 
 ShapeT: TypeAlias = Sequence[int]
@@ -476,6 +478,7 @@ def quantize_with_scale_zero_point(
     qtype: jax.typing.DTypeLike,
     scale: jax.Array,
     zero_point: jax.Array | None,
+    noise_fn: numerics.NoiseFn | None = None,
 ) -> QArray:
   """Quantizes an array with the given scale and zero_point.
 
@@ -484,6 +487,8 @@ def quantize_with_scale_zero_point(
     qtype: The logical type used for quantization.
     scale: The scale to use.
     zero_point: The zero_point to use.
+    noise_fn: The noise function to add to the quantized array for stochastic
+      rounding.
 
   Returns:
     The quantized array.
@@ -504,7 +509,7 @@ def quantize_with_scale_zero_point(
     qvalue = call_with_generic_broadcast(
         jnp.add, qvalue, zero_point.astype(qvalue.dtype)
     )
-  qvalue = numerics.convert_to(qvalue, qtype)
+  qvalue = numerics.convert_to(qvalue, qtype, noise_fn)
   return QArray(qvalue, scale, zero_point, qtype)
 
 
@@ -515,7 +520,9 @@ def quantize(
   """Quantizes an array using a dynamic range."""
   calibration = calibrate(array, how)
   scale, zero_point = compute_scale_zero_point(calibration, how.qtype)
-  return quantize_with_scale_zero_point(array, how.qtype, scale, zero_point)
+  return quantize_with_scale_zero_point(
+      array, how.qtype, scale, zero_point, how.noise_fn
+  )
 
 
 def dequantize(array: QArray) -> jax.Array:

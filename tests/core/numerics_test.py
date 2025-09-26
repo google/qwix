@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 from absl.testing import absltest
+import jax
 from jax import numpy as jnp
 from qwix._src.core import numerics
+from qwix._src.core import stochastic_rounding
 
 
 class NumericsTest(absltest.TestCase):
@@ -76,6 +79,24 @@ class NumericsTest(absltest.TestCase):
         numerics.convert_to(jnp.array([-1.2, 3.5, 129, 1300]), "uint8"),
         jnp.array([0, 4, 129, 255], jnp.uint8),
     )
+
+  def test_stochastic_rounding(self):
+    key = jax.random.PRNGKey(0)
+    x = jnp.full((10000,), 0.5)
+    noise_fn = functools.partial(stochastic_rounding.uniform_noise, key=key)
+    y = numerics.convert_to(x, jnp.int8, noise_fn=noise_fn)
+    # Without stochastic rounding, this would be rounded to all zeros based on
+    # round-half-to-even.
+    self.assertAlmostEqual(jnp.mean(y), 0.5, delta=0.1)
+
+    # Test with negative values.
+    x = jnp.full((10000,), -0.5)
+    _, subkey = jax.random.split(key)
+    noise_fn = functools.partial(stochastic_rounding.uniform_noise, key=subkey)
+    y = numerics.convert_to(x, jnp.int8, noise_fn=noise_fn)
+    # Without stochastic rounding, this would be rounded to all zeros based on
+    # round-half-to-even.
+    self.assertAlmostEqual(jnp.mean(y), -0.5, delta=0.1)
 
   def test_nf4(self):
     self._assert_equal(
