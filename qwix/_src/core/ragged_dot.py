@@ -14,6 +14,7 @@
 
 """Quantized jax.lax.ragged_dot."""
 
+from absl import logging
 import jax
 from jax import numpy as jnp
 from qwix._src.core import qarray
@@ -107,9 +108,11 @@ def ragged_dot(
   # fast_ragged_dot does't support channelwise scales on group axis, or tiled
   # scales on contracting axes, or zero_point.
   if isinstance(lhs, qarray.QArray):  # [m, k]
+    logging.vlog(3, 'lhs: %s', lhs)
     if lhs.zero_point is not None or lhs.scale.shape[1] > 1:
       use_fast_ragged_dot = False
   if isinstance(rhs, qarray.QArray):  # [g, k, n]
+    logging.vlog(3, 'rhs: %s', rhs)
     if (
         rhs.zero_point is not None
         or rhs.scale.shape[0] > 1
@@ -118,6 +121,7 @@ def ragged_dot(
       use_fast_ragged_dot = False
 
   if use_fast_ragged_dot:
+    logging.vlog(3, 'using fast_ragged_dot')
     return _fast_ragged_dot(
         lhs,
         rhs,
@@ -127,6 +131,7 @@ def ragged_dot(
         group_offset=group_offset,
     )
   else:
+    logging.vlog(3, 'using slow_ragged_dot')
     return _slow_ragged_dot(
         lhs,
         rhs,

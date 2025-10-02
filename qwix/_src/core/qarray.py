@@ -72,6 +72,19 @@ class QArray:
   def __getitem__(self, idx) -> 'QArray':
     return rewriting_take(self, idx)
 
+  def __repr__(self) -> str:
+    def arr_repr(arr):
+      if arr is None:
+        return 'None'
+      return f'{arr.dtype}{list(arr.shape)}'
+
+    return (
+        f'QArray(qvalue={arr_repr(self.qvalue)}, '
+        f'scale={arr_repr(self.scale)}, '
+        f'zero_point={arr_repr(self.zero_point)}, '
+        f'qtype={self.qtype})'
+    )
+
   def __post_init__(self):
     if self.qtype is None:
       object.__setattr__(self, 'qtype', self.qvalue.dtype)
