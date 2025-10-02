@@ -133,7 +133,7 @@ def get_or_create_variable(
 
 
 def get_and_delete_variable(collection: str, name: str) -> Any | None:
-  """Gets and deletes a variable in the current module.
+  """Gets and deletes a quant_stat in the current module.
 
   This is mainly for NNX and doesn't make much sense for linen.
 
@@ -187,6 +187,54 @@ def get_or_create_param(
       param = jax.tree.map(nnx_param_type, init_fn())
       setattr(module, name, param)
     return unbox(param)
+
+
+def find_param(x: Any) -> str | None:
+  """Finds the param name of a given array in the current module.
+
+  This function is designed so that array and array-like objects are treated
+  equally.
+
+  Args:
+    x: jax.Array or array-like object (such as ptq.WithAux) that has the "shape"
+      attribute.
+
+  Returns:
+    The name of the param that contains the given array, or None if not found.
+
+  Raises:
+    ValueError: If multiple params are found.
+  """
+  module = get_current_module()
+  candidates: dict[str, Any] = {}
+  if isinstance(module, nn.Module):
+    assert module.scope is not None
+    for name, value in module.scope._collection('params').items():  # pylint: disable=protected-access
+      value = nn.unbox(value)
+      # Only consider params with the same shape.
+      if hasattr(value, 'shape') and value.shape == x.shape:
+        candidates[name] = value
+  elif isinstance(module, nnx.Module):
+    for name, node in module.__dict__.items():
+      if hasattr(node, 'shape') and node.shape == x.shape:
+        candidates[name] = node.value
+  else:
+    raise ValueError('Current module is not known.')
+
+  # Check if we could find the exact x in the params.
+  for name, value in candidates.items():
+    if value is x:
+      return name
+
+  # Otherwise, x could still be a param because the types are promoted or the
+  # sharding constraints are added. Use some heuristics here which may not be
+  # accurate.
+  if len(candidates) > 2:
+    raise ValueError(f'Multiple candidate params found: {candidates.keys()}')
+  if len(candidates) == 1:
+    return list(candidates.keys())[0]
+
+  return None
 
 
 def unbox(maybe_boxed: Any) -> Any:
@@ -330,17 +378,14 @@ def _check_shape(value: Any, init_fn: Callable[[], Any]):
 
 
 def make_rng(rng_stream: str) -> jax.Array:
-  """Returns a random key from rng stream."""
-
-  # Get random key.
+  """Generate a random key from the given rng_stream in the current module."""
   module = get_current_module()
   if isinstance(module, nn.Module):
-    key = module.make_rng(rng_stream)
+    return module.make_rng(rng_stream)
   elif isinstance(module, nnx.Module):
-    if rng_stream != 'stochastic_rounding':
-      raise ValueError(f'Unsupported nnx rng_stream: {rng_stream}')
-    key = module.rngs.stochastic_rounding()
+    rngs = getattr(module, 'rngs', None)
+    if not isinstance(rngs, nnx.Rngs):
+      raise ValueError('Cannot find rngs in the current module.')
+    return rngs[rng_stream]()
   else:
     raise ValueError('Current module is not known.')
-
-  return key

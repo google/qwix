@@ -19,6 +19,7 @@ import re
 from typing import Any
 
 from absl import logging
+from flax import nnx
 import jax
 from jax.experimental import pallas as pl
 from qwix._src import aux_data
@@ -140,6 +141,10 @@ class QuantizationProvider:
       self, model: Any, model_args: Sequence[Any], model_kwargs: dict[str, Any]
   ) -> tuple[Any, Sequence[Any], dict[str, Any]]:
     """Process the model and its inputs before it is called."""
+    if isinstance(model, nnx.Module):
+      for _, node in model.iter_modules():
+        # Clear the op_count which is used in _get_current_rule_and_op_id below.
+        aux_data.clear(node)
     return model, model_args, model_kwargs
 
   def process_model_output(self, method_name: str, model_output: Any) -> Any:

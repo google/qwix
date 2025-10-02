@@ -17,11 +17,8 @@ import dataclasses
 import functools
 from typing import Any, Callable, Mapping, Sequence
 
-from flax import linen as nn
-from flax import nnx
 import jax
 from jax import numpy as jnp
-from qwix._src import aux_data
 from qwix._src import averaging
 from qwix._src import flax_util
 from qwix._src import qconfig
@@ -195,54 +192,13 @@ class QtProvider(qconfig.QuantizationProvider):
         batch_group_count,
     )
 
-  def nn_param(
-      self,
-      module: nn.Module,
-      name: str,
-      init_fn: Callable[..., Any],
-      *init_args,
-      unbox: bool = True,
-      **init_kwargs,
-  ) -> jax.Array | nn.meta.AxisMetadata[jax.Array]:
-    """Intercepts nn.Module.param."""
-    ret = nn.Module.param(
-        module, name, init_fn, *init_args, unbox=unbox, **init_kwargs
-    )
-    aux_data.clear(ret if unbox else ret.unbox())
-    aux_data.set(ret if unbox else ret.unbox(), 'weight_name', name)
-    return ret
-
-  def asarray(self, a, *args, **kwargs):
-    """Intercepts jnp.asarray."""
-    ret = jnp.asarray(a, *args, **kwargs)
-    # Forward weight_name aux_data.
-    if name := aux_data.get(a, 'weight_name', None):
-      aux_data.set(ret, 'weight_name', name)
-    return ret
-
   def get_intercept_map(self):
     """Used for interception."""
     return super().get_intercept_map() | {
         'jax.lax.conv_general_dilated': self.conv_general_dilated,
         'jax.lax.dot_general': self.dot_general,
         'jax.numpy.einsum': self.einsum,
-        'flax.linen.Module.param': self.nn_param,  # to associate weight_name.
-        'jax.numpy.asarray': self.asarray,  # to forward weight_name.
     }
-
-  def process_model_inputs(
-      self, model: nn.Module | nnx.Module, model_args: Any, model_kwargs: Any
-  ) -> tuple[nn.Module | nnx.Module, Any, Any]:
-    """Processes the nnx.Module instance before it is called."""
-    if isinstance(model, nnx.Module):
-      for path, node in nnx.iter_graph(model):
-        if isinstance(node, nnx.Module):
-          aux_data.clear(node)  # clear the op_count.
-        elif isinstance(node, nnx.Param):
-          # weight_name is used to distinguish weights from activations.
-          aux_data.clear(node.value)
-          aux_data.set(node.value, 'weight_name', path[-1])
-    return model, model_args, model_kwargs
 
   def _collect_quant_stat(
       self,
@@ -301,18 +257,14 @@ class QtProvider(qconfig.QuantizationProvider):
     fwd_qtype = rule.weight_qtype
     fwd_calibration_method = rule.weight_calibration_method
 
-    lhs_is_weight = aux_data.get(lhs, 'weight_name', None) is not None
+    # Assume LHS is an activation.
     lhs_collect_quant_stat = None
-    if (
-        not lhs_is_weight
-        and rule.act_qtype is not None
-        and rule.act_static_scale
-    ):
+    if rule.act_qtype is not None and rule.act_static_scale:
       lhs_collect_quant_stat = functools.partial(
           self._collect_quant_stat, f'{op_id}_lhs', rule.act_batch_axes
       )
 
-    rhs_is_weight = aux_data.get(rhs, 'weight_name', None) is not None
+    rhs_is_weight = flax_util.find_param(rhs) is not None
     rhs_collect_quant_stat = None
     if (
         not rhs_is_weight
@@ -350,7 +302,7 @@ class QtProvider(qconfig.QuantizationProvider):
     # LHS configs based on whether it's a weight or an activation.
     lhs_qtype = None
     lhs_calibration_method = None
-    lhs_is_weight = aux_data.get(lhs, 'weight_name', None) is not None
+    lhs_is_weight = flax_util.find_param(lhs) is not None
     lhs_collect_quant_stat = None
 
     if lhs_is_weight:
@@ -368,10 +320,11 @@ class QtProvider(qconfig.QuantizationProvider):
     # RHS configs based on whether it's a weight or an activation.
     rhs_qtype = None
     rhs_calibration_method = None
-    rhs_is_weight = aux_data.get(rhs, 'weight_name', None) is not None
+    rhs_is_weight = flax_util.find_param(rhs) is not None
     rhs_collect_quant_stat = None
 
     if rhs_is_weight:
+      assert not lhs_is_weight, 'lhs and rhs cannot be both weights.'
       if rule.weight_qtype is not None:
         rhs_qtype = rule.weight_qtype
         rhs_calibration_method = rule.weight_calibration_method

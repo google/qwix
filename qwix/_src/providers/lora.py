@@ -21,7 +21,6 @@ from flax import nnx
 from flax import typing
 import jax
 from jax.nn import initializers
-from qwix._src import aux_data
 from qwix._src import flax_util
 from qwix._src import model as qwix_model
 from qwix._src import qconfig
@@ -164,11 +163,7 @@ class LoraProvider(ptq.PtqProvider):
     if not isinstance(rule, LoraRule):
       return res
 
-    if isinstance(rhs, ptq.WithAux):  # rhs is quantized.
-      weight_name = rhs.weight_name
-    else:
-      weight_name = aux_data.get(rhs, 'weight_name', None)
-
+    weight_name = flax_util.find_param(rhs)
     if weight_name is None:  # rhs is not a weight.
       return res
 
@@ -213,11 +208,7 @@ class LoraProvider(ptq.PtqProvider):
       raise ValueError(f'Unsupported einsum format: {einsum_str=} {operands=}')
     lhs, rhs = operands
 
-    if isinstance(rhs, ptq.WithAux):  # rhs is quantized.
-      weight_name = rhs.weight_name
-    else:
-      weight_name = aux_data.get(rhs, 'weight_name', None)
-
+    weight_name = flax_util.find_param(rhs)
     if weight_name is None:  # rhs is not a weight.
       return res
 
@@ -288,11 +279,8 @@ class LoraProvider(ptq.PtqProvider):
     if not isinstance(rule, LoraRule):
       return res
 
-    if isinstance(rhs, ptq.WithAux):  # rhs is quantized.
-      weight_name = rhs.weight_name
-    else:
-      # Assert that rhs is a weight.
-      weight_name = aux_data.get(rhs, 'weight_name')
+    weight_name = flax_util.find_param(rhs)
+    assert weight_name is not None, 'rhs must be a weight.'
 
     dimension_numbers = jax.lax.conv_dimension_numbers(
         lhs.shape, rhs.shape, dimension_numbers
