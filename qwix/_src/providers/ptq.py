@@ -21,7 +21,6 @@ from flax import nnx
 import flax.linen.dtypes
 import jax
 import numpy as np
-from qwix._src import aux_data
 from qwix._src import averaging
 from qwix._src import flax_util
 from qwix._src import qconfig
@@ -46,14 +45,11 @@ class WithAux(Generic[ArrayTypeVar]):
     array: The underlying array.
     how: How the array is quantized, which is used by quantize_params so that it
       knows how to quantize the original weights.
-    weight_name: The name of the weight, which is used by LoraProvider to create
-      the LoRA weights.
     value: Satisfies the nnx.Variable interface.
   """
 
   array: ArrayTypeVar
   how: qarray.HowToQuantize = flax.struct.field(pytree_node=False)
-  weight_name: str = flax.struct.field(pytree_node=False)
 
   # This allows us to appear like nnx.Variable.
   value = property(flax_util.unbox)
@@ -108,14 +104,14 @@ class PtqProvider(qconfig.QuantizationProvider):
     # Prepare rhs.
     if isinstance(rhs, WithAux):  # weight, already quantized
       rhs = rhs.array
-    elif aux_data.get(rhs, 'weight_name', None):  # weight, not quantized
+    elif weight_name := flax_util.find_param(rhs):  # weight, not quantized
       rhs_how = get_how_to_quantize(
           for_lhs=False,
           qtype=rule.weight_qtype,
           tile_size=rule.tile_size,
           calibration_method=rule.weight_calibration_method,
       )
-      rhs = create_quantized_param(rhs, rhs_how).array
+      rhs = create_quantized_param(weight_name, rhs, rhs_how).array
     elif rule.act_qtype is not None:  # act
       rhs_how = get_how_to_quantize(
           for_lhs=False,
@@ -170,14 +166,14 @@ class PtqProvider(qconfig.QuantizationProvider):
     # Prepare rhs.
     if isinstance(rhs, WithAux):  # weight, already quantized
       rhs = rhs.array
-    elif aux_data.get(rhs, 'weight_name', None):  # weight, not quantized
+    elif weight_name := flax_util.find_param(rhs):  # weight, not quantized
       rhs_how = get_how_to_quantize(
           for_lhs=False,
           qtype=rule.weight_qtype,
           tile_size=rule.tile_size,
           calibration_method=rule.weight_calibration_method,
       )
-      rhs = create_quantized_param(rhs, rhs_how).array
+      rhs = create_quantized_param(weight_name, rhs, rhs_how).array
     elif rule.act_qtype is not None:  # act
       rhs_how = get_how_to_quantize(
           for_lhs=False,
@@ -235,14 +231,14 @@ class PtqProvider(qconfig.QuantizationProvider):
     if isinstance(rhs, WithAux):  # weight, already quantized
       rhs = rhs.array
     else:
-      assert aux_data.get(rhs, 'weight_name', None)
+      weight_name = flax_util.find_param(rhs)
       rhs_how = conv_general.get_how_to_quantize(
           dimension_numbers=dimension_numbers,
           for_lhs=False,
           qtype=rule.weight_qtype,
           calibration_method=rule.weight_calibration_method,
       )
-      rhs = create_quantized_param(rhs, rhs_how).array
+      rhs = create_quantized_param(weight_name, rhs, rhs_how).array
 
     # Prepare lhs.
     if rule.act_qtype != rule.weight_qtype:
@@ -270,26 +266,20 @@ class PtqProvider(qconfig.QuantizationProvider):
     )
 
   def nn_param(self, module: nn.Module, name: str, *args, **kwargs):
-    """Intercepts nn.Module.param to associate weight_name aux_data."""
+    """Intercepts nn.Module.param to handle quantized params."""
     # Don't check the shape if the param is already quantized.
     existing_param = module.get_variable('params', name)
     if isinstance(existing_param, WithAux):
       return nn.unbox(existing_param)
-    ret = module.param(name, *args, **kwargs)
-    aux_data.set(ret, 'weight_name', name)
-    return ret
+    return module.param(name, *args, **kwargs)
 
   def promote_dtype(self, *args, **kwargs):
-    """Intercepts flax.{linen,nnx.nn}.dtypes.promote_dtype."""
+    """Intercepts flax.{linen,nnx.nn}.dtypes.promote_dtype to handle quantized params."""
     if len(args) == 1 and isinstance(args[0], Sequence):
       args = args[0]  # nnx version
     # Skip WithAux.
     array_args = [x if isinstance(x, jax.Array) else None for x in args]
     array_args = flax.linen.dtypes.promote_dtype(*array_args, **kwargs)
-    # Forward weight_name aux_data.
-    for x, y in zip(array_args, args):
-      if x is not None and (name := aux_data.get(y, 'weight_name', None)):
-        aux_data.set(x, 'weight_name', name)
     return [x if x is not None else y for x, y in zip(array_args, args)]
 
   def dot(
@@ -334,20 +324,6 @@ class PtqProvider(qconfig.QuantizationProvider):
         'flax.nnx.nn.dtypes.promote_dtype': self.promote_dtype,
     }
 
-  def process_model_inputs(
-      self, model: nn.Module | nnx.Module, model_args: Any, model_kwargs: Any
-  ) -> tuple[nn.Module | nnx.Module, Any, Any]:
-    """Processes the nnx.Module instance before it is called."""
-    # Set weight_name for nnx models. Linen models are handled in nn_param.
-    if isinstance(model, nnx.Module):
-      for path, node in nnx.iter_graph(model):
-        if isinstance(node, nnx.Module):
-          aux_data.clear(node)  # clear the op_count.
-        elif isinstance(node, nnx.Param):
-          # weight_name is used to distinguish weights from activations.
-          aux_data.set(node.value, 'weight_name', path[-1])
-    return model, model_args, model_kwargs
-
 
 def quantize_act(
     array: jax.Array,
@@ -377,8 +353,8 @@ def quantize_act(
       )
     nonlocal zp
     scale, zp = qarray.compute_scale_zero_point(calibration, how.qtype)
-    # Wrap scale in WithAux so that quantize_params can work.
-    return WithAux(scale, how, act_name + '_scale')
+    # Wrap scale in WithAux because quantize_params needs to know the qtype.
+    return WithAux(scale, how)
 
   zp = None
   scale = flax_util.get_or_create_param(act_name + '_scale', init)
@@ -390,19 +366,19 @@ def quantize_act(
 
 
 def create_quantized_param(
-    value: jax.Array, how: qarray.HowToQuantize
+    name: str, value: jax.Array, how: qarray.HowToQuantize
 ) -> WithAux[qarray.QArray]:
   """Creates the quantized param and replaces the original param in the module.
 
   Args:
-    value: The unquantized jax.Array with weight_name aux_data.
+    name: The name of the param in the module.
+    value: The unquantized jax.Array.
     how: How to quantize the param.
 
   Returns:
     An unboxed WithAux.
   """
-  weight_name = aux_data.get(value, 'weight_name')
-  unboxed = WithAux(qarray.quantize(value, how), how, weight_name)
+  unboxed = WithAux(qarray.quantize(value, how), how)
 
   # The following code is about replacing the saved param with WithAux, with
   # correct metadata.
@@ -413,17 +389,17 @@ def create_quantized_param(
       raise ValueError(
           "It seems you're feeding an unquantized param to a quantized model."
       )
-    param = module.get_variable('params', weight_name)
+    param = module.get_variable('params', name)
     boxed = jax.tree.map(
         lambda value: flax_util.update_boxed(param, value=value), unboxed
     )
-    module.put_variable('params', weight_name, boxed)
+    module.put_variable('params', name, boxed)
   elif isinstance(module, nnx.Module):
-    param = getattr(module, weight_name)
+    param = getattr(module, name)
     boxed = jax.tree.map(
         lambda value: flax_util.update_boxed(param, value=value), unboxed
     )
-    setattr(module, weight_name, boxed)
+    setattr(module, name, boxed)
 
   return unboxed
 
@@ -481,6 +457,7 @@ def quantize_params(
     # Get the act_qtype from the scale, which is a WithAux[jax.Array].
     scale_path = (*path[:-1], path[-1] + '_scale')
     abs_scale = get_value_from_path(abstract_quantized_params, scale_path)
+    assert isinstance(abs_scale, WithAux)
     act_qtype = abs_scale.how.qtype
 
     calibration = averaging.SimpleMovingAverage().get_calibration(quant_stat)

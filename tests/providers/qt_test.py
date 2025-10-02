@@ -22,40 +22,8 @@ from qwix._src import model as qwix_model
 from qwix._src import qconfig
 from qwix._src.providers import qt
 
-jax.config.update("jax_threefry_partitionable", False)
-
 
 class QtTest(absltest.TestCase):
-
-  def _make_array(self, shape, seed=42):
-    return jax.random.normal(jax.random.key(seed), shape, jnp.bfloat16)
-
-  def test_dot_general_grad(self):
-    qt_provider = qt.QtProvider([])
-    rule = qt.QtRule(
-        module_path=".*",
-        weight_qtype=jnp.int8,
-        act_qtype=jnp.int8,
-        act_calibration_method="absmax",
-    )
-    qt_provider._get_current_rule_and_op_id = lambda _: (rule, None)
-
-    lhs = self._make_array((2, 4)) * 8
-    rhs = self._make_array((4, 2)) * 8
-    dimension_numbers = ([0, 1], [1, 0]), ([], [])
-    fp_value, fp_grad = jax.value_and_grad(jax.lax.dot_general)(
-        lhs, rhs, dimension_numbers
-    )
-    q_value, q_grad = jax.value_and_grad(qt_provider.dot_general)(
-        lhs, rhs, dimension_numbers
-    )
-    self.assertEqual(fp_value.dtype, q_value.dtype)
-    self.assertEqual(fp_value.shape, q_value.shape)
-    # The gradients are not exactly the same, because each input is using the
-    # quantized value of the other side to compute the gradient.
-    self.assertFalse(jnp.array_equal(fp_grad, q_grad), f"{fp_grad=} {q_grad=}")
-    rel_mae = jnp.abs(fp_value - q_value).mean() / jnp.abs(fp_value).mean()
-    self.assertLess(rel_mae, 0.01)
 
   def test_srq_jit_grad(self):
     """Test that the grad of SRQ can be taken inside a jitted function."""

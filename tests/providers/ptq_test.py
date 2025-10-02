@@ -170,7 +170,6 @@ class PtqTest(parameterized.TestCase):
     # Test PTQ param structure.
     qw = ptq_linear.kernel
     self.assertIsInstance(qw, ptq.WithAux)
-    self.assertEqual(qw.weight_name, "kernel")
     qw = qw.array
     self.assertEqual(qw.qvalue.dtype, jnp.int8)
     self.assertEqual(qw.qvalue.shape, (12, 6))
@@ -250,7 +249,6 @@ class PtqTest(parameterized.TestCase):
     # Test PTQ param structure.
     qw = ptq_einsum.kernel
     self.assertIsInstance(qw, ptq.WithAux)
-    self.assertEqual(qw.weight_name, "kernel")
     qw = qw.array
     self.assertEqual(qw.qvalue.dtype, jnp.int8)
     self.assertEqual(qw.qvalue.shape, (16, 8, 10))
@@ -402,6 +400,42 @@ class PtqTest(parameterized.TestCase):
         variables, jax.ShapeDtypeStruct((b, 32), jnp.float32)
     )
     self.assertEqual(exp.out_avals[0].shape, (b, 5))
+
+  def test_nnx_scan(self):
+    """Test nnx.scan with PTQ."""
+
+    class ScanModel(nnx.Module):
+
+      def __init__(self, n_layers: int, rngs: nnx.Rngs):
+        @nnx.split_rngs(splits=n_layers)
+        @nnx.vmap(axis_size=n_layers)
+        def create_layer(rngs: nnx.Rngs):
+          return nnx.Linear(in_features=12, out_features=12, rngs=rngs)
+
+        self.layers = create_layer(rngs)
+
+      def __call__(self, x):
+        @nnx.scan(out_axes=nnx.Carry)
+        def scan_fn(x: jax.Array, layer):
+          return layer(x)
+
+        return scan_fn(x, self.layers)
+
+    model = ScanModel(n_layers=2, rngs=nnx.Rngs(0))
+    self.assertEqual(model.layers.kernel.value.shape, (2, 12, 12))
+
+    q_rules = [qconfig.QuantizationRule(weight_qtype=jnp.int8)]
+    model_input = jnp.ones((10, 12))
+    ptq_model = qwix_model.quantize_model(
+        model, ptq.PtqProvider(q_rules), model_input
+    )
+    self.assertIsInstance(ptq_model.layers.kernel, ptq.WithAux)
+    self.assertIsInstance(ptq_model.layers.kernel.array, ptq.qarray.QArray)
+    self.assertEqual(ptq_model.layers.kernel.array.shape, (2, 12, 12))
+    self.assertEqual(ptq_model.layers.kernel.array.qtype, jnp.int8)
+
+    # Ensure that the model can be called.
+    ptq_model(model_input)
 
 
 if __name__ == "__main__":
