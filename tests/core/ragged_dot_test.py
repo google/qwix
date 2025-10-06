@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
@@ -65,6 +66,104 @@ class RaggedDotTest(parameterized.TestCase):
     if not disable_fast_path:
       fast_res = ragged_dot._fast_ragged_dot(qlhs, qrhs, group_sizes)
       self.assertLess(mae(fast_res, slow_res), 0.005)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='fast',
+          lhs_how=qarray.HowToQuantize(
+              qtype=jnp.int8,
+              calibration_method='absmax',
+          ),
+          rhs_how=qarray.HowToQuantize(
+              qtype=jnp.int8,
+              calibration_method='absmax',
+          ),
+          expect_fast=True,
+      ),
+      dict(
+          testcase_name='slow_lhs',
+          lhs_how=qarray.HowToQuantize(
+              qtype=jnp.int8,
+              tiled_axes={1: 64},
+              calibration_method='absmax',
+          ),
+          rhs_how=qarray.HowToQuantize(
+              qtype=jnp.int8,
+              calibration_method='absmax',
+          ),
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='rhs_group_and_out_channelwise_fast',
+          lhs_how=qarray.HowToQuantize(
+              qtype=jnp.float8_e5m2,
+              channelwise_axes=(0,),
+              calibration_method='absmax',
+          ),
+          rhs_how=qarray.HowToQuantize(
+              qtype=jnp.float8_e5m2,
+              channelwise_axes=(0, 2),
+              calibration_method='absmax',
+          ),
+          expect_fast=True,
+      ),
+      dict(
+          testcase_name='slow_rhs_k_channelwise',
+          lhs_how=qarray.HowToQuantize(
+              qtype=jnp.int8,
+              calibration_method='absmax',
+          ),
+          rhs_how=qarray.HowToQuantize(
+              qtype=jnp.int8,
+              channelwise_axes=(1,),
+              calibration_method='absmax',
+          ),
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='slow_rhs_zp',
+          lhs_how=qarray.HowToQuantize(
+              qtype=jnp.int8,
+              calibration_method='minmax',
+          ),
+          rhs_how=qarray.HowToQuantize(
+              qtype=jnp.int8,
+              calibration_method='minmax',
+          ),
+          expect_fast=False,
+      ),
+  )
+  @mock.patch.object(ragged_dot, '_slow_ragged_dot', autospec=True)
+  @mock.patch.object(ragged_dot, '_fast_ragged_dot', autospec=True)
+  def test_ragged_dot_implementation(
+      self,
+      mock_fast,
+      mock_slow,
+      *,
+      lhs_how: qarray.HowToQuantize | None,
+      rhs_how: qarray.HowToQuantize | None,
+      expect_fast: bool,
+  ):
+    mock_fast.return_value = jnp.ones((1, 1), jnp.float32)
+    mock_slow.return_value = jnp.ones((1, 1), jnp.float32)
+
+    lhs_shape = (128, 256)
+    rhs_shape = (2, 256, 64)
+    group_sizes = jnp.array((100, 28))
+
+    lhs = jax.random.normal(jax.random.key(0), lhs_shape, jnp.float32)
+    rhs = jax.random.normal(jax.random.key(1), rhs_shape, jnp.float32)
+
+    q_lhs = qarray.quantize(lhs, lhs_how) if lhs_how else lhs
+    q_rhs = qarray.quantize(rhs, rhs_how) if rhs_how else rhs
+
+    ragged_dot.ragged_dot(q_lhs, q_rhs, group_sizes)
+    if expect_fast:
+      mock_fast.assert_called_once()
+      mock_slow.assert_not_called()
+    else:
+      mock_fast.assert_not_called()
+      mock_slow.assert_called_once()
 
 
 if __name__ == '__main__':
