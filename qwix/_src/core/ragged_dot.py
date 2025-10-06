@@ -110,11 +110,7 @@ def ragged_dot(
     if lhs.zero_point is not None or lhs.scale.shape[1] > 1:
       use_fast_ragged_dot = False
   if isinstance(rhs, qarray.QArray):  # [g, k, n]
-    if (
-        rhs.zero_point is not None
-        or rhs.scale.shape[0] > 1
-        or rhs.scale.shape[1] > 1
-    ):
+    if rhs.zero_point is not None or rhs.scale.shape[1] > 1:
       use_fast_ragged_dot = False
 
   if use_fast_ragged_dot:
