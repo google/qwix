@@ -47,7 +47,8 @@ class QtRule(qconfig.QuantizationRule):
   disable_channelwise_axes: bool = False
 
   # If True, use the original values instead of the quantized values as the
-  # residuals for backward pass.
+  # residuals for backward pass. Enabling this prevents using low-precision
+  # matmuls during bwd pass and has a negative impact on performance.
   bwd_use_original_residuals: bool = False
 
   # Use stochastic rounding for the gradients. (Only 'uniform' is supported.)
@@ -57,7 +58,9 @@ class QtRule(qconfig.QuantizationRule):
   # noise for the 0th dimension and broadcast it over remaining dimensions.
   channelwise_noise_axes: Sequence[int] = (0,)
 
-  # Override any fields in DotGeneralQtConfig.
+  # Override any fields in DotGeneralQtConfig or ConvGeneralQtConfig. This is
+  # highly experimental and subjects to changes with no backward compatibility
+  # guarantees.
   additional_qt_config: Mapping[str, Any] | None = None
 
 
@@ -258,6 +261,7 @@ class QtProvider(qconfig.QuantizationProvider):
     fwd_calibration_method = rule.weight_calibration_method
 
     # Assume LHS is an activation.
+    del lhs
     lhs_collect_quant_stat = None
     if rule.act_qtype is not None and rule.act_static_scale:
       lhs_collect_quant_stat = functools.partial(

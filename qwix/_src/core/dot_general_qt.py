@@ -57,16 +57,6 @@ class DotGeneralQtConfig:
   dlhs_stochastic_rounding_noise_fn: numerics.NoiseFn | None = None
   drhs_stochastic_rounding_noise_fn: numerics.NoiseFn | None = None
 
-  # Deprecated. No longer used.
-  dlhs_lhs_qtype: jax.typing.DTypeLike | None = None  # incoming gradient
-  dlhs_rhs_qtype: jax.typing.DTypeLike | None = None  # residual rhs
-  dlhs_lhs_calibration_method: str = 'absmax'
-  dlhs_rhs_calibration_method: str = 'absmax'
-  drhs_lhs_qtype: jax.typing.DTypeLike | None = None  # incoming gradient
-  drhs_rhs_qtype: jax.typing.DTypeLike | None = None  # residual lhs
-  drhs_lhs_calibration_method: str = 'absmax'
-  drhs_rhs_calibration_method: str = 'absmax'
-
 
 def _ranges_like(*xs):
   start = 0
