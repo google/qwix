@@ -24,6 +24,7 @@ from qwix._src import flax_util
 from qwix._src import qconfig
 from qwix._src.core import conv_general_qt
 from qwix._src.core import dot_general_qt
+from qwix._src.core import ragged_dot_qt
 from qwix._src.core import stochastic_rounding
 
 
@@ -196,12 +197,44 @@ class QtProvider(qconfig.QuantizationProvider):
         batch_group_count,
     )
 
+  def ragged_dot(
+      self,
+      lhs: jax.Array,
+      rhs: jax.Array,
+      group_sizes: jax.Array,
+      precision: jax.lax.PrecisionLike = None,
+      preferred_element_type: jax.typing.DTypeLike | None = None,
+      group_offset: jax.Array | None = None,
+  ) -> jax.Array:
+    """QT ragged_dot."""
+    rule, op_id = self._get_current_rule_and_op_id('ragged_dot')
+    if rule is None or rule.weight_qtype is None:
+      return jax.lax.ragged_dot(
+          lhs,
+          rhs,
+          group_sizes,
+          precision=precision,
+          preferred_element_type=preferred_element_type,
+          group_offset=group_offset,
+      )
+    config = self._create_dot_general_qt_config(rule, op_id, lhs, rhs)
+    return ragged_dot_qt.ragged_dot_qt(
+        lhs,
+        rhs,
+        group_sizes,
+        config,
+        precision,
+        preferred_element_type,
+        group_offset,
+    )
+
   def get_intercept_map(self):
     """Used for interception."""
     return super().get_intercept_map() | {
         'jax.lax.conv_general_dilated': self.conv_general_dilated,
         'jax.lax.dot_general': self.dot_general,
         'jax.numpy.einsum': self.einsum,
+        'jax.lax.ragged_dot': self.ragged_dot,
     }
 
   def _collect_quant_stat(
@@ -367,3 +400,19 @@ class QtProvider(qconfig.QuantizationProvider):
     if rule.additional_qt_config:
       qt_config = dataclasses.replace(qt_config, **rule.additional_qt_config)
     return qt_config
+
+  def _create_ragged_dot_qt_config(
+      self,
+      rule: qconfig.QuantizationRule,
+  ) -> ragged_dot_qt.RaggedDotQtConfig:
+    """Creates a RaggedDotQtConfig for ragged_dot."""
+    assert isinstance(rule, QtRule), '_init_rule should have been called.'
+    # Assume LHS is an activation and RHS is a weight.
+    return ragged_dot_qt.RaggedDotQtConfig(
+        # fwd configs.
+        lhs_qtype=rule.act_qtype,
+        rhs_qtype=rule.weight_qtype,
+        # bwd configs.
+        dlhs_grad_qtype=rule.bwd_qtype,
+        drhs_grad_qtype=rule.bwd_qtype,
+    )
