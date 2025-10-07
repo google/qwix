@@ -31,8 +31,9 @@ from qwix._src.core import stochastic_rounding
 class QtRule(qconfig.QuantizationRule):
   """QuantizationRule with all settings specific to Quantized Training (QT)."""
 
-  # In backward pass, quantize the gradients to the given type. If set, the
-  # residuals will also be quantized with the same qtype as in the forward pass.
+  # In backward pass, quantize the gradients to the given type. This doesn't
+  # affect the residuals as the residuals will reuse the quantization in the
+  # forward pass, unless bwd_use_original_residuals is set.
   bwd_qtype: jax.typing.DTypeLike | None = None
 
   # In backward pass, calibrate the gradients using the given method.
@@ -235,59 +236,28 @@ class QtProvider(qconfig.QuantizationProvider):
     """Creates a ConvGeneralQtConfig for conv_general_dilated."""
     assert isinstance(rule, QtRule), '_init_rule should have been called.'
 
-    if rule.weight_qtype != rule.act_qtype:
-      raise ValueError(
-          'conv_general_qt requires the same weight_qtype and act_qtype.'
-      )
-    if rule.weight_calibration_method != rule.act_calibration_method:
-      # This is not strictly required, but ConvGeneralQtConfig doesn't support
-      # individual configurations for now.
-      raise ValueError(
-          'conv_general_qt requires the same weight_calibration_method and'
-          ' act_calibration_method.'
-      )
-    if rule.bwd_qtype is not None:
-      if rule.bwd_qtype != rule.weight_qtype:
-        raise ValueError(
-            'conv_general_qt requires the same bwd_qtype as weight_qtype.'
-        )
-      if rule.bwd_calibration_method != rule.weight_calibration_method:
-        raise ValueError(
-            'conv_general_qt requires the same bwd_calibration_method as'
-            ' weight_calibration_method.'
-        )
-
-    fwd_qtype = rule.weight_qtype
-    fwd_calibration_method = rule.weight_calibration_method
-
-    # Assume LHS is an activation.
+    # Assume LHS is an activation and RHS is a weight.
     del lhs
     lhs_collect_quant_stat = None
     if rule.act_qtype is not None and rule.act_static_scale:
       lhs_collect_quant_stat = functools.partial(
           self._collect_quant_stat, f'{op_id}_lhs', rule.act_batch_axes
       )
-
-    rhs_is_weight = flax_util.find_param(rhs) is not None
-    rhs_collect_quant_stat = None
-    if (
-        not rhs_is_weight
-        and rule.act_qtype is not None
-        and rule.act_static_scale
-    ):
-      rhs_collect_quant_stat = functools.partial(
-          self._collect_quant_stat, f'{op_id}_rhs', rule.act_batch_axes
-      )
+    assert flax_util.find_param(rhs) is not None
 
     return conv_general_qt.ConvGeneralQtConfig(
         # fwd configs.
-        fwd_qtype=fwd_qtype,
-        fwd_calibration_method=fwd_calibration_method,
+        lhs_qtype=rule.act_qtype,
+        rhs_qtype=rule.weight_qtype,
+        lhs_calibration_method=rule.act_calibration_method,
+        rhs_calibration_method=rule.weight_calibration_method,
         lhs_collect_quant_stat=lhs_collect_quant_stat,
-        rhs_collect_quant_stat=rhs_collect_quant_stat,
+        rhs_collect_quant_stat=None,
         # bwd configs.
-        bwd_qtype=rule.bwd_qtype,
-        bwd_calibration_method=rule.bwd_calibration_method,
+        dlhs_grad_qtype=rule.bwd_qtype,
+        dlhs_grad_calibration_method=rule.bwd_calibration_method,
+        drhs_grad_qtype=rule.bwd_qtype,
+        drhs_grad_calibration_method=rule.bwd_calibration_method,
         # misc.
         disable_channelwise_axes=rule.disable_channelwise_axes,
         bwd_use_original_residuals=rule.bwd_use_original_residuals,

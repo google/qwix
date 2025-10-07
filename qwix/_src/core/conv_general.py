@@ -17,6 +17,7 @@ from collections.abc import Sequence
 
 import jax
 from jax import numpy as jnp
+from qwix._src.core import numerics
 from qwix._src.core import qarray
 
 
@@ -78,6 +79,9 @@ def _slow_conv_general_dilated(
     dimension_numbers: jax.lax.ConvGeneralDilatedDimensionNumbers = None,
     feature_group_count: int = 1,
     batch_group_count: int = 1,
+    precision: jax.lax.PrecisionLike = None,
+    preferred_element_type: jax.typing.DTypeLike | None = None,
+    out_sharding=None,
 ) -> jax.Array:
   """Dequantizes first then computes in floating-point types."""
   if isinstance(lhs, qarray.QArray):
@@ -94,12 +98,15 @@ def _slow_conv_general_dilated(
       dimension_numbers,
       feature_group_count,
       batch_group_count,
+      precision,
+      preferred_element_type,
+      out_sharding,
   )
 
 
 def _fast_conv_general_dilated(
-    lhs: qarray.QArray,
-    rhs: qarray.QArray,
+    lhs: qarray.MaybeQArray,
+    rhs: qarray.MaybeQArray,
     window_strides: Sequence[int],
     padding: str | Sequence[tuple[int, int]],
     lhs_dilation: Sequence[int] | None = None,
@@ -107,33 +114,41 @@ def _fast_conv_general_dilated(
     dimension_numbers: jax.lax.ConvGeneralDilatedDimensionNumbers = None,
     feature_group_count: int = 1,
     batch_group_count: int = 1,
+    preferred_element_type: jax.typing.DTypeLike | None = None,
+    out_sharding=None,
 ) -> jax.Array:
   """Quantized jax.lax.conv_general_dilated. Both sides must be QArrays."""
-  if qarray.get_tiled_axes(lhs) or qarray.get_tiled_axes(rhs):
-    raise ValueError('subchannel is not supported for conv_general_dilated.')
+  dimension_numbers = jax.lax.conv_dimension_numbers(
+      lhs.shape, rhs.shape, dimension_numbers
+  )
+  preferred_element_type, result_type = qarray.get_accumulator_and_result_type(
+      lhs, rhs, preferred_element_type=preferred_element_type
+  )
 
-  lhs_value = lhs.qvalue
-  lhs_scale = lhs.scale
-  lhs_zero_point = lhs.zero_point
-  rhs_value = rhs.qvalue
-  rhs_scale = rhs.scale
-  rhs_zero_point = rhs.zero_point
+  if isinstance(lhs, qarray.QArray):
+    lhs_value = lhs.qvalue
+    lhs_scale = lhs.scale
+    lhs_zero_point = lhs.zero_point
+    if qarray.get_tiled_axes(lhs):
+      raise ValueError('subchannel is not supported for conv_general_dilated.')
+  else:
+    lhs_value = lhs
+    lhs_scale = None
+    lhs_zero_point = None
+
+  if isinstance(rhs, qarray.QArray):
+    rhs_value = rhs.qvalue
+    rhs_scale = rhs.scale
+    rhs_zero_point = rhs.zero_point
+    if qarray.get_tiled_axes(rhs):
+      raise ValueError('subchannel is not supported for conv_general_dilated.')
+  else:
+    rhs_value = rhs
+    rhs_scale = None
+    rhs_zero_point = None
 
   if rhs_zero_point is not None:
     raise ValueError('Asymmetric quantization for rhs is not supported.')
-
-  dimension_numbers = jax.lax.conv_dimension_numbers(
-      lhs_value.shape, rhs_value.shape, dimension_numbers
-  )
-  transpose = get_transpose(dimension_numbers, for_lhs=True)
-  lhs_scale = qarray.transpose_array(lhs_scale, transpose)
-  transpose = get_transpose(dimension_numbers, for_lhs=False)
-  rhs_scale = qarray.transpose_array(rhs_scale, transpose)
-
-  if all(x.dtype.name.startswith('int') for x in (lhs_value, rhs_value)):
-    acc_type = jnp.int32
-  else:
-    acc_type = rhs_scale.dtype
 
   res = jax.lax.conv_general_dilated(
       lhs_value,
@@ -145,7 +160,8 @@ def _fast_conv_general_dilated(
       dimension_numbers=dimension_numbers,
       feature_group_count=feature_group_count,
       batch_group_count=batch_group_count,
-      preferred_element_type=acc_type,
+      preferred_element_type=preferred_element_type,
+      out_sharding=out_sharding,
   )
   if lhs_zero_point is not None:
     # TODO(zhuyunx): This value can be constant folded in SRQ scenarios.
@@ -159,17 +175,25 @@ def _fast_conv_general_dilated(
         dimension_numbers=dimension_numbers,
         feature_group_count=feature_group_count,
         batch_group_count=batch_group_count,
-        preferred_element_type=acc_type,
+        preferred_element_type=preferred_element_type,
     )
 
-  res *= lhs_scale
-  res *= rhs_scale
-  return res
+  if lhs_scale is not None:
+    transpose = get_transpose(dimension_numbers, for_lhs=True)
+    lhs_scale = qarray.transpose_array(lhs_scale, transpose)
+    res = qarray.call_with_generic_broadcast(jnp.multiply, res, lhs_scale)
+
+  if rhs_scale is not None:
+    transpose = get_transpose(dimension_numbers, for_lhs=False)
+    rhs_scale = qarray.transpose_array(rhs_scale, transpose)
+    res = qarray.call_with_generic_broadcast(jnp.multiply, res, rhs_scale)
+
+  return res.astype(result_type)
 
 
 def conv_general_dilated(
-    lhs: qarray.QArray,
-    rhs: qarray.QArray,
+    lhs: qarray.MaybeQArray,
+    rhs: qarray.MaybeQArray,
     window_strides: Sequence[int],
     padding: str | Sequence[tuple[int, int]],
     lhs_dilation: Sequence[int] | None = None,
@@ -177,10 +201,19 @@ def conv_general_dilated(
     dimension_numbers: jax.lax.ConvGeneralDilatedDimensionNumbers = None,
     feature_group_count: int = 1,
     batch_group_count: int = 1,
-    # TODO(dangyi): Add preferred_element_type.
+    precision: jax.lax.PrecisionLike = None,
+    preferred_element_type: jax.typing.DTypeLike | None = None,
+    out_sharding=None,
 ) -> jax.Array:
   """Dispatches to fast or slow conv_general_dilated depending on the inputs."""
-  if isinstance(lhs, qarray.QArray) and isinstance(rhs, qarray.QArray):
+  use_fast_path = True
+
+  for x in (lhs, rhs):
+    if isinstance(x, jax.Array) and numerics.should_quantize(x.dtype):
+      use_fast_path = False
+      break
+
+  if use_fast_path:
     return _fast_conv_general_dilated(
         lhs,
         rhs,
@@ -191,15 +224,21 @@ def conv_general_dilated(
         dimension_numbers,
         feature_group_count,
         batch_group_count,
+        preferred_element_type,
+        out_sharding,
     )
-  return _slow_conv_general_dilated(
-      lhs,
-      rhs,
-      window_strides,
-      padding,
-      lhs_dilation,
-      rhs_dilation,
-      dimension_numbers,
-      feature_group_count,
-      batch_group_count,
-  )
+  else:
+    return _slow_conv_general_dilated(
+        lhs,
+        rhs,
+        window_strides,
+        padding,
+        lhs_dilation,
+        rhs_dilation,
+        dimension_numbers,
+        feature_group_count,
+        batch_group_count,
+        precision,
+        preferred_element_type,
+        out_sharding,
+    )

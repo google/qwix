@@ -32,14 +32,18 @@ class ConvGeneralQtConfig:
   """Configuration for conv_general_qt."""
 
   # Forward pass.
-  fwd_qtype: jax.typing.DTypeLike | None = None
-  fwd_calibration_method: str = 'absmax'
+  lhs_qtype: jax.typing.DTypeLike | None = None
+  rhs_qtype: jax.typing.DTypeLike | None = None
+  lhs_calibration_method: str = 'absmax'
+  rhs_calibration_method: str = 'absmax'
   lhs_collect_quant_stat: Callable[[Any], Any] | None = None
   rhs_collect_quant_stat: Callable[[Any], Any] | None = None
 
   # Backward pass.
-  bwd_qtype: jax.typing.DTypeLike | None = None
-  bwd_calibration_method: str = 'absmax'
+  dlhs_grad_qtype: jax.typing.DTypeLike | None = None
+  dlhs_grad_calibration_method: str = 'absmax'
+  drhs_grad_qtype: jax.typing.DTypeLike | None = None
+  drhs_grad_calibration_method: str = 'absmax'
 
   # Misc.
   disable_channelwise_axes: bool = False
@@ -113,35 +117,24 @@ def _conv_general_vjp_rhs_padding(
   return list(zip(pads_lo, pads_hi))
 
 
-def _quantize(
-    operand: jax.Array,
-    qtype: jax.typing.DTypeLike | None,
-    calibration_method: str,
-    dimension_numbers: jax.lax.ConvDimensionNumbers,
-    for_lhs: bool,
-    config: ConvGeneralQtConfig,
-    collect_quant_stat: Callable[[Any], Any] | None = None,
-) -> qarray.MaybeQArray:
-  """Unified helper to perform the full quantization process."""
-  if not (qtype and numerics.should_quantize(operand.dtype)):
-    return operand
+def _apply_fwd_scale_to_g(
+    scale: jax.Array, g: jax.Array, g_axis: int
+) -> jax.Array:
+  """Applies the scale from the forward pass to the backward gradient.
 
-  how = conv_general.get_how_to_quantize(
-      dimension_numbers=dimension_numbers,
-      for_lhs=for_lhs,
-      qtype=qtype,
-      calibration_method=calibration_method,
-  )
-  if config.disable_channelwise_axes:
-    how = dataclasses.replace(how, channelwise_axes=[])
+  Since the scale can only have channelwise axes on one dimension, we only need
+  to know which axis in g this scale applies to.
 
-  calibration = qarray.calibrate(operand, how)
-  if collect_quant_stat:
-    calibration = collect_quant_stat(calibration)
-  scale, zero_point = qarray.compute_scale_zero_point(calibration, qtype)
-  return qarray.quantize_with_scale_zero_point(
-      operand, qtype, scale, zero_point
-  )
+  Args:
+    scale: The scale from the forward pass. Only 1 axis can be channelwise.
+    g: The backward gradient.
+    g_axis: The axis in g that the scale applies to.
+
+  Returns:
+    The backward gradient with the scale applied.
+  """
+  scale = scale.reshape([-1 if a == g_axis else 1 for a in range(g.ndim)])
+  return g * scale
 
 
 @interception.disable_interceptions
@@ -163,39 +156,46 @@ def conv_general_qt_fwd(
   )
 
   def _quantize_operand(
-      operand: jax.Array,
-      *,
-      for_lhs: bool,
-  ) -> tuple[qarray.MaybeQArray, qarray.MaybeQArray]:
+      operand: jax.Array, *, for_lhs: bool
+  ) -> qarray.MaybeQArray:
     """Quantizes a single operand for the forward pass if configured to do so."""
-    q_operand = _quantize(
-        operand=operand,
-        qtype=config.fwd_qtype,
-        calibration_method=config.fwd_calibration_method,
+    qtype = config.lhs_qtype if for_lhs else config.rhs_qtype
+    if not (qtype and numerics.should_quantize(operand.dtype)):
+      return operand
+
+    if for_lhs:
+      calibration_method = config.lhs_calibration_method
+      collect_quant_stat = config.lhs_collect_quant_stat
+    else:
+      calibration_method = config.rhs_calibration_method
+      collect_quant_stat = config.rhs_collect_quant_stat
+
+    how = conv_general.get_how_to_quantize(
         dimension_numbers=dnums,
         for_lhs=for_lhs,
-        config=config,
-        collect_quant_stat=config.lhs_collect_quant_stat
-        if for_lhs
-        else config.rhs_collect_quant_stat,
+        qtype=qtype,
+        calibration_method=calibration_method,
     )
-    return (
-        q_operand,
-        operand if config.bwd_use_original_residuals else q_operand,
+    if config.disable_channelwise_axes:
+      how = dataclasses.replace(how, channelwise_axes=[])
+
+    calibration = qarray.calibrate(operand, how)
+    if collect_quant_stat:
+      calibration = collect_quant_stat(calibration)
+    scale, zero_point = qarray.compute_scale_zero_point(calibration, qtype)
+    return qarray.quantize_with_scale_zero_point(
+        operand, qtype, scale, zero_point
     )
 
-  q_lhs, res_lhs = _quantize_operand(
-      lhs,
-      for_lhs=True,
-  )
-  q_rhs, res_rhs = _quantize_operand(
-      rhs,
-      for_lhs=False,
-  )
+  residuals = (lhs, rhs)
+  lhs = _quantize_operand(lhs, for_lhs=True)
+  rhs = _quantize_operand(rhs, for_lhs=False)
+  if not config.bwd_use_original_residuals:
+    residuals = (lhs, rhs)
 
   primal_out = conv_general.conv_general_dilated(
-      q_lhs,
-      q_rhs,
+      lhs,
+      rhs,
       window_strides,
       padding,
       lhs_dilation,
@@ -205,7 +205,7 @@ def conv_general_qt_fwd(
       batch_group_count,
   )
 
-  return primal_out, (res_lhs, res_rhs)
+  return primal_out, residuals
 
 
 def conv_general_qt_bwd(
@@ -222,8 +222,6 @@ def conv_general_qt_bwd(
 ):
   """Backward pass for conv_general_qt custom VJP."""
   lhs, rhs = res
-  lhs = qarray.dequantize(lhs) if isinstance(lhs, qarray.QArray) else lhs
-  rhs = qarray.dequantize(rhs) if isinstance(rhs, qarray.QArray) else rhs
 
   dnums = jax.lax.conv_dimension_numbers(
       lhs.shape, rhs.shape, dimension_numbers
@@ -246,75 +244,95 @@ def conv_general_qt_bwd(
         lhs_sdims_shape, effective_rhs_sdims, window_strides, padding
     )
 
-  def _compute_gradient_for_operand(for_dlhs: bool) -> jax.Array:
-    """Computes either dlhs or drhs based on the flag."""
-    if for_dlhs:
-      t_rhs_spec = _conv_spec_transpose(dnums.rhs_spec)
-      grad_dnums = jax.lax.ConvDimensionNumbers(
-          dnums.out_spec, t_rhs_spec, dnums.lhs_spec
-      )
-      revd_rhs = jax.lax.rev(rhs, rhs_sdims_indices)
-      grad_padding = _conv_general_vjp_lhs_padding(
-          lhs_sdims_shape,
-          rhs_sdims_shape,
-          window_strides,
-          g_sdims_shape,
-          padding,
-          lhs_dilation,
-          rhs_dilation,
-      )
-      grad_lhs, grad_rhs = g, revd_rhs
-      grad_strides, grad_lhs_dilation = lhs_dilation, window_strides
-      grad_rhs_dilation = rhs_dilation
-    else:
-      t_lhs_spec, t_rhs_spec, t_out_spec = map(_conv_spec_transpose, dnums)
-      grad_dnums = jax.lax.ConvDimensionNumbers(
-          t_lhs_spec, t_out_spec, t_rhs_spec
-      )
-      grad_padding = _conv_general_vjp_rhs_padding(
-          lhs_sdims_shape,
-          rhs_sdims_shape,
-          window_strides,
-          g_sdims_shape,
-          padding,
-          lhs_dilation,
-          rhs_dilation,
-      )
-      grad_lhs, grad_rhs = lhs, g
-      grad_strides, grad_rhs_dilation = rhs_dilation, window_strides
-      grad_lhs_dilation = lhs_dilation
+  # dlhs
+  dlhs_dnums = jax.lax.ConvDimensionNumbers(
+      lhs_spec=dnums.out_spec,
+      rhs_spec=_conv_spec_transpose(dnums.rhs_spec),
+      out_spec=dnums.lhs_spec,
+  )
+  dlhs_padding = _conv_general_vjp_lhs_padding(
+      lhs_sdims_shape,
+      rhs_sdims_shape,
+      window_strides,
+      g_sdims_shape,
+      padding,
+      lhs_dilation,
+      rhs_dilation,
+  )
 
-    q_grad_lhs = _quantize(
-        grad_lhs,
-        config.bwd_qtype,
-        config.bwd_calibration_method,
-        grad_dnums,
+  dlhs_g = g
+  if config.dlhs_grad_qtype:
+    if isinstance(rhs, qarray.QArray):
+      # Apply rhs.scale to dlhs_g.
+      dlhs_g = _apply_fwd_scale_to_g(rhs.scale, dlhs_g, dnums.out_spec[1])
+      rhs = rhs.qvalue
+    how = conv_general.get_how_to_quantize(
+        dimension_numbers=dlhs_dnums,
         for_lhs=True,
-        config=config,
+        qtype=config.dlhs_grad_qtype,
+        calibration_method=config.dlhs_grad_calibration_method,
     )
-    q_grad_rhs = _quantize(
-        grad_rhs,
-        config.bwd_qtype,
-        config.bwd_calibration_method,
-        grad_dnums,
+    if config.disable_channelwise_axes:
+      how = dataclasses.replace(how, channelwise_axes=[])
+    dlhs_g = qarray.quantize(dlhs_g, how)
+
+  rhs = jax.tree.map(lambda x: jax.lax.rev(x, rhs_sdims_indices), rhs)
+
+  dlhs = conv_general.conv_general_dilated(
+      lhs=dlhs_g,
+      rhs=rhs,
+      window_strides=lhs_dilation,
+      padding=dlhs_padding,
+      lhs_dilation=window_strides,
+      rhs_dilation=rhs_dilation,
+      dimension_numbers=dlhs_dnums,
+      feature_group_count=feature_group_count,
+      batch_group_count=batch_group_count,
+  )
+
+  # drhs
+  drhs_dnums = jax.lax.ConvDimensionNumbers(
+      lhs_spec=_conv_spec_transpose(dnums.lhs_spec),
+      rhs_spec=_conv_spec_transpose(dnums.out_spec),
+      out_spec=_conv_spec_transpose(dnums.rhs_spec),
+  )
+  drhs_padding = _conv_general_vjp_rhs_padding(
+      lhs_sdims_shape,
+      rhs_sdims_shape,
+      window_strides,
+      g_sdims_shape,
+      padding,
+      lhs_dilation,
+      rhs_dilation,
+  )
+
+  drhs_g = g
+  if config.drhs_grad_qtype:
+    if isinstance(lhs, qarray.QArray):
+      # Apply lhs.scale to drhs_g.
+      drhs_g = _apply_fwd_scale_to_g(lhs.scale, drhs_g, dnums.out_spec[0])
+      lhs = lhs.qvalue
+    how = conv_general.get_how_to_quantize(
+        dimension_numbers=drhs_dnums,
         for_lhs=False,
-        config=config,
+        qtype=config.drhs_grad_qtype,
+        calibration_method=config.drhs_grad_calibration_method,
     )
+    if config.disable_channelwise_axes:
+      how = dataclasses.replace(how, channelwise_axes=[])
+    drhs_g = qarray.quantize(drhs_g, how)
 
-    return conv_general.conv_general_dilated(
-        q_grad_lhs,
-        q_grad_rhs,
-        grad_strides,
-        grad_padding,
-        grad_lhs_dilation,
-        grad_rhs_dilation,
-        grad_dnums,
-        feature_group_count,
-        batch_group_count,
-    )
-
-  dlhs = _compute_gradient_for_operand(for_dlhs=True)
-  drhs = _compute_gradient_for_operand(for_dlhs=False)
+  drhs = conv_general.conv_general_dilated(
+      lhs=lhs,
+      rhs=drhs_g,
+      window_strides=rhs_dilation,
+      padding=drhs_padding,
+      lhs_dilation=lhs_dilation,
+      rhs_dilation=window_strides,
+      dimension_numbers=drhs_dnums,
+      feature_group_count=feature_group_count,
+      batch_group_count=batch_group_count,
+  )
 
   return dlhs, drhs
 
