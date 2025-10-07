@@ -22,6 +22,11 @@ from qwix._src.core import conv_general_qt
 from qwix._src.core import qarray
 
 
+def mae(lhs: jax.Array, rhs: jax.Array) -> float:
+  assert lhs.dtype == rhs.dtype and lhs.shape == rhs.shape
+  return jnp.abs(lhs - rhs).mean() / jnp.abs(lhs).mean()
+
+
 def _fake_quant(
     array: jax.Array,
     how: qarray.HowToQuantize,
@@ -56,14 +61,14 @@ def conv_general_fq(
   lhs_how = conv_general.get_how_to_quantize(
       dimension_numbers=dnums,
       for_lhs=True,
-      qtype=config.fwd_qtype,
-      calibration_method=config.fwd_calibration_method,
+      qtype=config.lhs_qtype,
+      calibration_method=config.lhs_calibration_method,
   )
   rhs_how = conv_general.get_how_to_quantize(
       dimension_numbers=dnums,
       for_lhs=False,
-      qtype=config.fwd_qtype,
-      calibration_method=config.fwd_calibration_method,
+      qtype=config.rhs_qtype,
+      calibration_method=config.rhs_calibration_method,
   )
   lhs_fq = _fake_quant(lhs, lhs_how)
   rhs_fq = _fake_quant(rhs, rhs_how)
@@ -86,35 +91,20 @@ class ConvGeneralQtTest(parameterized.TestCase):
           testcase_name='int8_nhwc',
           data_format='NHWC',
           fwd_qtype='int8',
-          expected_mae_fq_out=0.01,
-          expected_mae_dlhs_fq_grads=0.015,
-          expected_mae_drhs_fq_grads=0.05,
-          expected_mae_fp_out=0.08,
-          expected_mae_dlhs_fp_grads=0.06,
-          expected_mae_drhs_fp_grads=0.06,
+          expected_maes=[0.0005, 0, 0, 0.009, 0.004, 0.007],
       ),
       dict(
           testcase_name='int4_nhwc',
           data_format='NHWC',
           fwd_qtype='int4',
-          expected_mae_fq_out=0.01,
-          expected_mae_dlhs_fq_grads=0.1,
-          expected_mae_drhs_fq_grads=0.25,
-          expected_mae_fp_out=0.5,
-          expected_mae_dlhs_fp_grads=0.1,
-          expected_mae_drhs_fp_grads=0.5,
+          expected_maes=[0.003, 0, 0, 0.12, 0.06, 0.12],
       ),
       dict(
           testcase_name='fp8_bwd_nhwc',
           data_format='NHWC',
           fwd_qtype='float8_e4m3',
           bwd_qtype='float8_e4m3',
-          expected_mae_fq_out=0.01,
-          expected_mae_dlhs_fq_grads=0.12,
-          expected_mae_drhs_fq_grads=0.35,
-          expected_mae_fp_out=0.05,
-          expected_mae_dlhs_fp_grads=0.12,
-          expected_mae_drhs_fp_grads=0.35,
+          expected_maes=[0.004, 0.03, 0.06, 0.008, 0.05, 0.06],
       ),
       dict(
           testcase_name='fp8_bwd_nhwc_dilated',
@@ -124,46 +114,28 @@ class ConvGeneralQtTest(parameterized.TestCase):
           padding=((0, 0), (0, 0)),
           lhs_dilation=(2, 2),
           rhs_dilation=(2, 2),
-          expected_mae_fq_out=0.01,
-          expected_mae_dlhs_fq_grads=0.15,
-          expected_mae_drhs_fq_grads=0.35,
-          expected_mae_fp_out=0.05,
-          expected_mae_dlhs_fp_grads=0.15,
-          expected_mae_drhs_fp_grads=0.35,
+          expected_maes=[0.02, 0.04, 0.05, 0.007, 0.05, 0.05],
       ),
       dict(
-          testcase_name='int8_nchw',
+          testcase_name='int8_bwd_nchw',
           data_format='NCHW',
           fwd_qtype='int8',
-          expected_mae_fq_out=0.01,
-          expected_mae_dlhs_fq_grads=0.015,
-          expected_mae_drhs_fq_grads=0.05,
-          expected_mae_fp_out=0.08,
-          expected_mae_dlhs_fp_grads=0.06,
-          expected_mae_drhs_fp_grads=0.06,
+          bwd_qtype='int8',
+          expected_maes=[0.002, 0.003, 0.003, 0.009, 0.008, 0.006],
       ),
       dict(
-          testcase_name='int4_nchw',
+          testcase_name='int4_bwd_nchw',
           data_format='NCHW',
           fwd_qtype='int4',
-          expected_mae_fq_out=0.01,
-          expected_mae_dlhs_fq_grads=0.16,
-          expected_mae_drhs_fq_grads=0.95,
-          expected_mae_fp_out=0.5,
-          expected_mae_dlhs_fp_grads=0.1,
-          expected_mae_drhs_fp_grads=0.5,
+          bwd_qtype='int4',
+          expected_maes=[0.002, 0.05, 0.06, 0.28, 0.12, 0.13],
       ),
       dict(
           testcase_name='fp8_bwd_nchw',
           data_format='NCHW',
           fwd_qtype='float8_e4m3',
           bwd_qtype='float8_e4m3',
-          expected_mae_fq_out=0.01,
-          expected_mae_dlhs_fq_grads=0.12,
-          expected_mae_drhs_fq_grads=0.35,
-          expected_mae_fp_out=0.05,
-          expected_mae_dlhs_fp_grads=0.12,
-          expected_mae_drhs_fp_grads=0.35,
+          expected_maes=[0.002, 0.02, 0.04, 0.02, 0.04, 0.04],
       ),
   )
   def test_grad_against_fq(
@@ -175,12 +147,7 @@ class ConvGeneralQtTest(parameterized.TestCase):
       padding='SAME',
       lhs_dilation=None,
       rhs_dilation=None,
-      expected_mae_fq_out,
-      expected_mae_dlhs_fq_grads,
-      expected_mae_drhs_fq_grads,
-      expected_mae_fp_out,
-      expected_mae_dlhs_fp_grads,
-      expected_mae_drhs_fp_grads,
+      expected_maes,
   ):
     window_strides = (1, 1)
     if data_format == 'NCHW':
@@ -197,9 +164,10 @@ class ConvGeneralQtTest(parameterized.TestCase):
     lhs = jax.random.normal(jax.random.key(0), lhs_shape, jnp.float32)
     rhs = jax.random.normal(jax.random.key(1), rhs_shape, jnp.float32)
     config = conv_general_qt.ConvGeneralQtConfig(
-        fwd_qtype=fwd_qtype,
-        bwd_qtype=bwd_qtype,
-        bwd_use_original_residuals=True,
+        lhs_qtype=fwd_qtype,
+        rhs_qtype=fwd_qtype,
+        dlhs_grad_qtype=bwd_qtype,
+        drhs_grad_qtype=bwd_qtype,
     )
 
     def loss_fn_fq(lhs_arr, rhs_arr):
@@ -243,27 +211,31 @@ class ConvGeneralQtTest(parameterized.TestCase):
           )
       )
 
-    fq_out, fq_grads = jax.value_and_grad(loss_fn_fq, argnums=(0, 1))(lhs, rhs)
-    qt_out, qt_grads = jax.value_and_grad(loss_fn_qt, argnums=(0, 1))(lhs, rhs)
-    fp_out, fp_grads = jax.value_and_grad(loss_fn_fp, argnums=(0, 1))(lhs, rhs)
+    @jax.jit
+    def f(lhs, rhs):
+      fq_out, fq_grads = jax.value_and_grad(loss_fn_fq, argnums=(0, 1))(
+          lhs, rhs
+      )
+      qt_out, qt_grads = jax.value_and_grad(loss_fn_qt, argnums=(0, 1))(
+          lhs, rhs
+      )
+      fp_out, fp_grads = jax.value_and_grad(loss_fn_fp, argnums=(0, 1))(
+          lhs, rhs
+      )
+      return (
+          mae(fq_out, qt_out),
+          mae(fq_grads[0], qt_grads[0]),
+          mae(fq_grads[1], qt_grads[1]),
+          mae(fp_out, qt_out),
+          mae(fp_grads[0], qt_grads[0]),
+          mae(fp_grads[1], qt_grads[1]),
+      )
 
-    mae = lambda x, y: jnp.mean(jnp.abs((x - y) / y))
+    maes = f(lhs, rhs)
+    maes = [float(x) for x in maes]
 
-    self.assertLessEqual(mae(qt_out, fq_out), expected_mae_fq_out)
-    self.assertLessEqual(
-        mae(qt_grads[0], fq_grads[0]), expected_mae_dlhs_fq_grads
-    )
-    self.assertLessEqual(
-        mae(qt_grads[1], fq_grads[1]), expected_mae_drhs_fq_grads
-    )
-
-    self.assertLessEqual(mae(qt_out, fp_out), expected_mae_fp_out)
-    self.assertLessEqual(
-        mae(qt_grads[0], fp_grads[0]), expected_mae_dlhs_fp_grads
-    )
-    self.assertLessEqual(
-        mae(qt_grads[1], fp_grads[1]), expected_mae_drhs_fp_grads
-    )
+    for x, y in zip(maes, expected_maes):
+      self.assertLessEqual(x, y, msg=f'{maes} < {expected_maes}')
 
 
 if __name__ == '__main__':
