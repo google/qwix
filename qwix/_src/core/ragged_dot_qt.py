@@ -113,22 +113,21 @@ def ragged_dot_qt_fwd(
   primal_out = ragged_dot.ragged_dot(
       qlhs, qrhs, group_sizes, precision, preferred_element_type, group_offset
   )
-  return primal_out, (qlhs, qrhs)
+  return primal_out, (qlhs, qrhs, group_sizes)
 
 
 def ragged_dot_qt_bwd(
     # Nondiff args passed from fwd pass
-    group_sizes: jax.Array,
     config: RaggedDotQtConfig,
     precision: jax.lax.PrecisionLike,
     preferred_element_type: jax.typing.DTypeLike | None,
     group_offset: jax.Array | None,
     # Residuals from fwd pass
-    residuals: tuple[qarray.MaybeQArray, qarray.MaybeQArray],
+    residuals: tuple[qarray.MaybeQArray, qarray.MaybeQArray, jax.Array],
     g: jax.Array,
-) -> tuple[jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, None]:
   """Backward pass for ragged_dot_qt custom VJP."""
-  (lhs, rhs) = residuals  # lhs [M, K], rhs [G, K, N], g [M, N]
+  (lhs, rhs, group_sizes) = residuals  # lhs [M, K], rhs [G, K, N], g [M, N]
 
   # dlhs = ragged_dot_general(g, rhs), dims are [M, K] = [M, N] @ [G, K, N]
   dlhs_dnums = jax.lax.RaggedDotDimensionNumbers(
@@ -199,10 +198,10 @@ def ragged_dot_qt_bwd(
       group_offset=group_offset,
   )
 
-  return dlhs, drhs
+  return dlhs, drhs, None
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4, 5, 6))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6))
 def ragged_dot_qt(
     lhs: jax.Array,
     rhs: jax.Array,

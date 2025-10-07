@@ -118,25 +118,54 @@ class RaggedDotQtTest(parameterized.TestCase):
     loss_fn_fq = lambda l, r: jnp.sum(ragged_dot_fq(l, r, group_sizes, config))
     loss_fn_fp = lambda l, r: jnp.sum(jax.lax.ragged_dot(l, r, group_sizes))
 
-    qt_out, (qt_dlhs, qt_drhs) = jax.value_and_grad(loss_fn_qt, argnums=(0, 1))(
-        lhs, rhs
+    @jax.jit
+    def f(lhs, rhs):
+      qt_out, (qt_dlhs, qt_drhs) = jax.value_and_grad(
+          loss_fn_qt, argnums=(0, 1)
+      )(lhs, rhs)
+      fq_out, (fq_dlhs, fq_drhs) = jax.value_and_grad(
+          loss_fn_fq, argnums=(0, 1)
+      )(lhs, rhs)
+      fp_out, (fp_dlhs, fp_drhs) = jax.value_and_grad(
+          loss_fn_fp, argnums=(0, 1)
+      )(lhs, rhs)
+      return (
+          _mae(qt_out, fq_out),
+          _mae(qt_dlhs, fq_dlhs),
+          _mae(qt_drhs, fq_drhs),
+          _mae(qt_out, fp_out),
+          _mae(qt_dlhs, fp_dlhs),
+          _mae(qt_drhs, fp_drhs),
+      )
+
+    maes = f(lhs, rhs)
+    expected_maes = (
+        expected_mae_fq_out,
+        expected_mae_fq_dlhs,
+        expected_mae_fq_drhs,
+        expected_mae_fp_out,
+        expected_mae_fp_dlhs,
+        expected_mae_fp_drhs,
     )
-    fq_out, (fq_dlhs, fq_drhs) = jax.value_and_grad(loss_fn_fq, argnums=(0, 1))(
-        lhs, rhs
-    )
-    fp_out, (fp_dlhs, fp_drhs) = jax.value_and_grad(loss_fn_fp, argnums=(0, 1))(
-        lhs, rhs
+    for x, y in zip(maes, expected_maes):
+      self.assertLessEqual(x, y, msg=f"{maes} vs {expected_maes}")
+
+  def test_traced_group_sizes(self):
+    lhs = jax.random.normal(jax.random.key(0), (256, 64), jnp.float32)
+    rhs = jax.random.normal(jax.random.key(1), (8, 64, 128), jnp.float32)
+    config = ragged_dot_qt.RaggedDotQtConfig(
+        lhs_qtype=jnp.float8_e4m3,
+        rhs_qtype=jnp.float8_e4m3,
     )
 
-    # QT and FQ results should be close.
-    self.assertLessEqual(_mae(qt_out, fq_out), expected_mae_fq_out)
-    self.assertLessEqual(_mae(qt_dlhs, fq_dlhs), expected_mae_fq_dlhs)
-    self.assertLessEqual(_mae(qt_drhs, fq_drhs), expected_mae_fq_drhs)
+    @jax.jit
+    def f(group_sizes):
+      return ragged_dot_qt.ragged_dot_qt(lhs, rhs, group_sizes, config)
 
-    # QT and FP results should be close in a larger tolerance.
-    self.assertLessEqual(_mae(qt_out, fp_out), expected_mae_fp_out)
-    self.assertLessEqual(_mae(qt_dlhs, fp_dlhs), expected_mae_fp_dlhs)
-    self.assertLessEqual(_mae(qt_drhs, fp_drhs), expected_mae_fp_drhs)
+    group_sizes = jnp.array([10, 20, 30, 40, 50, 60, 31, 15], jnp.int32)
+    out = f(group_sizes)
+
+    self.assertEqual(out.shape, (256, 128))
 
 
 if __name__ == "__main__":
