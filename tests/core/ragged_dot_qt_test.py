@@ -57,8 +57,8 @@ class RaggedDotQtTest(parameterized.TestCase):
   @parameterized.named_parameters(
       dict(
           testcase_name="fp8",
-          lhs_qtype=jnp.float8_e4m3,
-          rhs_qtype=jnp.float8_e4m3,
+          lhs_qtype=jnp.float8_e4m3fn,
+          rhs_qtype=jnp.float8_e4m3fn,
           expected_mae_fq_out=1e-6,
           expected_mae_fq_dlhs=1e-6,
           expected_mae_fq_drhs=1e-6,
@@ -68,9 +68,9 @@ class RaggedDotQtTest(parameterized.TestCase):
       ),
       dict(
           testcase_name="fp8_bwd",
-          lhs_qtype=jnp.float8_e4m3,
-          rhs_qtype=jnp.float8_e4m3,
-          bwd_qtype=jnp.float8_e4m3,
+          lhs_qtype=jnp.float8_e4m3fn,
+          rhs_qtype=jnp.float8_e4m3fn,
+          bwd_qtype=jnp.float8_e4m3fn,
           expected_mae_fq_out=1e-6,
           expected_mae_fq_dlhs=0.03,
           expected_mae_fq_drhs=0.03,
@@ -154,8 +154,8 @@ class RaggedDotQtTest(parameterized.TestCase):
     lhs = jax.random.normal(jax.random.key(0), (256, 64), jnp.float32)
     rhs = jax.random.normal(jax.random.key(1), (8, 64, 128), jnp.float32)
     config = ragged_dot_qt.RaggedDotQtConfig(
-        lhs_qtype=jnp.float8_e4m3,
-        rhs_qtype=jnp.float8_e4m3,
+        lhs_qtype=jnp.float8_e4m3fn,
+        rhs_qtype=jnp.float8_e4m3fn,
     )
 
     @jax.jit
