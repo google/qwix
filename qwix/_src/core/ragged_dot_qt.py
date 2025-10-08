@@ -18,6 +18,7 @@ import dataclasses
 import functools
 import jax
 from jax import numpy as jnp
+from qwix._src import interception
 from qwix._src.core import qarray
 from qwix._src.core import ragged_dot
 
@@ -90,6 +91,7 @@ def _ragged_dot_general(
   return out.astype(result_type)
 
 
+@interception.disable_interceptions
 def ragged_dot_qt_fwd(
     lhs: jax.Array,
     rhs: jax.Array,
