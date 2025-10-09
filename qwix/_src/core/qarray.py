@@ -61,6 +61,7 @@ class QArray:
   # Array-like methods.
   shape = property(lambda self: self.qvalue.shape)
   ndim = property(lambda self: self.qvalue.ndim)
+  dtype = property(lambda self: self.scale.dtype)
   T = property(lambda self: self.transpose())
 
   def reshape(self, *new_shape) -> 'QArray':
@@ -173,7 +174,12 @@ def rewriting_take(array: QArray, idx) -> QArray:
       if a == b or idx[i] == slice(None):
         actual_idx.append(idx[i])
       elif b == 1:
-        actual_idx.append(slice(None) if isinstance(idx[i], slice) else 0)
+        if isinstance(idx[i], int) or (
+            isinstance(idx[i], jax.Array) and idx[i].ndim == 0
+        ):
+          actual_idx.append(0)
+        else:
+          actual_idx.append(slice(None))
       elif isinstance(idx[i], int):
         actual_idx.append(idx[i] // (a // b))
       else:
