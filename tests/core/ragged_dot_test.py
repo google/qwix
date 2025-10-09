@@ -50,74 +50,6 @@ class RaggedDotTest(parameterized.TestCase):
           expected_mae=0.03,
       ),
       dict(
-          testcase_name='channelwise',
-          lhs_shape=(128, 256),
-          lhs_how=qarray.HowToQuantize(
-              qtype=jnp.float8_e5m2,
-              channelwise_axes=(0,),
-          ),
-          rhs_shape=(4, 256, 64),
-          rhs_how=qarray.HowToQuantize(
-              qtype=jnp.float8_e5m2,
-              channelwise_axes=(2,),
-          ),
-          group_sizes=(128, 100, 0, 28),
-          expected_mae=0.08,
-      ),
-      dict(
-          testcase_name='rhs_group_and_out_channelwise',
-          lhs_shape=(128, 256),
-          lhs_how=qarray.HowToQuantize(
-              qtype=jnp.float8_e5m2,
-              channelwise_axes=(0,),
-          ),
-          rhs_shape=(4, 256, 64),
-          rhs_how=qarray.HowToQuantize(
-              qtype=jnp.float8_e5m2,
-              channelwise_axes=(0, 2),
-          ),
-          group_sizes=(128, 100, 0, 28),
-          expected_mae=0.08,
-      ),
-  )
-  def test_ragged_dot(
-      self,
-      *,
-      lhs_shape: tuple[int, ...],
-      lhs_how: qarray.HowToQuantize | None,
-      rhs_shape: tuple[int, ...],
-      rhs_how: qarray.HowToQuantize | None,
-      group_sizes: tuple[int, ...],
-      expected_mae: float,
-  ):
-    group_sizes = jnp.array(group_sizes)
-    lhs = self._make_array(lhs_shape, asymmetric=False)
-    rhs = self._make_array(rhs_shape, asymmetric=False)
-    q_lhs = qarray.quantize(lhs, lhs_how) if lhs_how else lhs
-    q_rhs = qarray.quantize(rhs, rhs_how) if rhs_how else rhs
-
-    @jax.jit
-    def _jitted_ragged_dot(lhs, rhs, fp_res):
-      q_res = ragged_dot.ragged_dot(lhs, rhs, group_sizes)
-      return rel_mae(q_res, fp_res)
-
-    fp_res = jax.lax.ragged_dot(lhs, rhs, group_sizes)
-    fp_mae = _jitted_ragged_dot(q_lhs, q_rhs, fp_res)
-
-    logging.info('fp_mae=%s', fp_mae)
-    self.assertLessEqual(fp_mae, expected_mae)
-
-  @parameterized.named_parameters(
-      dict(
-          testcase_name='int8',
-          lhs_shape=(128, 256),
-          lhs_how=qarray.HowToQuantize(qtype=jnp.int8),
-          rhs_shape=(4, 256, 64),
-          rhs_how=qarray.HowToQuantize(qtype=jnp.int8),
-          group_sizes=(64, 32, 16, 16),
-          expected_mae=0.03,
-      ),
-      dict(
           testcase_name='lhs_asymmetric',
           lhs_shape=(128, 256),
           lhs_how=qarray.HowToQuantize(
@@ -198,7 +130,7 @@ class RaggedDotTest(parameterized.TestCase):
           expected_mae=0.08,
       ),
   )
-  def test_ragged_dot_general(
+  def test_ragged_dot(
       self,
       *,
       lhs_shape: tuple[int, ...],
@@ -209,7 +141,6 @@ class RaggedDotTest(parameterized.TestCase):
       expected_mae: float,
       disable_fast_ragged_dot: bool = False,
   ):
-    group_sizes = jnp.array(group_sizes)
     lhs_asymmetric = (
         lhs_how.calibration_method == 'minmax' if lhs_how else False
     )
@@ -218,30 +149,25 @@ class RaggedDotTest(parameterized.TestCase):
     )
     lhs = self._make_array(lhs_shape, lhs_asymmetric)
     rhs = self._make_array(rhs_shape, rhs_asymmetric)
+    group_sizes = jnp.array(group_sizes)
+
     q_lhs = qarray.quantize(lhs, lhs_how) if lhs_how else lhs
     q_rhs = qarray.quantize(rhs, rhs_how) if rhs_how else rhs
 
     @jax.jit
-    def _jitted_ragged_dot_general(lhs, rhs, fp_res):
-      slow_res = ragged_dot._slow_ragged_dot_general(
-          lhs, rhs, group_sizes, ragged_dot._BASIC_RAGGED_DOT_DIMENSION_NUMBERS
-      )
+    def _multi_ragged_dot(lhs, rhs, fp_res):
+      slow_res = ragged_dot._slow_ragged_dot(lhs, rhs, group_sizes)
       if disable_fast_ragged_dot:
         fast_res = slow_res
       else:
-        fast_res = ragged_dot._fast_ragged_dot_general(
-            lhs,
-            rhs,
-            group_sizes,
-            ragged_dot._BASIC_RAGGED_DOT_DIMENSION_NUMBERS,
-        )
+        fast_res = ragged_dot._fast_ragged_dot(lhs, rhs, group_sizes)
       return (
           rel_mae(slow_res, fp_res),
           rel_mae(slow_res, fast_res),
       )
 
     fp_res = jax.lax.ragged_dot(lhs, rhs, group_sizes)
-    fp_mae, fast_mae = _jitted_ragged_dot_general(q_lhs, q_rhs, fp_res)
+    fp_mae, fast_mae = _multi_ragged_dot(q_lhs, q_rhs, fp_res)
 
     logging.info('fp_mae=%s fast_mae=%s', fp_mae, fast_mae)
     self.assertLessEqual(fp_mae, expected_mae)
@@ -313,9 +239,9 @@ class RaggedDotTest(parameterized.TestCase):
           expect_fast=False,
       ),
   )
-  @mock.patch.object(ragged_dot, '_slow_ragged_dot_general', autospec=True)
-  @mock.patch.object(ragged_dot, '_fast_ragged_dot_general', autospec=True)
-  def test_ragged_dot_general_implementation(
+  @mock.patch.object(ragged_dot, '_slow_ragged_dot', autospec=True)
+  @mock.patch.object(ragged_dot, '_fast_ragged_dot', autospec=True)
+  def test_ragged_dot_implementation(
       self,
       mock_fast,
       mock_slow,
@@ -337,12 +263,7 @@ class RaggedDotTest(parameterized.TestCase):
     q_lhs = qarray.quantize(lhs, lhs_how) if lhs_how else lhs
     q_rhs = qarray.quantize(rhs, rhs_how) if rhs_how else rhs
 
-    ragged_dot.ragged_dot_general(
-        q_lhs,
-        q_rhs,
-        group_sizes,
-        ragged_dot._BASIC_RAGGED_DOT_DIMENSION_NUMBERS,
-    )
+    ragged_dot.ragged_dot(q_lhs, q_rhs, group_sizes)
     if expect_fast:
       mock_fast.assert_called_once()
       mock_slow.assert_not_called()
