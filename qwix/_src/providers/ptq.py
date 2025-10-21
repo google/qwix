@@ -54,6 +54,7 @@ class WithAux(Generic[ArrayTypeVar]):
   # This allows us to appear like nnx.Variable.
   value = property(flax_util.unbox)
   shape = property(lambda self: self.array.shape)
+  __getitem__ = lambda self, key: jax.tree.map(lambda x: x[key], self.value)
 
 
 class PtqProvider(qconfig.QuantizationProvider):
