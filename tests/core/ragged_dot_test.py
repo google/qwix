@@ -168,6 +168,25 @@ class RaggedDotTest(parameterized.TestCase):
           disable_fast_ragged_dot=True,
       ),
       dict(
+          testcase_name='rhs_k_and_n_tiled',
+          lhs_shape=(128, 256),
+          lhs_how=qarray.HowToQuantize(
+              qtype=jnp.float8_e4m3fn,
+              channelwise_axes=(0,),
+              calibration_method='absmax',
+          ),
+          rhs_shape=(4, 256, 512),
+          rhs_how=qarray.HowToQuantize(
+              qtype=jnp.float8_e4m3fn,
+              channelwise_axes=(0,),
+              tiled_axes={1: 128, 2: 128},
+              calibration_method='absmax',
+          ),
+          group_sizes=(10, 20, 30, 68),
+          expected_mae=0.04,
+          disable_fast_ragged_dot=True,
+      ),
+      dict(
           testcase_name='channelwise',
           lhs_shape=(128, 256),
           lhs_how=qarray.HowToQuantize(
@@ -309,6 +328,21 @@ class RaggedDotTest(parameterized.TestCase):
           rhs_how=qarray.HowToQuantize(
               qtype=jnp.int8,
               calibration_method='minmax',
+          ),
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='slow_rhs_k_and_n_tiled',
+          lhs_how=qarray.HowToQuantize(
+              qtype=jnp.float8_e4m3fn,
+              channelwise_axes=(0,),
+              calibration_method='absmax',
+          ),
+          rhs_how=qarray.HowToQuantize(
+              qtype=jnp.float8_e4m3fn,
+              channelwise_axes=(0,),
+              tiled_axes={1: 128, 2: 32},
+              calibration_method='absmax',
           ),
           expect_fast=False,
       ),
