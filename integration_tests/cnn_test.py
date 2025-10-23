@@ -76,14 +76,8 @@ def apply_model(state: TrainStateWithQuantStats, images, labels):
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, (logits, quant_stats)), grads = grad_fn(state.params)
   accuracy = jnp.mean(jnp.argmax(logits, -1) == labels)
-  return grads, quant_stats, loss, accuracy
-
-
-@jax.jit
-def update_model(
-    state: TrainStateWithQuantStats, grads, quant_stats
-) -> TrainStateWithQuantStats:
-  return state.apply_gradients(grads=grads).replace(quant_stats=quant_stats)
+  state = state.apply_gradients(grads=grads).replace(quant_stats=quant_stats)
+  return state, loss, accuracy
 
 
 def train_epoch(state, train_ds, batch_size, rng):
@@ -101,10 +95,7 @@ def train_epoch(state, train_ds, batch_size, rng):
   for perm in perms:
     batch_images = train_ds['image'][perm, ...]
     batch_labels = train_ds['label'][perm, ...]
-    grads, quant_stats, loss, accuracy = apply_model(
-        state, batch_images, batch_labels
-    )
-    state = update_model(state, grads, quant_stats)
+    state, loss, accuracy = apply_model(state, batch_images, batch_labels)
     epoch_loss.append(loss)
     epoch_accuracy.append(accuracy)
   train_loss = np.mean(epoch_loss)
@@ -147,7 +138,7 @@ def train_and_evaluate(
     state, train_loss, train_accuracy = train_epoch(
         state, train_ds, config.batch_size, input_rng
     )
-    _, _, test_loss, test_accuracy = apply_model(
+    _, test_loss, test_accuracy = apply_model(
         state, test_ds['image'], test_ds['label']
     )
 
