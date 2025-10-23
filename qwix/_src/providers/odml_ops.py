@@ -99,6 +99,7 @@ def get_all_ops():
       'jax.numpy.clip': OnlyOutputOp,
       'jax.numpy.concatenate': Concatenate,
       'jax.numpy.cos': NoQuantOp,
+      'jax.numpy.dot': DotEinsumConv,
       'jax.numpy.einsum': DotEinsumConv,
       'jax.numpy.floor': OnlyOutputOp,
       'jax.numpy.mean': quantize(0),
@@ -113,10 +114,15 @@ def get_all_ops():
       # go/keep-sorted end
   }
 
-  # __truediv__ doesn't go through ufunc call.
-  for op in ['__truediv__']:
-    ops['jax._src.array.ArrayImpl.' + op] = quantize(0, 1)
-    ops['jax._src.core.Tracer.' + op] = quantize(0, 1)
+  # Other array methods that are not ufunc calls.
+  array_methods = {
+      '__truediv__': quantize(0, 1),
+      # We don't want to quantize eq by itself.
+      '__eq__': functools.partial(NoQuantOp, input_idx=[0, 1]),
+  }
+  for op, handler in array_methods.items():
+    ops['jax._src.array.ArrayImpl.' + op] = handler
+    ops['jax._src.core.Tracer.' + op] = handler
 
   return ops
 
@@ -658,8 +664,12 @@ class DotEinsumConv(QuantizedOp):
   ) -> qarray.HowToQuantize:
     """Get the HowToQuantize for the given op and arguments."""
     match self._op_name:
-      case 'dot_general':
-        d_num = args[2] if len(args) > 2 else kwargs['dimension_numbers']
+      case 'dot_general' | 'dot':
+        if self._op_name == 'dot':
+          assert args[1].ndim <= 2
+          d_num = ((args[0].ndim - 1,), (0,)), ((), ())
+        else:
+          d_num = args[2] if len(args) > 2 else kwargs['dimension_numbers']
         return dot_general.get_how_to_quantize(
             dimension_numbers=d_num,
             ndims=(len(args[0].shape), len(args[1].shape)),
