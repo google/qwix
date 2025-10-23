@@ -72,6 +72,7 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
         'jax.lax.conv_general_dilated',
         'jax.lax.dot_general',
         'jax.numpy.einsum',
+        'jax.numpy.dot',
     ]:
       self._ops[name] = functools.partial(
           self._ops[name],
