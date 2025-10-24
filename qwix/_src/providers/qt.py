@@ -34,7 +34,7 @@ class QtRule(qconfig.QuantizationRule):
 
   # In backward pass, quantize the gradients to the given type. This doesn't
   # affect the residuals as the residuals will reuse the quantization in the
-  # forward pass, unless bwd_use_original_residuals is set.
+  # forward pass.
   bwd_qtype: jax.typing.DTypeLike | None = None
 
   # In backward pass, calibrate the gradients using the given method.
@@ -47,11 +47,6 @@ class QtRule(qconfig.QuantizationRule):
 
   # If True, disable channelwise axes for both forward and backward passes.
   disable_channelwise_axes: bool = False
-
-  # If True, use the original values instead of the quantized values as the
-  # residuals for backward pass. Enabling this prevents using low-precision
-  # matmuls during bwd pass and has a negative impact on performance.
-  bwd_use_original_residuals: bool = False
 
   # Use stochastic rounding for the gradients. (Only 'uniform' is supported.)
   bwd_stochastic_rounding: str | None = None
@@ -293,7 +288,6 @@ class QtProvider(qconfig.QuantizationProvider):
         drhs_grad_calibration_method=rule.bwd_calibration_method,
         # misc.
         disable_channelwise_axes=rule.disable_channelwise_axes,
-        bwd_use_original_residuals=rule.bwd_use_original_residuals,
     )
 
   def _create_dot_general_qt_config(
@@ -392,7 +386,6 @@ class QtProvider(qconfig.QuantizationProvider):
         drhs_grad_calibration_method=rule.bwd_calibration_method,
         # misc.
         disable_channelwise_axes=rule.disable_channelwise_axes,
-        bwd_use_original_residuals=rule.bwd_use_original_residuals,
         dlhs_stochastic_rounding_noise_fn=dlhs_stochastic_rounding_noise_fn,
         drhs_stochastic_rounding_noise_fn=drhs_stochastic_rounding_noise_fn,
     )
