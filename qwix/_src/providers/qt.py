@@ -15,7 +15,7 @@
 
 import dataclasses
 import functools
-from typing import Any, Callable, Mapping, Sequence
+from typing import Callable, Sequence
 
 import jax
 from jax import numpy as jnp
@@ -34,7 +34,7 @@ class QtRule(qconfig.QuantizationRule):
 
   # In backward pass, quantize the gradients to the given type. This doesn't
   # affect the residuals as the residuals will reuse the quantization in the
-  # forward pass, unless bwd_use_original_residuals is set.
+  # forward pass.
   bwd_qtype: jax.typing.DTypeLike | None = None
 
   # In backward pass, calibrate the gradients using the given method.
@@ -48,11 +48,6 @@ class QtRule(qconfig.QuantizationRule):
   # If True, disable channelwise axes for both forward and backward passes.
   disable_channelwise_axes: bool = False
 
-  # If True, use the original values instead of the quantized values as the
-  # residuals for backward pass. Enabling this prevents using low-precision
-  # matmuls during bwd pass and has a negative impact on performance.
-  bwd_use_original_residuals: bool = False
-
   # Use stochastic rounding for the gradients. (Only 'uniform' is supported.)
   bwd_stochastic_rounding: str | None = None
 
@@ -60,10 +55,12 @@ class QtRule(qconfig.QuantizationRule):
   # noise for the 0th dimension and broadcast it over remaining dimensions.
   channelwise_noise_axes: Sequence[int] = (0,)
 
-  # Override any fields in DotGeneralQtConfig or ConvGeneralQtConfig. This is
-  # highly experimental and subjects to changes with no backward compatibility
-  # guarantees.
-  additional_qt_config: Mapping[str, Any] | None = None
+  # Whether to apply clipping to the gradients. If True, values outside of the
+  # calibration range will have 0 gradients. This is not needed if calibration
+  # method is "absmax" or "minmax" because there will be no out-of-calibration
+  # values by definition. Enabling this may improve the quality but at the cost
+  # of additional computation.
+  clip_gradients: bool = False
 
 
 class QtProvider(qconfig.QuantizationProvider):
@@ -293,7 +290,7 @@ class QtProvider(qconfig.QuantizationProvider):
         drhs_grad_calibration_method=rule.bwd_calibration_method,
         # misc.
         disable_channelwise_axes=rule.disable_channelwise_axes,
-        bwd_use_original_residuals=rule.bwd_use_original_residuals,
+        clip_gradients=rule.clip_gradients,
     )
 
   def _create_dot_general_qt_config(
@@ -386,19 +383,17 @@ class QtProvider(qconfig.QuantizationProvider):
         dlhs_grad_qtype=rule.bwd_qtype,
         dlhs_grad_calibration_method=rule.bwd_calibration_method,
         dlhs_tile_size=dlhs_tile_size,
+        dlhs_stochastic_rounding_noise_fn=dlhs_stochastic_rounding_noise_fn,
         # drhs configs.
         drhs_grad_qtype=rule.bwd_qtype,
         drhs_tile_size=drhs_tile_size,
         drhs_grad_calibration_method=rule.bwd_calibration_method,
+        drhs_stochastic_rounding_noise_fn=drhs_stochastic_rounding_noise_fn,
         # misc.
         disable_channelwise_axes=rule.disable_channelwise_axes,
-        bwd_use_original_residuals=rule.bwd_use_original_residuals,
-        dlhs_stochastic_rounding_noise_fn=dlhs_stochastic_rounding_noise_fn,
-        drhs_stochastic_rounding_noise_fn=drhs_stochastic_rounding_noise_fn,
+        clip_gradients=rule.clip_gradients,
     )
 
-    if rule.additional_qt_config:
-      qt_config = dataclasses.replace(qt_config, **rule.additional_qt_config)
     return qt_config
 
   def _create_ragged_dot_qt_config(
@@ -415,4 +410,6 @@ class QtProvider(qconfig.QuantizationProvider):
         # bwd configs.
         dlhs_grad_qtype=rule.bwd_qtype,
         drhs_grad_qtype=rule.bwd_qtype,
+        # misc.
+        clip_gradients=rule.clip_gradients,
     )
