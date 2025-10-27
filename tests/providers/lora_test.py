@@ -413,6 +413,23 @@ class LoraTest(parameterized.TestCase):
     sharded_state = jax.device_put(unsharded_state, sharding)
     nnx.update(model, sharded_state)
 
+  def test_nnx_remat(self):
+    """Test nnx.remat with LoRA."""
+
+    class Model(nnx.Module):
+
+      def __init__(self, *, rngs: nnx.Rngs):
+        self.linear = nnx.Linear(16, 32, rngs=rngs)
+
+      def __call__(self, x):
+        return nnx.remat(self.linear.__call__.__func__)(self.linear, x)
+
+    model = Model(rngs=nnx.Rngs(0))
+    lora_provider = lora.LoraProvider(rank=3, alpha=1.0)
+    x = jnp.ones((10, 16))
+    lora_model = lora.apply_lora_to_model(model, lora_provider, x)
+    self.assertIsInstance(lora_model.linear.kernel_lora_a, nnx.LoRAParam)
+
 
 if __name__ == "__main__":
   absltest.main()
