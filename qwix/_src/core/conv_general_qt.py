@@ -47,7 +47,6 @@ class ConvGeneralQtConfig:
 
   # Misc.
   disable_channelwise_axes: bool = False
-  bwd_use_original_residuals: bool = False
 
 
 # Swaps the first two dimension indices of a specification.
@@ -187,11 +186,8 @@ def conv_general_qt_fwd(
         operand, qtype, scale, zero_point
     )
 
-  residuals = (lhs, rhs)
   lhs = _quantize_operand(lhs, for_lhs=True)
   rhs = _quantize_operand(rhs, for_lhs=False)
-  if not config.bwd_use_original_residuals:
-    residuals = (lhs, rhs)
 
   primal_out = conv_general.conv_general_dilated(
       lhs,
@@ -204,6 +200,7 @@ def conv_general_qt_fwd(
       feature_group_count,
       batch_group_count,
   )
+  residuals = (lhs, rhs)
 
   return primal_out, residuals
 
