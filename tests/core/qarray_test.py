@@ -213,6 +213,12 @@ class QArrayTest(parameterized.TestCase):
       transposed_array = q_array.transpose(1, 2, 0)
       self.assertEqual(transposed_array.shape, (2, 6, 2))
       self.assertEqual(transposed_array.scale.shape, (1, 3, 2))
+      transposed_array = q_array.T
+      self.assertEqual(transposed_array.shape, (6, 2, 2))
+      self.assertEqual(transposed_array.scale.shape, (3, 1, 2))
+      transposed_array = q_array.mT
+      self.assertEqual(transposed_array.shape, (2, 6, 2))
+      self.assertEqual(transposed_array.scale.shape, (2, 3, 1))
 
     with self.subTest('slice'):
       sliced_array = q_array[..., 1]
