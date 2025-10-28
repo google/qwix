@@ -63,6 +63,7 @@ class QArray:
   ndim = property(lambda self: self.qvalue.ndim)
   dtype = property(lambda self: self.scale.dtype)
   T = property(lambda self: self.transpose())
+  mT = property(lambda self: jax.tree.map(lambda x: x.mT, self))  # pylint: disable=invalid-name
 
   def reshape(self, *new_shape) -> 'QArray':
     return reshape(self, *new_shape)
