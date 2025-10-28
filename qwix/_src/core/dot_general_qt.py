@@ -43,19 +43,16 @@ class DotGeneralQtConfig:
   dlhs_grad_qtype: jax.typing.DTypeLike | None = None  # incoming gradient
   dlhs_grad_calibration_method: str = 'absmax'
   dlhs_tile_size: int | float | None = None
+  dlhs_stochastic_rounding_noise_fn: numerics.NoiseFn | None = None
 
   # Backward pass (drhs).
   drhs_grad_qtype: jax.typing.DTypeLike | None = None  # incoming gradient
   drhs_grad_calibration_method: str = 'absmax'
   drhs_tile_size: int | float | None = None
+  drhs_stochastic_rounding_noise_fn: numerics.NoiseFn | None = None
 
   # Misc.
   disable_channelwise_axes: bool = False
-  bwd_use_original_residuals: bool = False  # what to use as residuals
-
-  # Configs for stochastic rounding.
-  dlhs_stochastic_rounding_noise_fn: numerics.NoiseFn | None = None
-  drhs_stochastic_rounding_noise_fn: numerics.NoiseFn | None = None
 
 
 def _ranges_like(*xs):
@@ -169,11 +166,7 @@ def dot_general_qt_fwd(
   qrhs = _quantize_operand(rhs, is_lhs=False)
 
   primal_out = dot_general.dot_general(qlhs, qrhs, dimension_numbers)
-
-  if config.bwd_use_original_residuals:
-    residuals = (lhs, rhs)
-  else:
-    residuals = (qlhs, qrhs)
+  residuals = (qlhs, qrhs)
 
   return primal_out, residuals
 
@@ -198,10 +191,12 @@ def dot_general_qt_bwd(
       g_qtype = config.dlhs_grad_qtype
       g_tile_size = config.dlhs_tile_size
       g_calibration_method = config.dlhs_grad_calibration_method
+      g_noise_fn = config.dlhs_stochastic_rounding_noise_fn
     else:
       g_qtype = config.drhs_grad_qtype
       g_tile_size = config.drhs_tile_size
       g_calibration_method = config.drhs_grad_calibration_method
+      g_noise_fn = config.drhs_stochastic_rounding_noise_fn
 
     if g_qtype and numerics.should_quantize(g.dtype):
       if isinstance(y, qarray.QArray) and not qarray.get_tiled_axes(y):
@@ -219,19 +214,11 @@ def dot_general_qt_bwd(
           tile_size=g_tile_size,
           calibration_method=g_calibration_method,
       )
+      if g_noise_fn is not None:
+        g_how = dataclasses.replace(g_how, noise_fn=g_noise_fn)
       if config.disable_channelwise_axes:
         g_how = dataclasses.replace(g_how, channelwise_axes=[])
 
-      if for_dlhs and config.dlhs_stochastic_rounding_noise_fn:
-        g_how = dataclasses.replace(
-            g_how,
-            noise_fn=config.dlhs_stochastic_rounding_noise_fn,
-        )
-      if not for_dlhs and config.drhs_stochastic_rounding_noise_fn:
-        g_how = dataclasses.replace(
-            g_how,
-            noise_fn=config.drhs_stochastic_rounding_noise_fn,
-        )
       g = qarray.quantize(g, g_how)
 
     grad_res = dot_general.dot_general(g, y, bwd_dnums)
