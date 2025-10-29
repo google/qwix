@@ -65,6 +65,18 @@ class QArray:
   T = property(lambda self: self.transpose())
   mT = property(lambda self: jax.tree.map(lambda x: x.mT, self))  # pylint: disable=invalid-name
 
+  @property
+  def scale_tile_shape(self) -> tuple[int, ...]:
+    """Returns the tile shape for the scale values."""
+    return tuple(o // s for o, s in zip(self.shape, self.scale.shape))
+
+  @property
+  def zero_point_tile_shape(self) -> tuple[int, ...] | None:
+    """Returns the tile shape for the zero point values."""
+    if self.zero_point is None:
+      return None
+    return tuple(o // s for o, s in zip(self.shape, self.zero_point.shape))
+
   def reshape(self, *new_shape) -> 'QArray':
     return reshape(self, *new_shape)
 

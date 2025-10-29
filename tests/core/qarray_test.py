@@ -195,6 +195,10 @@ class QArrayTest(parameterized.TestCase):
     self.assertEqual(q_array.shape, (2, 2, 6))
     self.assertEqual(q_array.ndim, 3)
 
+    with self.subTest('tile_shape'):
+      self.assertEqual(q_array.scale_tile_shape, (1, 2, 2))
+      self.assertIsNone(q_array.zero_point_tile_shape)
+
     with self.subTest('reshape'):
       reshaped_array = q_array.reshape(4, 1, 3, 2)
       self.assertEqual(reshaped_array.shape, (4, 1, 3, 2))
