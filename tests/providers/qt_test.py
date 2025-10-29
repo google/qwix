@@ -65,19 +65,21 @@ class QtTest(absltest.TestCase):
     self.assertEqual(quant_stats["dot_general0_lhs"]["count"], 1)
 
   def test_srq_jit_grad_nnx(self):
-    """Test SRQ on NNX module."""
-    linear = nnx.Linear(12, 10, rngs=nnx.Rngs(0), param_dtype=jnp.bfloat16)
-    qt_provider = qt.QtProvider([
-        qconfig.QuantizationRule(
-            module_path=".*",
-            weight_qtype=jnp.int8,
-            act_qtype=jnp.int8,
-            act_static_scale=True,
-        ),
-    ])
+    """Test creating and train an SRQ NNX model inside jit."""
 
-    model_input = jnp.ones((10, 12), dtype=jnp.float32)
-    qt_linear = qwix_model.quantize_model(linear, qt_provider, model_input)
+    def create_srq_nnx_model(model_input):
+      linear = nnx.Linear(12, 10, rngs=nnx.Rngs(0), param_dtype=jnp.bfloat16)
+      qt_provider = qt.QtProvider([
+          qconfig.QuantizationRule(
+              weight_qtype=jnp.int8,
+              act_qtype=jnp.int8,
+              act_static_scale=True,
+          ),
+      ])
+      return qwix_model.quantize_model(linear, qt_provider, model_input)
+
+    model_input = jnp.ones((9, 12), dtype=jnp.float32)
+    qt_linear = nnx.jit(create_srq_nnx_model)(model_input)
     quant_stats = nnx.variables(qt_linear, flax_util.QuantStat)
 
     # quant_stats should be initialized but empty.
