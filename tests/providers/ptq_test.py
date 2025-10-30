@@ -437,6 +437,30 @@ class PtqTest(parameterized.TestCase):
     # Ensure that the model can be called.
     ptq_model(model_input)
 
+  def test_reshape_weight(self):
+    """Test that reshape(weight) can be recognized as a param."""
+
+    class ReshapeDense(nn.Module):
+      out_features: int
+
+      @nn.compact
+      def __call__(self, x):
+        in_features = x.shape[-1]
+        # Store w as a flattened array.
+        storage_shape = (in_features * self.out_features,)
+        w = self.param("w", nn.initializers.ones, storage_shape, jnp.float32)
+        return jnp.dot(x, w.reshape(in_features, self.out_features))
+
+    model = ReshapeDense(out_features=5)
+    variables = model.init(jax.random.key(0), jnp.ones((3, 4)))
+    self.assertEqual(variables["params"]["w"].shape, (20,))
+
+    q_rules = [qconfig.QuantizationRule(weight_qtype=jnp.int8)]
+    ptq_model = qwix_model.quantize_model(model, ptq.PtqProvider(q_rules))
+    variables = jax.jit(ptq_model.init)(jax.random.key(0), jnp.ones((3, 4)))
+    self.assertIsInstance(variables["params"]["w"], ptq.WithAux)
+    self.assertEqual(variables["params"]["w"].array.shape, (4, 5))
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -192,6 +192,11 @@ def get_or_create_param(
 def find_param(x: Any) -> str | None:
   """Finds the param name of a given array in the current module.
 
+  This function is useful when
+    * We want to know if an array is a weight to decide how to quantize it.
+    * We want to locate and replace the weights in PTQ mode.
+    * We want to create lora weights together with the base weights.
+
   This function is designed so that array and array-like objects are treated
   equally.
 
@@ -205,30 +210,48 @@ def find_param(x: Any) -> str | None:
   Raises:
     ValueError: If multiple params are found.
   """
+  # First, identify all the candidates. We support the following cases:
+  # * The type of the param is promoted, e.g., astype.
+  # * The sharding constraints are added, i.e. with_sharding_constraint.
+  # * The param is reshaped (only through the approach 1 below).
   module = get_current_module()
   candidates: dict[str, Any] = {}
   if isinstance(module, nn.Module):
     assert module.scope is not None
     for name, value in module.scope._collection('params').items():  # pylint: disable=protected-access
       value = nn.unbox(value)
-      # Only consider params with the same shape.
-      if hasattr(value, 'shape') and value.shape == x.shape:
+      if hasattr(value, 'shape'):
         candidates[name] = value
   elif isinstance(module, nnx.Module):
     for name, node in module.__dict__.items():
-      if hasattr(node, 'shape') and node.shape == x.shape:
+      if hasattr(node, 'shape'):
         candidates[name] = node.value
   else:
     raise ValueError('Current module is not known.')
 
-  # Check if we could find the exact x in the params.
-  for name, value in candidates.items():
-    if value is x:
-      return name
+  candidates_by_id = {id(c): n for n, c in candidates.items()}
 
-  # Otherwise, x could still be a param because the types are promoted or the
-  # sharding constraints are added. Use some heuristics here which may not be
-  # accurate.
+  # Approach 0: check if we could find the exact x in the params.
+  if id(x) in candidates_by_id:
+    return candidates_by_id[id(x)]
+
+  # Approach 1: if x is a JitTracer, we can actually trace it back to the param.
+  if isinstance(x, jax.core.Tracer) and hasattr(x, 'parent'):
+    while True:
+      if id(x) in candidates_by_id:
+        return candidates_by_id[id(x)]
+      if x.parent and len(x.parent.in_tracers) == 1:
+        # Allow any unary primitives to be applied to the param, including
+        # reshape, with_sharding_constraint, astype, etc.
+        x = x.parent.in_tracers[0]
+      elif id(const := x.get_const()) in candidates_by_id:
+        # Even if x is a tracer, the candidate might be a concrete value.
+        return candidates_by_id[id(const)]
+      else:
+        return None
+
+  # Approach 2: use heuristics on the shape which may not be accurate.
+  candidates = {n: c for n, c in candidates.items() if c.shape == x.shape}
   if len(candidates) > 2:
     raise ValueError(f'Multiple candidate params found: {candidates.keys()}')
   if len(candidates) == 1:

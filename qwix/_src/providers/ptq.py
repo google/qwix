@@ -56,6 +56,19 @@ class WithAux(Generic[ArrayTypeVar]):
   shape = property(lambda self: self.array.shape)
   __getitem__ = lambda self, key: jax.tree.map(lambda x: x[key], self.value)
 
+  def reshape(self, *shape):
+    if len(shape) == 1:
+      try:
+        shape = tuple(shape[0])
+      except TypeError:
+        pass
+    if tuple(self.shape) != tuple(shape):
+      raise ValueError(
+          'PTQ weights should already have the target shape. Got'
+          f' {self.shape=} but {shape=} is requested.'
+      )
+    return self
+
 
 class PtqProvider(qconfig.QuantizationProvider):
   """Quantization provider for PTQ.
