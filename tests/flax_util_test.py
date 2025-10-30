@@ -217,6 +217,39 @@ class FlaxUtilTest(parameterized.TestCase):
     key = module()
     self.assertEqual(key.shape, ())
 
+  def test_find_param_linen(self):
+    t = self
+
+    class MyModule(nn.Module):
+
+      @nn.compact
+      def __call__(self):
+        w = self.param("w", nn.initializers.ones, (4, 5), jnp.float32)
+        t.assertEqual(flax_util.find_param(w), "w")
+        t.assertEqual(flax_util.find_param(w.astype(jnp.bfloat16)), "w")
+        t.assertEqual(flax_util.find_param(w.reshape((2, 2, 5))), "w")
+
+    model = MyModule()
+    variables = jax.jit(model.init)(jax.random.key(0))
+    jax.eval_shape(model.apply, variables)
+
+  def test_find_param_nnx(self):
+    t = self
+
+    class MyModule(nnx.Module):
+
+      def __init__(self):
+        self.w = nnx.Param(jnp.ones((4, 5), jnp.float32))
+
+      def __call__(self):
+        print(self.w.value)
+        print(self.w.astype(jnp.bfloat16))
+        t.assertEqual(flax_util.find_param(self.w.value), "w")
+        t.assertEqual(flax_util.find_param(self.w.astype(jnp.bfloat16)), "w")
+        t.assertEqual(flax_util.find_param(self.w.reshape((2, 2, 5))), "w")
+
+    nnx.jit(MyModule())()
+
 
 if __name__ == "__main__":
   absltest.main()
