@@ -688,7 +688,7 @@ class DotEinsumConv(QuantizedOp):
             calibration_method=calibration_method,
         )
       case 'conv_general_dilated':
-        d_num = args[4] if len(args) > 4 else kwargs['dimension_numbers']
+        d_num = args[6] if len(args) > 6 else kwargs['dimension_numbers']
         return conv_general.get_how_to_quantize(
             dimension_numbers=d_num,
             for_lhs=for_lhs,
