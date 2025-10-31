@@ -58,6 +58,10 @@ def get_symmetric_bound(qtype: jax.typing.DTypeLike) -> float:
       # The bound is extended to qmax + 0.5 so that we have a better utilization
       # of the qmax bucket. This is more important for fewer bits of int.
       return 2 ** (int(qtype[3:]) - 1) - 0.5
+    case 'mxfp8':
+      return float(jnp.finfo(jnp.float8_e4m3fn).max)
+    case 'mxfp4':
+      return float(jnp.finfo(jnp.float4_e2m1fn).max)
     case _:  # builtin dtypes
       # Prevent common misconfigurations, e.g., use bf16 as qtype.
       if jax.dtypes.canonicalize_dtype(qtype).itemsize > 1:
@@ -90,6 +94,16 @@ def convert_to(
       else:
         raise ValueError(f'Unsupported integer dtype: {qtype}')
       return jnp.round(x).clip(qmin, qmax).astype(qtype)
+    case 'mxfp8':
+      finfo = jnp.finfo(jnp.float8_e4m3fn)
+      return x.clip(float(finfo.min), float(finfo.max)).astype(
+          jnp.float8_e4m3fn
+      )
+    case 'mxfp4':
+      finfo = jnp.finfo(jnp.float4_e2m1fn)
+      return x.clip(float(finfo.min), float(finfo.max)).astype(
+          jnp.float4_e2m1fn
+      )
     case _:  # builtin dtypes
       try:
         finfo = jnp.finfo(qtype)

@@ -117,6 +117,49 @@ class NumericsTest(absltest.TestCase):
         (2, 3, 4),
     )
 
+  def test_mxfp(self):
+    with self.subTest("mxfp8_bound"):
+      bound = numerics.get_symmetric_bound("mxfp8")
+      finfo = jnp.finfo(jnp.float8_e4m3fn)
+      self.assertEqual(bound, float(finfo.max))
+
+    with self.subTest("mxfp8_conversion"):
+      finfo = jnp.finfo(jnp.float8_e4m3fn)
+      # Test values: in-range, out-of-range high, out-of-range low
+      in_array = jnp.array([10.0, 500.0, -1000.0], dtype=jnp.float32)
+      converted = numerics.convert_to(in_array, "mxfp8")
+
+      self.assertEqual(converted.dtype, jnp.float8_e4m3fn)
+      expected = jnp.array(
+          [10.0, finfo.max, finfo.min], dtype=jnp.float8_e4m3fn
+      )
+      self._assert_equal(converted, expected)
+
+    with self.subTest("mxfp4_bound"):
+      bound = numerics.get_symmetric_bound("mxfp4")
+      finfo = jnp.finfo(jnp.float4_e2m1fn)
+      self.assertEqual(bound, float(finfo.max))
+
+    with self.subTest("mxfp4_conversion"):
+      finfo = jnp.finfo(jnp.float4_e2m1fn)
+      # Test values: in-range, out-of-range high, out-of-range low
+      in_array = jnp.array([1.5, 10.0, -20.0], dtype=jnp.float32)
+      converted = numerics.convert_to(in_array, "mxfp4")
+
+      self.assertEqual(converted.dtype, jnp.float4_e2m1fn)
+      expected = jnp.array([1.5, finfo.max, finfo.min], dtype=jnp.float4_e2m1fn)
+      self._assert_equal(converted, expected)
+
+    with self.subTest("mxfp_convert_from"):
+      # convert_from should be a no-op for these float types
+      in_mxfp8 = jnp.array([1.0, 2.0], dtype=jnp.float8_e4m3fn)
+      out_mxfp8 = numerics.convert_from(in_mxfp8, "mxfp8")
+      self.assertIs(in_mxfp8, out_mxfp8)  # Should return the exact same object
+
+      in_mxfp4 = jnp.array([1.0, 1.5], dtype=jnp.float4_e2m1fn)
+      out_mxfp4 = numerics.convert_from(in_mxfp4, "mxfp4")
+      self.assertIs(in_mxfp4, out_mxfp4)
+
 
 if __name__ == "__main__":
   absltest.main()
