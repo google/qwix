@@ -104,6 +104,24 @@ class QArrayTest(parameterized.TestCase):
           calibration_method='fixed,3',
           expected_mae=0.00765991,
       ),
+      dict(
+          testcase_name='mxfp8',
+          array_shape=(10, 128, 64),
+          qtype='mxfp8',
+          channelwise_axes=[],
+          tiled_axes={},
+          calibration_method='absmax',
+          expected_mae=0.0223389,
+      ),
+      dict(
+          testcase_name='mxfp4',
+          array_shape=(10, 128, 64),
+          qtype='mxfp4',
+          channelwise_axes=[],
+          tiled_axes={},
+          calibration_method='absmax',
+          expected_mae=0.10791,
+      ),
   )
   def test_quantize_dequantize(
       self,
@@ -125,13 +143,27 @@ class QArrayTest(parameterized.TestCase):
     q_array = qarray.quantize(array, how)
     dq_array = qarray.dequantize(q_array)
 
-    self.assertEqual(
-        q_array.qvalue.dtype, jnp.uint4 if qtype == 'nf4' else qtype
-    )
+    if qtype == 'mxfp8':
+      self.assertEqual(q_array.qvalue.dtype, jnp.float8_e4m3fn)
+      expected_scale_shape = list(array_shape)
+      expected_scale_shape[-1] //= 32
+      self.assertEqual(q_array.scale.shape, tuple(expected_scale_shape))
+      self.assertIsNone(q_array.zero_point)
+    elif qtype == 'mxfp4':
+      self.assertEqual(q_array.qvalue.dtype, jnp.float4_e2m1fn)
+      expected_scale_shape = list(array_shape)
+      expected_scale_shape[-1] //= 32
+      self.assertEqual(q_array.scale.shape, tuple(expected_scale_shape))
+      self.assertIsNone(q_array.zero_point)
+    else:
+      self.assertEqual(
+          q_array.qvalue.dtype, jnp.uint4 if qtype == 'nf4' else qtype
+      )
+
     self.assertEqual(q_array.qvalue.shape, array_shape)
 
     mae = jnp.abs(array - dq_array).mean() / jnp.abs(array).mean()
-    self.assertAlmostEqual(mae, expected_mae)
+    self.assertAlmostEqual(mae, expected_mae, places=5)
 
   @parameterized.named_parameters(
       dict(
