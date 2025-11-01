@@ -69,21 +69,16 @@ def get_all_ops():
   partial = functools.partial
   quantize = lambda *a, **k: functools.partial(QuantizedOp, input_idx=a, **k)
 
-  ops = {
+  return {
       # go/keep-sorted start
       'flax.linen.BatchNorm.__call__': BatchNorm,
       'flax.linen.Dropout.__call__': partial(TransparentOp, input_idx=[1]),
       'flax.linen.GroupNorm.__call__': quantize(1, op_name='norm_op'),
       'flax.linen.LayerNorm.__call__': quantize(1, op_name='norm_op'),
       'flax.linen.avg_pool': OnlyInputOp,
-      'flax.linen.gelu': quantize(0),
-      'flax.linen.leaky_relu': quantize(0),
       'flax.linen.max_pool': OnlyInputOp,
-      'flax.linen.silu': Silu,
-      'flax.linen.softmax': Softmax,
-      'flax.linen.swish': Silu,
       'jax._src.numpy.indexing.rewriting_take': Take,  # a.__getitem__
-      'jax.custom_jvp.__call__': CustomJvpCall,  # this is only for relu.
+      'jax.custom_jvp.__call__': CustomJvpCall,  # handles relu and relu6.
       'jax.image.resize': OnlyInputOp,
       'jax.lax.broadcast_in_dim': TransparentOp,
       'jax.lax.conv_general_dilated': DotEinsumConv,
@@ -94,6 +89,10 @@ def get_all_ops():
       'jax.lax.stop_gradient': TransparentOp,
       'jax.lax.transpose': TransparentOp,
       'jax.lax.with_sharding_constraint': TransparentOp,
+      'jax.nn.gelu': quantize(0),
+      'jax.nn.leaky_relu': quantize(0),
+      'jax.nn.silu': Silu,
+      'jax.nn.softmax': Softmax,
       'jax.numpy.array': TransparentOp,
       'jax.numpy.astype': TransparentOp,
       'jax.numpy.clip': OnlyOutputOp,
@@ -101,6 +100,7 @@ def get_all_ops():
       'jax.numpy.cos': NoQuantOp,
       'jax.numpy.dot': DotEinsumConv,
       'jax.numpy.einsum': DotEinsumConv,
+      'jax.numpy.equal': functools.partial(NoQuantOp, input_idx=[0, 1]),
       'jax.numpy.floor': OnlyOutputOp,
       'jax.numpy.mean': quantize(0),
       'jax.numpy.pad': OnlyOutputOp,
@@ -110,21 +110,10 @@ def get_all_ops():
       'jax.numpy.sum': quantize(0),
       'jax.numpy.take': Take,
       'jax.numpy.tanh': Tanh,
-      'jax.numpy.ufunc.__call__': UfuncCall,  # includes add, sub, mul, pow.
+      'jax.numpy.true_divide': quantize(0, 1, op_name='truediv'),
+      'jax.numpy.ufunc.__call__': UfuncCall,  # handles add, sub, mul, pow.
       # go/keep-sorted end
   }
-
-  # Other array methods that are not ufunc calls.
-  array_methods = {
-      '__truediv__': quantize(0, 1),
-      # We don't want to quantize eq by itself.
-      '__eq__': functools.partial(NoQuantOp, input_idx=[0, 1]),
-  }
-  for op, handler in array_methods.items():
-    ops['jax._src.array.ArrayImpl.' + op] = handler
-    ops['jax._src.core.Tracer.' + op] = handler
-
-  return ops
 
 
 NotAnActivationError = ValueError(
@@ -479,7 +468,7 @@ class FinalOutput(QuantizedOp):
 
 
 class BatchNorm(QuantizedOp):
-  """BatchNorm op."""
+  """BatchNorm op, which can be fused into previous op completely."""
 
   def __call__(self, norm, x: jax.Array, *args, **kwargs) -> jax.Array:
     if not aux_data.get(x, _IS_ACTIVATION, False):
