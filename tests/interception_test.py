@@ -133,6 +133,41 @@ class InterceptionTest(absltest.TestCase):
     n = 42
     self.assertEqual(func2(0.0), 42)
 
+  def test_interception_of_pjit_function(self):
+    alias_div = jnp.true_divide  # which is a PjitFunction
+
+    def func(x, y):
+      return alias_div(x, y)
+
+    func = interception.wrap_func_intercepted(
+        func, lambda: {"jax.numpy.true_divide": lambda x, y: x / y + 1}
+    )
+    self.assertEqual(func(0.0, 1.0), 1.0)
+
+  def test_double_interception(self):
+    def func(x):
+      return x
+
+    func = interception.wrap_func_intercepted(
+        func,
+        # swish is an alias of silu.
+        lambda: {"jax.nn.swish": lambda x: 42, "jax.nn.silu": lambda x: 43},
+    )
+    with self.assertRaises(ValueError):
+      func(1.0)
+
+  def test_intercept_class_method(self):
+    def func(x):
+      return jax.nn.relu(x)
+
+    def custom_jvp_call(self, *args, **kwargs):
+      return self(*args, **kwargs) + 1
+
+    func = interception.wrap_func_intercepted(
+        func, lambda: {"jax.custom_jvp.__call__": custom_jvp_call}
+    )
+    self.assertEqual(func(-1.0), 1.0)
+
   def test_scan_custom_vjp(self):
     @jax.custom_vjp
     def replaced_sin(x):
