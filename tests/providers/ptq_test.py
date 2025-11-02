@@ -457,9 +457,21 @@ class PtqTest(parameterized.TestCase):
 
     q_rules = [qconfig.QuantizationRule(weight_qtype=jnp.int8)]
     ptq_model = qwix_model.quantize_model(model, ptq.PtqProvider(q_rules))
-    variables = jax.jit(ptq_model.init)(jax.random.key(0), jnp.ones((3, 4)))
+    abstract_variables = jax.eval_shape(
+        jax.jit(ptq_model.init), jax.random.key(0), jnp.ones((3, 4))
+    )
+    # Quantize and replace the original params.
+    ptq_params = ptq.quantize_params(
+        variables["params"], abstract_variables["params"]
+    )
+    variables["params"] = ptq_params
+
     self.assertIsInstance(variables["params"]["w"], ptq.WithAux)
     self.assertEqual(variables["params"]["w"].array.shape, (4, 5))
+
+    # Test can apply.
+    out = jax.jit(ptq_model.apply)(variables, jnp.ones((3, 4)))
+    self.assertEqual(out.shape, (3, 5))
 
 
 if __name__ == "__main__":
