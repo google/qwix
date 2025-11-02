@@ -53,7 +53,7 @@ class WithAux(Generic[ArrayTypeVar]):
 
   # This allows us to appear like nnx.Variable.
   value = property(flax_util.unbox)
-  shape = property(lambda self: self.array.shape)
+  shape = property(lambda self: flax_util.unbox(self.array).shape)
   __getitem__ = lambda self, key: jax.tree.map(lambda x: x[key], self.value)
 
   def reshape(self, *shape):
@@ -456,6 +456,9 @@ def quantize_params(
       raise TypeError(f'params is not a pure dict of jax.Array: {type(param)}')
     abs_param = get_value_from_path(abstract_quantized_params, path)
     if isinstance(abs_param, WithAux):
+      # The param might not be in the shape needed for compute, in case the
+      # module reshapes before compute. Abstract param has the compute shape.
+      param = param.reshape(abs_param.shape)
       param = abs_param.replace(array=qarray.quantize(param, abs_param.how))
     quantized_params[path] = param
 
