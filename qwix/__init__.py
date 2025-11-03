@@ -22,5 +22,6 @@ from qwix._src.model import quantize_model
 from qwix._src.providers.lora import LoraProvider, LoraRule, apply_lora_to_model
 from qwix._src.providers.odml import OdmlConversionProvider, OdmlQatProvider
 from qwix._src.providers.ptq import PtqProvider, quantize_params
+from qwix._src.providers.ptq_pad import PtqPadProvider
 from qwix._src.providers.qt import QtProvider, QtRule
 from qwix._src.qconfig import QuantizationProvider, QuantizationRule
