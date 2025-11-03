@@ -19,7 +19,7 @@ Notes:
 
 from __future__ import annotations
 
-from typing import Sequence, Callable
+from typing import Callable
 import dataclasses
 
 import jax
@@ -69,7 +69,7 @@ def _maybe_pad(x: jax.Array, tiled_axes: dict[int, int | float]) -> tuple[jax.Ar
   pw = _compute_pad_width(x, tiled_axes)
   if any(b or a for (b, a) in pw):
     x = jnp.pad(x, pw, constant_values=0)
-  return x, pw
+  return x
 
 
 class PtqPadProvider(PtqProvider):
@@ -126,10 +126,10 @@ class PtqPadProvider(PtqProvider):
 
     # Pad qvalues transiently before compute.
     if rhs_how and rhs_how.tiled_axes:
-      padded_qvalue, _ = _maybe_pad(rhs.qvalue, dict(rhs_how.tiled_axes))
+      padded_qvalue = _maybe_pad(rhs.qvalue, dict(rhs_how.tiled_axes))
       rhs = dataclasses.replace(rhs, qvalue=padded_qvalue)
     if lhs_how and lhs_how.tiled_axes:
-      padded_qvalue, _ = _maybe_pad(lhs.qvalue, dict(lhs_how.tiled_axes))
+      padded_qvalue = _maybe_pad(lhs.qvalue, dict(lhs_how.tiled_axes))
       lhs = dataclasses.replace(lhs, qvalue=padded_qvalue)
 
     return core_dot.dot_general(
@@ -190,10 +190,10 @@ class PtqPadProvider(PtqProvider):
 
     # Pad qvalues transiently before compute.
     if rhs_how and rhs_how.tiled_axes:
-      padded_qvalue, _ = _maybe_pad(rhs.qvalue, dict(rhs_how.tiled_axes))
+      padded_qvalue = _maybe_pad(rhs.qvalue, dict(rhs_how.tiled_axes))
       rhs = dataclasses.replace(rhs, qvalue=padded_qvalue)
     if lhs_how and lhs_how.tiled_axes:
-      padded_qvalue, _ = _maybe_pad(lhs.qvalue, dict(lhs_how.tiled_axes))
+      padded_qvalue = _maybe_pad(lhs.qvalue, dict(lhs_how.tiled_axes))
       lhs = dataclasses.replace(lhs, qvalue=padded_qvalue)
 
     return core_einsum.einsum(einsum_str, lhs, rhs)
@@ -205,14 +205,6 @@ class PtqPadProvider(PtqProvider):
         'jax.numpy.einsum': self.einsum,
     }
 
-def _calibrate_on_padded(array: jax.Array, how: qarray.HowToQuantize):
-  if how.tiled_axes:
-    padded, _ = _maybe_pad(array, dict(how.tiled_axes))
-  else:
-    padded = array
-  callibration = qarray.calibrate(padded, how)
-  return callibration
-
 def quantize_act(
     array: jax.Array,
     how: qarray.HowToQuantize,
@@ -221,15 +213,21 @@ def quantize_act(
 ) -> qarray.QArray:
   """Quantize activations using padded calibration but original shapes.
 
-  For dynamic: calibrate on padded array, then quantize original array with
-  quantize_with_scale_zero_point.
+  For dynamic: calibrate on padded array, then quantize padded array, slice back to original.
   For static: identical to PTQ's logic except calibration step uses padded
   array when quant_stats are absent.
   """
+  array_padded = _maybe_pad(array, how.tiled_axes)
+
   if not rule.act_static_scale:
-    calibration = _calibrate_on_padded(array, how)
+    array_padded = _maybe_pad(array, how.tiled_axes)
+    
+    calibration = qarray.calibrate(array_padded, how)
     scale, zp = qarray.compute_scale_zero_point(calibration, how.qtype)
-    return qarray.quantize_with_scale_zero_point(array, how.qtype, scale, zp)
+    qarr_padded = qarray.quantize_with_scale_zero_point(array_padded, how.qtype, scale, zp)
+
+    slices = tuple(slice(0, array.shape[i]) for i in range(array.ndim))
+    return dataclasses.replace(qarr_padded, qvalue=qarr_padded.qvalue[slices])
 
   # Static scale path (SRQ-like).
   quant_stat = flax_util.get_and_delete_variable('quant_stats', act_name)
@@ -239,7 +237,7 @@ def quantize_act(
       aggregator = _ptq.averaging.SimpleMovingAverage()
       calibration = aggregator.get_calibration(quant_stat)
     else:
-      calibration = _calibrate_on_padded(array, how)
+      calibration = qarray.calibrate(array_padded, how)
       calibration = jax.tree.map(
           lambda x: x.mean(axis=rule.act_batch_axes, keepdims=True), calibration
       )
@@ -251,7 +249,10 @@ def quantize_act(
   scale = flax_util.get_or_create_param(act_name + '_scale', init)
   if zp is not None:
     zp = flax_util.get_or_create_param(act_name + '_zero_point', lambda: zp)
-  return qarray.quantize_with_scale_zero_point(array, how.qtype, scale.array, zp)
+  
+  qarr_padded = qarray.quantize_with_scale_zero_point(array_padded, how.qtype, scale.array, zp)
+  slices = tuple(slice(0, array.shape[i]) for i in range(array.ndim))
+  return dataclasses.replace(qarr_padded, qvalue=qarr_padded.qvalue[slices])
 
 
 def create_quantized_param(
@@ -263,9 +264,14 @@ def create_quantized_param(
 
   For (name, value, how): returns WithAux containing the quantized QArray and HowToQuantize, and replaces the param in the module.
   """
-  calibration = _calibrate_on_padded(value, how)
+  value_padded = _maybe_pad(value, how.tiled_axes)
+
+  calibration = qarray.calibrate(value_padded, how)
   scale, zp = qarray.compute_scale_zero_point(calibration, how.qtype)
-  qarr = qarray.quantize_with_scale_zero_point(value, how.qtype, scale, zp, how.noise_fn)
+  qarr_padded = qarray.quantize_with_scale_zero_point(value_padded, how.qtype, scale, zp, how.noise_fn)
+  
+  slices = tuple(slice(0, value.shape[i]) for i in range(value.ndim))
+  qarr = dataclasses.replace(qarr_padded, qvalue=qarr_padded.qvalue[slices])
   unboxed = WithAux(qarr, how)
 
   module = flax_util.get_current_module()
