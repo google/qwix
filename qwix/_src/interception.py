@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Intercepts Jax and Flax objects."""
+"""Intercepts Python functions by patching."""
 
 import functools
 import sys
@@ -19,6 +19,7 @@ import threading
 import types
 from typing import Any, Callable, Mapping, TypeAlias
 
+import jax
 from qwix._src import aux_data
 
 Function: TypeAlias = Callable[..., Any]
@@ -44,12 +45,35 @@ def wrap_func_intercepted(
 ) -> Function:
   """Wrap a function in a scope where functions in intercept_map are intercepted.
 
-  The interception is both thread-local and non-recursive, which means
+  We're doing a little bit more than just monkey-patching the attributes of the
+  objects, including
+
+  * The interception is both thread-local and non-recursive, which means
     * the interception of one thread won't affect another thread.
     * calling an intercepted function inside another intercepted function will
       not trigger the double interception.
     * the original functions will be restored when the replaced functions are
       called.
+
+  * We try to patch the code object of a function rather than the function
+    itself. This allows us to patch all the aliases of a function, e.g.
+    patching jax.nn.gelu will also affect flax.linen.gelu.
+
+    These can be patched by replacing their code object:
+      * global functions, e.g. jax.lax.sin
+      * unbound methods, e.g. jax.numpy.ufunc.__call__. These don't have to be
+        patched through code objects, but it's hard to distinguish them from
+        global functions. These also includes static methods.
+    These cannot:
+      * callable objects, e.g. a PjitFunction object like jnp.sin.
+      * bound methods, e.g. jax.lax.sin_p.bind. They have __code__ attribute,
+        but cannot be set. These also includes class methods.
+      * functions with freevars.
+
+  * To support patching PjitFunction object, we disable JIT if any of those
+    functions are intercepted, and patch the _fun.__code__ attributes instead.
+    Note that replacing _fun attribute is not sufficient because it's not
+    actually used.
 
   Args:
     func: The function to wrap.
@@ -78,87 +102,98 @@ def wrap_func_intercepted(
       return func(*args, **kwargs)
 
     intercept_map = dict(get_intercept_map())
-    # Ensure that the names in the intercept_map are valid and get the original
-    # functions.
-    origin_map = _install({name: None for name in intercept_map})
 
-    # NOTE: the current implementation patches the code object of a function to
-    # rather than the function itself. This allows us to patch all the aliases
-    # of a function, e.g. jax.nn.gelu and flax.linen.gelu.
-    #
-    # These can be patched by replacing their code object:
-    #   * global functions, e.g. jax.lax.sin
-    #   * unbound methods, e.g. jax.numpy.ufunc.__call__. These don't have to be
-    #     patched through code objects, but it's hard to distinguish them from
-    #     global functions. These also includes static methods.
-    # These cannot:
-    #   * callable objects, e.g. a PjitFunction object jnp.sin.
-    #   * bound methods, e.g. jax.lax.sin_p.bind. They have __code__ attribute,
-    #     but cannot be set. These also includes class methods.
-    #   * functions with freevars.
-    #
-    # It's also possible to patch a PjitFunction object by replacing its
-    # _fun.__code__ attributes and wrapping everything in a jax.disable_jit()
-    # scope. However, it's not widely needed and not supported yet.
-    #
-    # In case of patching the code object,
-    #      origin_map: "jax.lax.sin.__code__" => the original code object
-    #      origin_fns: "jax.lax.sin.__code__" => a copy of the original function
-    #   intercept_map: "jax.lax.sin.__code__" => the intercepted function
-    # and the intercepted function will be converted to a code object through
-    # _fn_to_code when being prepared.
+    # Collect the original attributes used for restoration. This also ensures
+    # that the names in the intercept_map are valid.
+    original_map = _install({name: None for name in intercept_map})
 
-    # Modify the intercept_map to try to patch the code objects of functions.
-    origin_fns = {}  # stores the original functions in case of patching code.
-    for name, fn in list(origin_map.items()):
+    # Rewrite PjitFunction object to _fun, which will be further rewritten to
+    # code object below.
+    need_to_disable_jit = False
+    for name, fn in list(original_map.items()):
+      if isinstance(fn, jax.jaxlib._jax.PjitFunction):  # pylint: disable=protected-access
+        original_map[name + "._fun"] = original_map.pop(name)._fun  # pylint: disable=protected-access
+        intercept_map[name + "._fun"] = intercept_map.pop(name)
+        need_to_disable_jit = True
+
+    # Check if JIT is already disabled.
+    if jax.config.jax_disable_jit:
+      need_to_disable_jit = False
+
+    # Rewrite functions to code objects. We're still storing functions instead
+    # of code objects in original_map and intercept_map here, because we need
+    # them to be callable but code objects are not.
+    #
+    # For example, when patching jax.lax.sin,
+    #   original_map: "jax.lax.sin.__code__" => a copy of the original function,
+    #                 used for calling the original function.
+    #   intercept_map: "jax.lax.sin.__code__" => the intercept function, which
+    #                  will be converted to a code object through _fn_to_code.
+    for name, fn in list(original_map.items()):
       if isinstance(fn, types.FunctionType) and not fn.__code__.co_freevars:
-        origin_map.pop(name)
-        origin_map[name + ".__code__"] = fn.__code__
-        origin_fns[name + ".__code__"] = _copy_fn(fn)
+        # _copy_fn is needed because the original function will be modified
+        # in place.
+        original_map[name + ".__code__"] = _copy_fn(original_map.pop(name))
         intercept_map[name + ".__code__"] = intercept_map.pop(name)
 
-    # Wrap the intercepting functions so that unrelated threads and recursive
-    # calls get redirected to the original functions. Also convert the functions
-    # to code objects if needed.
-    def prepare(fn, name):
-      @functools.wraps(fn)
-      def wrapper(*args, **kwargs):
-        this_thread = threading.get_ident()
-        enabled = _intercepted_threads.get((this_thread, interceptor_id), False)
-        if not enabled:
-          if name.endswith(".__code__"):
-            return origin_fns[name](*args, **kwargs)
-          return origin_map[name](*args, **kwargs)
+    # Implement thread-local and non-recursive interception.
+    for name, fn in intercept_map.items():
+      intercept_map[name] = _wrap_to_call_original_if_needed(
+          interceptor_id, original_map[name], fn
+      )
 
-        # Temporarily disable the interception for recursive calls.
-        _intercepted_threads[(this_thread, interceptor_id)] = False
-        try:
-          return fn(*args, **kwargs)
-        finally:
-          _intercepted_threads[(this_thread, interceptor_id)] = True
-
+    # Convert the functions to code objects if needed before _install.
+    # Also check if we accidentally intercept a code object multiple times.
+    seen_code_objects = set()
+    for name, fn in intercept_map.items():
       if name.endswith(".__code__"):
-        # We're patching the code object of a function.
-        return _fn_to_code(wrapper)
-      return wrapper
-
-    intercept_map = {
-        name: prepare(fn, name) for name, fn in intercept_map.items()
-    }
+        intercept_map[name] = _fn_to_code(fn)
+        original_map[name] = original_map[name].__code__
+        if original_map[name] in seen_code_objects:
+          raise ValueError(f"Intercept same code object: {original_map}")
+        seen_code_objects.add(original_map[name])
 
     # Apply the input transform.
     args, kwargs = input_transform(args, kwargs)
 
     _intercepted_threads[(this_thread, interceptor_id)] = True
     _install(intercept_map)
+    if need_to_disable_jit:
+      jax.config.update("jax_disable_jit", True)
     try:
       output = func(*args, **kwargs)
     finally:
-      _install(origin_map)
+      if need_to_disable_jit:
+        jax.config.update("jax_disable_jit", False)
+      _install(original_map)
       _intercepted_threads.pop((this_thread, interceptor_id))
 
     # Apply the output transform.
     return output_transform(output)
+
+  return wrapper
+
+
+def _wrap_to_call_original_if_needed(
+    interceptor_id: int, original_fn: Function, intercept_fn: Function
+) -> Function:
+  """Check and decide whether to call the original or the intercepted function."""
+  # It's unclear but we cannot return a functools.partial object here, otherwise
+  # the test_intercept_class_method will fail.
+
+  @functools.wraps(original_fn)
+  def wrapper(*args, **kwargs):
+    # Check if we should call the original function.
+    key = (threading.get_ident(), interceptor_id)
+    if not _intercepted_threads.get(key, False):
+      return original_fn(*args, **kwargs)
+
+    # Temporarily disable the interception for recursive calls.
+    _intercepted_threads[key] = False
+    try:
+      return intercept_fn(*args, **kwargs)
+    finally:
+      _intercepted_threads[key] = True
 
   return wrapper
 
