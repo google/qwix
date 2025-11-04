@@ -1,27 +1,37 @@
-"""PTQ provider that pads to tile before quantization and compute.
-
-Pads inputs on tiled axes and delegates quantization to the core PTQ provider.
-"""
+# Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 from __future__ import annotations
 
-from typing import Callable
 import dataclasses
+from typing import Callable
 
+import flax
 import jax
 from jax import numpy as jnp
-
 from qwix._src import flax_util
 from qwix._src import qconfig
-from qwix._src.core import qarray
 from qwix._src.core import dot_general as core_dot
 from qwix._src.core import einsum as core_einsum
-import flax
-from qwix._src.providers.ptq import PtqProvider, WithAux
+from qwix._src.core import qarray
 from qwix._src.providers import ptq as _ptq
+from qwix._src.providers.ptq import PtqProvider, WithAux
 
 
-def _compute_pad_width(array: jax.Array, tiled_axes: dict[int, int | float]) -> list[tuple[int, int]]:
+def _compute_pad_width(
+    array: jax.Array, tiled_axes: dict[int, int | float]
+) -> list[tuple[int, int]]:
   """End-padding widths so each tiled axis is divisible by tile size."""
   nd = array.ndim
   pad_width = [(0, 0)] * nd
@@ -47,6 +57,7 @@ def _maybe_pad(x: jax.Array, tiled_axes: dict[int, int | float]) -> jax.Array:
     x = jnp.pad(x, pw, constant_values=0)
   return x
 
+
 def _pad_preserve_metadata(x, tiled_axes: dict[int, int | float]):
   """Pad while preserving linen/nnx metadata wrappers if present."""
   if isinstance(x, (flax.linen.meta.AxisMetadata, flax.nnx.Variable)):
@@ -56,6 +67,7 @@ def _pad_preserve_metadata(x, tiled_axes: dict[int, int | float]):
   else:
     return _maybe_pad(x, tiled_axes)
 
+
 class PtqPadProvider(PtqProvider):
   """Ensures tiling divisibility by padding pre-quantization."""
 
@@ -63,7 +75,7 @@ class PtqPadProvider(PtqProvider):
       self,
       lhs: jax.Array,
       rhs: jax.Array | WithAux[qarray.QArray],
-    get_how: Callable[[bool, object, str], qarray.HowToQuantize],
+      get_how: Callable[[bool, object, str], qarray.HowToQuantize],
       rule: qconfig.QuantizationRule,
       op_id: str,
   ) -> tuple[jax.Array | qarray.QArray, jax.Array | qarray.QArray]:
@@ -74,7 +86,9 @@ class PtqPadProvider(PtqProvider):
       rhs_how = rhs.how
       rhs = rhs.array
     elif (weight_name := flax_util.find_param(rhs)) is not None:
-      rhs_how = get_how(False, rule.weight_qtype, rule.weight_calibration_method)
+      rhs_how = get_how(
+          False, rule.weight_qtype, rule.weight_calibration_method
+      )
       rhs = create_quantized_param(weight_name, rhs, rhs_how).array
     elif rule.act_qtype is not None:
       rhs_how = get_how(False, rule.act_qtype, rule.act_calibration_method)
@@ -92,7 +106,9 @@ class PtqPadProvider(PtqProvider):
     # Pad rhs
     if rhs_how and rhs_how.tiled_axes:
       if isinstance(rhs, qarray.QArray):
-        padded_qvalue = _pad_preserve_metadata(rhs.qvalue, dict(rhs_how.tiled_axes))
+        padded_qvalue = _pad_preserve_metadata(
+            rhs.qvalue, dict(rhs_how.tiled_axes)
+        )
         rhs = dataclasses.replace(rhs, qvalue=padded_qvalue)
       else:
         rhs = _maybe_pad(rhs, dict(rhs_how.tiled_axes))
@@ -100,7 +116,9 @@ class PtqPadProvider(PtqProvider):
     # Pad lhs
     if lhs_how and lhs_how.tiled_axes:
       if isinstance(lhs, qarray.QArray):
-        padded_qvalue = _pad_preserve_metadata(lhs.qvalue, dict(lhs_how.tiled_axes))
+        padded_qvalue = _pad_preserve_metadata(
+            lhs.qvalue, dict(lhs_how.tiled_axes)
+        )
         lhs = dataclasses.replace(lhs, qvalue=padded_qvalue)
       else:
         lhs = _maybe_pad(lhs, dict(lhs_how.tiled_axes))
@@ -131,7 +149,10 @@ class PtqPadProvider(PtqProvider):
     # Compute how-to-quantize.
     get_how = lambda for_lhs, qtype, calib: core_dot.get_how_to_quantize(
         dimension_numbers=dimension_numbers,
-        ndims=(len(lhs.shape), len((rhs.array if isinstance(rhs, WithAux) else rhs).shape)),
+        ndims=(
+            len(lhs.shape),
+            len((rhs.array if isinstance(rhs, WithAux) else rhs).shape),
+        ),
         for_lhs=for_lhs,
         qtype=qtype,
         tile_size=rule.tile_size,
@@ -181,11 +202,12 @@ class PtqPadProvider(PtqProvider):
     return core_einsum.einsum(einsum_str, lhs, rhs)
 
   def get_intercept_map(self):
-  # Override maps for dot_general/einsum, keep others from PtqProvider.
+    # Override maps for dot_general/einsum, keep others from PtqProvider.
     return super().get_intercept_map() | {
         'jax.lax.dot_general': self.dot_general,
         'jax.numpy.einsum': self.einsum,
     }
+
 
 def quantize_act(
     array: jax.Array,
@@ -197,6 +219,7 @@ def quantize_act(
   array_padded = _maybe_pad(array, how.tiled_axes)
   return _ptq.quantize_act(array_padded, how, rule, act_name)
 
+
 def create_quantized_param(
     name: str, value: jax.Array, how: qarray.HowToQuantize
 ) -> WithAux[qarray.QArray]:
@@ -204,12 +227,15 @@ def create_quantized_param(
   value_padded = _maybe_pad(value, how.tiled_axes)
   return _ptq.create_quantized_param(name, value_padded, how)
 
+
 def _pad_params_like_abstract(params, abstract_quantized_params):
   """Pad params along tiled axes according to abstract WithAux.how."""
+
   def get_value_from_path(obj, path: tuple[str, ...]):
     for key in path:
       obj = obj[key] if isinstance(obj, dict) else getattr(obj, key)
     return obj
+
   padded = {}
   for path, param in flax.traverse_util.flatten_dict(params).items():
     abs_param = get_value_from_path(abstract_quantized_params, path)
@@ -218,6 +244,7 @@ def _pad_params_like_abstract(params, abstract_quantized_params):
     padded[path] = param
   return flax.traverse_util.unflatten_dict(padded)
 
+
 def quantize_params(
     params,
     abstract_quantized_params,
@@ -225,4 +252,6 @@ def quantize_params(
 ):
   """Pad params along tiled axes then delegate to base quantize_params."""
   params_padded = _pad_params_like_abstract(params, abstract_quantized_params)
-  return _ptq.quantize_params(params_padded, abstract_quantized_params, quant_stats)
+  return _ptq.quantize_params(
+      params_padded, abstract_quantized_params, quant_stats
+  )
