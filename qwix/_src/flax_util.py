@@ -28,19 +28,6 @@ import jax
 class QuantStat(nnx.Variable):
   """NNX variable that stores quantization statistics."""
 
-  def __setattr__(self, name: str, value: Any):
-    # Disables the unnecessary check on self._trace_state in
-    # nnx.Variable.__setattr__, see https://github.com/google/flax/issues/4847.
-    if (
-        name == 'value'
-        or name == 'raw_value'
-        or name == '_var_metadata'
-        or name == '_trace_state'
-    ):
-      object.__setattr__(self, name, value)
-    else:
-      self._var_metadata[name] = value
-
 
 def should_update_quant_stats() -> bool:
   """Returns whether the current module should update the quantization statistics."""
