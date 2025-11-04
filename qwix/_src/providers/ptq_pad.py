@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""PTQ Provider that pads inputs to be divisible by tile sizes."""
+
 from __future__ import annotations
 
 import dataclasses
@@ -25,8 +27,11 @@ from qwix._src import qconfig
 from qwix._src.core import dot_general as core_dot
 from qwix._src.core import einsum as core_einsum
 from qwix._src.core import qarray
-from qwix._src.providers import ptq as _ptq
-from qwix._src.providers.ptq import PtqProvider, WithAux
+from qwix._src.providers import ptq
+
+
+WithAux = ptq.WithAux
+PtqProvider = ptq.PtqProvider
 
 
 def _compute_pad_width(
@@ -95,7 +100,6 @@ class PtqPadProvider(PtqProvider):
       rhs = quantize_act(rhs, rhs_how, rule, op_id + '_rhs')
 
     # lhs (activation)
-    lhs_how = None
     if rule.act_qtype is not None:
       lhs_how = get_how(True, rule.act_qtype, rule.act_calibration_method)
       lhs = quantize_act(lhs, lhs_how, rule, op_id + '_lhs')
@@ -170,7 +174,8 @@ class PtqPadProvider(PtqProvider):
       *operands: jax.Array,
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
-      _dot_general: Callable[..., jax.Array] = jax.lax.dot_general,  # noqa: N803
+      _dot_general: Callable[..., jax.Array] = jax.lax.dot_general,
+      # noqa: N803
       out_sharding=None,
   ) -> jax.Array:
     rule, op_id = self._get_current_rule_and_op_id('einsum')
@@ -217,7 +222,7 @@ def quantize_act(
 ) -> qarray.QArray:
   """Pad then delegate to base PTQ activation quantization (no slicing)."""
   array_padded = _maybe_pad(array, how.tiled_axes)
-  return _ptq.quantize_act(array_padded, how, rule, act_name)
+  return ptq.quantize_act(array_padded, how, rule, act_name)
 
 
 def create_quantized_param(
@@ -225,7 +230,7 @@ def create_quantized_param(
 ) -> WithAux[qarray.QArray]:
   """Pad then delegate to base PTQ param quantization (no slicing)."""
   value_padded = _maybe_pad(value, how.tiled_axes)
-  return _ptq.create_quantized_param(name, value_padded, how)
+  return ptq.create_quantized_param(name, value_padded, how)
 
 
 def _pad_params_like_abstract(params, abstract_quantized_params):
@@ -252,6 +257,6 @@ def quantize_params(
 ):
   """Pad params along tiled axes then delegate to base quantize_params."""
   params_padded = _pad_params_like_abstract(params, abstract_quantized_params)
-  return _ptq.quantize_params(
+  return ptq.quantize_params(
       params_padded, abstract_quantized_params, quant_stats
   )

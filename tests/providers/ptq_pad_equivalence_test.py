@@ -24,7 +24,7 @@ from qwix._src.providers import ptq_pad
 
 D = 2880
 tile_size = 256
-D_padded = ((D + tile_size - 1) // tile_size) * tile_size
+D_PADDED = ((D + tile_size - 1) // tile_size) * tile_size
 T, E, F = 16, 32, 5760
 
 
@@ -35,8 +35,8 @@ class PtqPadEquivalenceTest(absltest.TestCase):
     w = jax.random.normal(jax.random.key(1), (E, D, F), dtype=jnp.float32)
 
     # Pad the weight for PTQ
-    w_padded = jnp.pad(w, ((0, 0), (0, D_padded - D), (0, 0)))
-    x_padded = jnp.pad(x, ((0, 0), (0, D_padded - D)))
+    w_padded = jnp.pad(w, ((0, 0), (0, D_PADDED - D), (0, 0)))
+    x_padded = jnp.pad(x, ((0, 0), (0, D_PADDED - D)))
 
     rule = qconfig.QuantizationRule(
         module_path='.*',
@@ -89,7 +89,7 @@ class PtqPadEquivalenceTest(absltest.TestCase):
     pad_vars = pad_qmodel.init(jax.random.key(0), x)
     result_pad = pad_qmodel.apply(pad_vars, x)
 
-    ptq_model = EinsumModel(E, D_padded, F, w_padded)
+    ptq_model = EinsumModel(E, D_PADDED, F, w_padded)
     base_qmodel = qwix_model.quantize_model(ptq_model, ptq.PtqProvider([rule]))
     base_vars = base_qmodel.init(jax.random.key(1), x_padded)
     result_ptq = base_qmodel.apply(base_vars, x_padded)
@@ -103,8 +103,8 @@ class PtqPadEquivalenceTest(absltest.TestCase):
     x = jax.random.normal(jax.random.key(0), (T, D), dtype=jnp.float32)
     w = jax.random.normal(jax.random.key(1), (E, D, F), dtype=jnp.float32)
 
-    w_padded = jnp.pad(w, ((0, 0), (0, D_padded - D), (0, 0)))
-    x_padded = jnp.pad(x, ((0, 0), (0, D_padded - D)))
+    w_padded = jnp.pad(w, ((0, 0), (0, D_PADDED - D), (0, 0)))
+    x_padded = jnp.pad(x, ((0, 0), (0, D_PADDED - D)))
 
     rule = qconfig.QuantizationRule(
         module_path='.*',
@@ -157,7 +157,7 @@ class PtqPadEquivalenceTest(absltest.TestCase):
     pad_vars = pad_qmodel.init(jax.random.key(0), x)
     result_pad = pad_qmodel.apply(pad_vars, x)
 
-    ptq_model = DotModel(E, D_padded, F, w_padded)
+    ptq_model = DotModel(E, D_PADDED, F, w_padded)
     base_qmodel = qwix_model.quantize_model(ptq_model, ptq.PtqProvider([rule]))
     base_vars = base_qmodel.init(jax.random.key(1), x_padded)
     result_ptq = base_qmodel.apply(base_vars, x_padded)
