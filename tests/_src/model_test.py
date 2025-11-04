@@ -34,10 +34,12 @@ class NnModel(nn.Module):
 class CustomProvider(qconfig.QuantizationProvider):
 
   def get_intercept_map(self) -> Mapping[str, Callable[..., Any]]:
-    return {"jax.numpy.sin": lambda x: x + 10}
+    return {
+        "jax.numpy.sin": lambda x: x + 10,
+        "jax.numpy.cos": lambda x: x + 20,
+    }
 
   def process_model_output(self, method_name: str, model_output: Any) -> Any:
-    assert method_name == "sin"
     return model_output + 100
 
 
@@ -45,7 +47,7 @@ class ModelTest(absltest.TestCase):
 
   def test_quantize_linen_model(self):
     quantized = model.quantize_linen_model(
-        NnModel(), CustomProvider([]), methods=["sin"]
+        NnModel(), CustomProvider([]), methods=["sin", "__call__"]
     )
     self.assertEqual(quantized.sin(0), 0)
     self.assertEqual(quantized.apply({}, 0), 110)

@@ -92,7 +92,9 @@ def wrap_func_intercepted(
   @functools.wraps(func)
   def wrapper(*args, **kwargs):
     this_thread = threading.get_ident()
-    interceptor_id = id(get_intercept_map)
+    # In Python, the id of an instance will change every time! i.e.
+    # id(obj.method) != id(obj.method).
+    interceptor_id = hash(get_intercept_map)
 
     # Skip if already intercepted.
     if (this_thread, interceptor_id) in _intercepted_threads:
