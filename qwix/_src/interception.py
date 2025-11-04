@@ -113,7 +113,7 @@ def wrap_func_intercepted(
     # code object below.
     need_to_disable_jit = False
     for name, fn in list(original_map.items()):
-      if isinstance(fn, jax.jaxlib._jax.PjitFunction):  # pylint: disable=protected-access
+      if isinstance(fn, jax._src.lib._jax.PjitFunction):  # pylint: disable=protected-access
         original_map[name + "._fun"] = original_map.pop(name)._fun  # pylint: disable=protected-access
         intercept_map[name + "._fun"] = intercept_map.pop(name)
         need_to_disable_jit = True
