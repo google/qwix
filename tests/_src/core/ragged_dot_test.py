@@ -252,6 +252,26 @@ class RaggedDotTest(parameterized.TestCase):
           group_sizes=(128, 100, 0, 28),
           expected_mae=0.08,
       ),
+      dict(
+          testcase_name='non_basic_tiled_contracting_dim',
+          lhs_shape=(32, 620, 256),
+          lhs_how=qarray.HowToQuantize(
+              qtype=jnp.int8,
+              tiled_axes={2: 64},
+          ),
+          rhs_shape=(32, 4, 256),
+          rhs_how=qarray.HowToQuantize(
+              qtype=jnp.int8,
+              tiled_axes={2: 64},
+          ),
+          group_sizes=(60, 120, 190, 250),
+          expected_mae=0.04,
+          dot_dimension_numbers=jax.lax.RaggedDotDimensionNumbers(
+              dot_dimension_numbers=(((2,), (2,)), ((0,), (0,))),
+              lhs_ragged_dimensions=[1],
+              rhs_group_dimensions=[1],
+          ),
+      ),
   )
   def test_ragged_dot_general(
       self,
@@ -263,7 +283,16 @@ class RaggedDotTest(parameterized.TestCase):
       group_sizes: tuple[int, ...],
       expected_mae: float,
       disable_fast_ragged_dot: bool = False,
+      dot_dimension_numbers: jax.lax.RaggedDotDimensionNumbers = ragged_dot._BASIC_RAGGED_DOT_DIMENSION_NUMBERS,
   ):
+    if (
+        'non_basic_tiled_contracting_dim' in self.id()
+        and jax.default_backend() != 'cpu'
+    ):
+      self.skipTest(
+          'Tiling with pre-existing batch dimensions is only supported on the'
+          ' JAX CPU backend, not on accelerators.'
+      )
     group_sizes = jnp.array(group_sizes)
     lhs_asymmetric = (
         lhs_how.calibration_method == 'minmax' if lhs_how else False
@@ -279,7 +308,7 @@ class RaggedDotTest(parameterized.TestCase):
     @jax.jit
     def _jitted_ragged_dot_general(lhs, rhs, fp_res):
       slow_res = ragged_dot._slow_ragged_dot_general(
-          lhs, rhs, group_sizes, ragged_dot._BASIC_RAGGED_DOT_DIMENSION_NUMBERS
+          lhs, rhs, group_sizes, dot_dimension_numbers
       )
       if disable_fast_ragged_dot:
         fast_res = slow_res
@@ -288,14 +317,16 @@ class RaggedDotTest(parameterized.TestCase):
             lhs,
             rhs,
             group_sizes,
-            ragged_dot._BASIC_RAGGED_DOT_DIMENSION_NUMBERS,
+            dot_dimension_numbers,
         )
       return (
           rel_mae(slow_res, fp_res),
           rel_mae(slow_res, fast_res),
       )
 
-    fp_res = jax.lax.ragged_dot(lhs, rhs, group_sizes)
+    fp_res = jax.lax.ragged_dot_general(
+        lhs, rhs, group_sizes, dot_dimension_numbers
+    )
     fp_mae, fast_mae = _jitted_ragged_dot_general(q_lhs, q_rhs, fp_res)
 
     logging.info('fp_mae=%s fast_mae=%s', fp_mae, fast_mae)

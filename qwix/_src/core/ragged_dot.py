@@ -14,6 +14,7 @@
 
 """Quantized jax.lax.ragged_dot and jax.lax.ragged_dot_general."""
 
+from collections.abc import Collection, Sequence
 import jax
 from jax import numpy as jnp
 from qwix._src.core import numerics
@@ -27,41 +28,65 @@ _BASIC_RAGGED_DOT_DIMENSION_NUMBERS = jax.lax.RaggedDotDimensionNumbers(
     rhs_group_dimensions=[0],
 )
 
-# RaggedDotDimensionNumbers that specify the tiled case.
-_TILED_RAGGED_DOT_DIMENSION_NUMBERS = jax.lax.RaggedDotDimensionNumbers(
-    dot_dimension_numbers=(((2,), (2,)), ((1,), (1,))),
-    lhs_ragged_dimensions=[0],
-    rhs_group_dimensions=[0],
-)
-
 
 def _apply_group_channelwise_scale(
     rhs_scale: jax.Array,
-    lhs: qarray.MaybeQArray,
+    lhs_shape: tuple[int, ...],
     group_sizes: jax.Array,
     dimension_numbers: jax.lax.RaggedDotDimensionNumbers,
     precision: jax.lax.PrecisionLike,
     group_offset: jax.Array | None,
 ) -> jax.Array:
   """Expands the group dimension of rhs_scale using a gather-like op."""
-  (_, _), (lhs_ba, _) = dimension_numbers.dot_dimension_numbers
-  ones_shape = []
-  # Add the ragged dimension.
-  ones_shape.append(lhs.shape[dimension_numbers.lhs_ragged_dimensions[0]])
-  # Add the tile_count dimension if present.
-  for dim in lhs_ba:
-    ones_shape.append(lhs.shape[dim])
-  # Add the contracting dimension.
-  ones_shape.append(1)
+  (lhs_ca, _), _ = dimension_numbers.dot_dimension_numbers
+
+  # Create a `jnp.ones` tensor with the same rank and layout as lhs_val,
+  # but with contracting dimensions set to size 1.
+  ones_shape = list(lhs_shape)
+  for contracting_axis in lhs_ca:
+    ones_shape[contracting_axis] = 1
+  lhs_ones = jnp.ones(tuple(ones_shape), rhs_scale.dtype)
 
   return jax.lax.ragged_dot_general(
-      jnp.ones(tuple(ones_shape), rhs_scale.dtype),
+      lhs_ones,
       rhs_scale,
       group_sizes,
       dimension_numbers,
       precision=precision,
       group_offset=group_offset,
   )
+
+
+def _apply_tiling(
+    contracting_axes: Sequence[int],
+    batch_axes: Sequence[int],
+    tiled_axes: Collection[int],
+) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+  """Apply tiling to dimension numbers.
+
+  Each tiled contracting axis is split into two axes, the first being the new
+  batch axis, and the second being the new contracting axis.
+
+  Args:
+    contracting_axes: The original contracting axes.
+    batch_axes: The original batch axes.
+    tiled_axes: The tiled axes. Must be a subset of contracting_axes.
+
+  Returns:
+    A tuple of (new_ca, new_ba, sum_axes).
+  """
+  new_ca = [a + sum(t <= a for t in tiled_axes) for a in contracting_axes]
+  new_ba = [a + sum(t < a for t in tiled_axes) for a in batch_axes]
+  # We choose to insert the tile_count axes to the end of the batch axes.
+  # Alternatively, we could insert them to the beginning or to the middle,
+  # as long as lhs and rhs use the same order.
+  new_ba += [
+      a + sum(t < a for t in tiled_axes)
+      for a in contracting_axes
+      if a in tiled_axes
+  ]
+  sum_axes = range(len(batch_axes), len(new_ba))
+  return tuple(new_ca), tuple(new_ba), tuple(sum_axes)
 
 
 def _ragged_get_scale_transpose(
@@ -95,31 +120,6 @@ def _ragged_get_scale_transpose(
   return lhs_scale_transpose, rhs_scale_transpose
 
 
-def _tile_operand(
-    operand: qarray.MaybeQArray,
-    tiled_axes_spec: dict[int, int],
-    ca: int,
-) -> qarray.MaybeQArray:
-  """Tile the operand for ragged_dot."""
-  # Case 1. Not Quantized, return split jax.Array.
-  if not isinstance(operand, qarray.QArray):
-    # LHS: [M, K] -> [M, tile_count, tile_size]
-    # RHS: [G, K, N] -> [G, tile_count, tile_size, N]
-    return qarray.split_axis(operand, tiled_axes_spec)
-
-  # Case 2. Quantized, return split QArray.
-  assert operand.zero_point is None, 'zero_point not supported for ragged_dot'
-  # LHS: [M, K] -> [M, tile_count, tile_size]
-  # RHS: [G, K, N] -> [G, tile_count, tile_size, N]
-  new_qvalue = qarray.split_axis(operand.qvalue, tiled_axes_spec)
-  # tiled LHS: [M, tile_count] -> [M, tile_count, 1]
-  # tiled RHS: [G, tile_count, N] -> [G, tile_count, 1, N]
-  # non-tiled LHS: [M, 1] -> [M, 1, 1]
-  # non-tiled RHS: [G, 1, N] -> [G, 1, 1, N]
-  new_scale = qarray.split_axis(operand.scale, {ca: 1})
-  return qarray.QArray(new_qvalue, new_scale, None, operand.qtype)
-
-
 def _fast_ragged_dot_general(
     lhs: qarray.MaybeQArray,
     rhs: qarray.MaybeQArray,
@@ -130,43 +130,59 @@ def _fast_ragged_dot_general(
     group_offset: jax.Array | None = None,
 ):
   """Quantized ragged_dot_general with a fast path."""
-  is_tiled_path = False
-  if dimension_numbers == _BASIC_RAGGED_DOT_DIMENSION_NUMBERS:
-    # Tiling is only implemented for the basic ragged_dot case.
-    ca = 1
-    lhs_tiled_axes = (
-        qarray.get_tiled_axes(lhs) if isinstance(lhs, qarray.QArray) else {}
-    )
-    rhs_tiled_axes = (
-        qarray.get_tiled_axes(rhs) if isinstance(rhs, qarray.QArray) else {}
-    )
+  if isinstance(lhs, qarray.QArray):
+    lhs_val = lhs.qvalue
+    lhs_scale = lhs.scale
+    lhs_tiled_axes = qarray.get_tiled_axes(lhs)
+  else:
+    lhs_val = lhs
+    lhs_scale = None
+    lhs_tiled_axes = {}
+  if isinstance(rhs, qarray.QArray):
+    rhs_val = rhs.qvalue
+    rhs_scale = rhs.scale
+    rhs_tiled_axes = qarray.get_tiled_axes(rhs)
+  else:
+    rhs_val = rhs
+    rhs_scale = None
+    rhs_tiled_axes = {}
 
-    if ca in lhs_tiled_axes or ca in rhs_tiled_axes:
-      is_tiled_path = True
-      lhs_tile_size = lhs_tiled_axes.get(ca)
-      rhs_tile_size = rhs_tiled_axes.get(ca)
-      if lhs_tile_size and rhs_tile_size and lhs_tile_size != rhs_tile_size:
-        raise ValueError(
-            'Contracting axes for ragged_dot must be tiled with the same size.'
-        )
-      tile_size = lhs_tile_size or rhs_tile_size
-      tiled_axes_spec = {ca: tile_size}
+  (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dimension_numbers.dot_dimension_numbers
 
-      lhs = _tile_operand(lhs, tiled_axes_spec, ca)
-      rhs = _tile_operand(rhs, tiled_axes_spec, ca)
-      dimension_numbers = _TILED_RAGGED_DOT_DIMENSION_NUMBERS
+  # Figure out the tiled axes to use for the dot_general. For greater
+  # flexibility, we allow a non-tiled axis to be contracted with a tiled axis.
+  # However, if both axes are tiled, their tile sizes must be the same.
+  lhs_tiled_ca = {}
+  rhs_tiled_ca = {}
+  for l, r in zip(lhs_ca, rhs_ca):
+    lhs_tile_size = lhs_tiled_axes.get(l)
+    rhs_tile_size = rhs_tiled_axes.get(r)
+    if lhs_tile_size and rhs_tile_size and lhs_tile_size != rhs_tile_size:
+      raise ValueError(
+          'Contracting axes must be tiled with the same tile size.'
+          f' {lhs_tiled_axes=} {rhs_tiled_axes=} {dimension_numbers=}'
+      )
+    if lhs_tile_size or rhs_tile_size:
+      lhs_tiled_ca[l] = lhs_tile_size or rhs_tile_size
+      rhs_tiled_ca[r] = lhs_tile_size or rhs_tile_size
 
-  lhs_val = lhs.qvalue if isinstance(lhs, qarray.QArray) else lhs
-  rhs_val = rhs.qvalue if isinstance(rhs, qarray.QArray) else rhs
-  lhs_scale = lhs.scale if isinstance(lhs, qarray.QArray) else None
-  rhs_scale = rhs.scale if isinstance(rhs, qarray.QArray) else None
+  # Split lhs/rhs_value for tiled axes.
+  lhs_val = qarray.split_axis(lhs_val, lhs_tiled_ca)
+  rhs_val = qarray.split_axis(rhs_val, rhs_tiled_ca)
 
-  lhs_scale_transpose, rhs_scale_transpose = _ragged_get_scale_transpose(
-      dimension_numbers, (len(lhs.shape), len(rhs.shape))
+  lhs_ca, lhs_ba, sum_axes = _apply_tiling(lhs_ca, lhs_ba, lhs_tiled_ca)
+  rhs_ca, rhs_ba, _ = _apply_tiling(rhs_ca, rhs_ba, rhs_tiled_ca)
+  dot_dimension_numbers = (lhs_ca, rhs_ca), (lhs_ba, rhs_ba)
+  dimension_numbers = jax.lax.RaggedDotDimensionNumbers(
+      dot_dimension_numbers=dot_dimension_numbers,
+      lhs_ragged_dimensions=dimension_numbers.lhs_ragged_dimensions,
+      rhs_group_dimensions=dimension_numbers.rhs_group_dimensions,
   )
+
   preferred_element_type, result_type = qarray.get_accumulator_and_result_type(
       lhs, rhs, preferred_element_type=preferred_element_type
   )
+
   out = jax.lax.ragged_dot_general(
       lhs_val,
       rhs_val,
@@ -177,10 +193,15 @@ def _fast_ragged_dot_general(
       group_offset=group_offset,
   )
 
+  lhs_scale_transpose, rhs_scale_transpose = _ragged_get_scale_transpose(
+      dimension_numbers, (len(lhs_val.shape), len(rhs_val.shape))
+  )
   if lhs_scale is not None:
+    lhs_scale = qarray.split_axis(lhs_scale, {a: 1 for a in lhs_tiled_ca})
     lhs_scale = qarray.transpose_array(lhs_scale, lhs_scale_transpose)
     out = qarray.call_with_generic_broadcast(jnp.multiply, out, lhs_scale)
   if rhs_scale is not None:
+    rhs_scale = qarray.split_axis(rhs_scale, {a: 1 for a in rhs_tiled_ca})
     # Check if the scale has a group dimension that needs special handling.
     if (
         dimension_numbers.rhs_group_dimensions
@@ -188,7 +209,7 @@ def _fast_ragged_dot_general(
     ):
       rhs_scale = _apply_group_channelwise_scale(
           rhs_scale,
-          lhs,
+          lhs_val.shape,
           group_sizes,
           dimension_numbers,
           precision,
@@ -198,9 +219,9 @@ def _fast_ragged_dot_general(
       rhs_scale = qarray.transpose_array(rhs_scale, rhs_scale_transpose)
     out = qarray.call_with_generic_broadcast(jnp.multiply, out, rhs_scale)
 
-  if is_tiled_path:
-    # [tile_count, M, N] -> [M, N]
-    out = jnp.sum(out, axis=0)
+  if sum_axes:
+    # [tile_count1, tile_count2, ..., M, N] -> [M, N]
+    out = jnp.sum(out, axis=sum_axes)
 
   return out.astype(result_type)
 
