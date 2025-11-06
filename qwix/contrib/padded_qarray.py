@@ -1,38 +1,32 @@
-from __future__ import annotations
+"""Provides a QArray implementation that supports padding to tile sizes.
 
-"""Self-contained padded QArray + dot_general shim for easy PTQ wiring.
-
-This module implements a padded-aware QArray variant and dot_general wrappers
-that pad QArray operands on the fly, then delegates to the base fast/slow/loop
-paths. You can drop this in and use PaddedPtqProvider to route PTQ to this
-module without modifying core code.
+This module extends the base qwix.QArray with `PaddedQArray`, which
+automatically pads arrays to be multiples of specified tile sizes along
+certain axes before quantization and dequantization. It also provides
+wrappers for `dot_general` and PTQ functions to utilize this padding
+behavior.
 """
 
-from functools import partial
-from typing import Any, Mapping, TypeAlias
+from __future__ import annotations
+
+import functools
 import os
 import sys
+from typing import Any, Mapping, TypeAlias
 
 import flax.struct
 import jax
-from jax import numpy as jnp
-
+import jax.numpy as jnp
 import qwix
+from qwix._src.core import dot_general as core_dot_general
 from qwix._src.core import numerics
-from qwix._src.core.qarray import (
-    QArray,
-    HowToQuantize,
-    calibrate,
-    call_with_generic_broadcast,
-    compute_scale_zero_point,
-    get_tiled_axes as _base_get_tiled_axes,
-    validate_qarray,
-)
-from qwix._src.core.dot_general import (
-  _fast_dot_general,
-  _slow_dot_general,
-)
+from qwix._src.core import qarray
 from qwix._src.providers import ptq as _ptq
+
+
+calibrate = qarray.calibrate
+HowToQuantize = qarray.HowToQuantize
+
 
 # ---------------------------
 # Padded QArray implementation
@@ -40,7 +34,7 @@ from qwix._src.providers import ptq as _ptq
 
 
 @flax.struct.dataclass
-class PaddedQArray(QArray):
+class PaddedQArray(qarray.QArray):
   """Quantized array supporting padding and tracking original tile sizes.
 
   Additional Attributes:
@@ -52,10 +46,12 @@ class PaddedQArray(QArray):
   )
 
 
-MaybeQArray: TypeAlias = jax.Array | QArray | PaddedQArray
+MaybeQArray: TypeAlias = jax.Array | qarray.QArray | PaddedQArray
 
 
-def pad_to_tile(array: jax.Array, tiled_axes: Mapping[int, int | float]) -> jax.Array:
+def pad_to_tile(
+    array: jax.Array, tiled_axes: Mapping[int, int | float]
+) -> jax.Array:
   """Pads array along tiled axes so each dimension is a multiple of tile size."""
   if not tiled_axes:
     return array
@@ -76,8 +72,8 @@ def get_tiled_axes(array: MaybeQArray) -> Mapping[int, int] | float:
   """Gets the tiled axes from a MaybeQArray."""
   if isinstance(array, PaddedQArray):
     return dict(array.tile_axes)
-  if isinstance(array, QArray):
-    return _base_get_tiled_axes(array)
+  if isinstance(array, qarray.QArray):
+    return qarray.get_tiled_axes(array)
   return {}
 
 
@@ -94,6 +90,19 @@ def quantize_with_scale_zero_point(
 
   Applies quantization to padded values and stores tile_axes.
   Optionally saves qvalues in padded form based on env `QARRAY_STORE_PADDED`.
+
+  Args:
+    array: The array to quantize.
+    qtype: The quantized dtype.
+    scale: The scale factor for quantization.
+    zero_point: The zero point for quantization, or None.
+    noise_fn: Optional function to add noise during quantization.
+    tile_axes: Mapping from axis to tile size for padding.
+    original_shape: The original shape of the array before padding, if
+      applicable.
+
+  Returns:
+    A PaddedQArray instance.
   """
   if not numerics.should_quantize(array.dtype):
     raise ValueError(f'Refuse to quantize: {array.dtype}')
@@ -108,9 +117,9 @@ def quantize_with_scale_zero_point(
 
   tile_axes = tile_axes or {}
   padded_array = pad_to_tile(array, tile_axes)
-  qvalue = call_with_generic_broadcast(jnp.divide, padded_array, scale)
+  qvalue = qarray.call_with_generic_broadcast(jnp.divide, padded_array, scale)
   if zero_point is not None:
-    qvalue = call_with_generic_broadcast(
+    qvalue = qarray.call_with_generic_broadcast(
         jnp.add, qvalue, zero_point.astype(qvalue.dtype)
     )
   qvalue = numerics.convert_to(qvalue, qtype, noise_fn)
@@ -127,7 +136,7 @@ def quantize(array: jax.Array, how: HowToQuantize) -> PaddedQArray:
   """Quantizes an array using a dynamic range with padding support."""
   padded_array = pad_to_tile(array, how.tiled_axes)
   calibration = calibrate(padded_array, how)
-  scale, zero_point = compute_scale_zero_point(calibration, how.qtype)
+  scale, zero_point = qarray.compute_scale_zero_point(calibration, how.qtype)
   return quantize_with_scale_zero_point(
       padded_array,
       how.qtype,
@@ -141,22 +150,32 @@ def quantize(array: jax.Array, how: HowToQuantize) -> PaddedQArray:
 
 def dequantize(array: PaddedQArray) -> jax.Array:
   """Dequantizes an array. The reverse of |quantize|."""
-  validate_qarray(array)
+  qarray.validate_qarray(array)
   padded_qvalue = pad_to_tile(array.qvalue, dict(array.tile_axes))
   qvalue = numerics.convert_from(padded_qvalue, array.qtype)
   qvalue = qvalue.astype(array.scale.dtype)
   if array.zero_point is not None:
-    qvalue = call_with_generic_broadcast(
+    qvalue = qarray.call_with_generic_broadcast(
         jnp.subtract, qvalue, array.zero_point.astype(qvalue.dtype)
     )
-  return call_with_generic_broadcast(jnp.multiply, qvalue, array.scale)
+  return qarray.call_with_generic_broadcast(jnp.multiply, qvalue, array.scale)
 
 
 # ---------------------------
 # dot_general wrappers
 # ---------------------------
 
+
 def pad_if_needed(arr):
+  """Pads the qvalue of a PaddedQArray if tile_axes are present.
+
+  Args:
+    arr: The array to potentially pad. Can be a PaddedQArray or other types.
+
+  Returns:
+    The array with its qvalue padded if it's a PaddedQArray with tile_axes,
+    otherwise the original array.
+  """
   if isinstance(arr, PaddedQArray):
     tile_axes = get_tiled_axes(arr)
     if tile_axes:
@@ -171,6 +190,7 @@ def pad_if_needed(arr):
         )
   return arr
 
+
 def dot_general(
     lhs: MaybeQArray,
     rhs: MaybeQArray,
@@ -183,12 +203,25 @@ def dot_general(
 
   Pads PaddedQArray operands to tile-aligned shapes and lets the user choose
   fast vs slow path via env `QARRAY_USE_FAST_DOT_GENERAL`.
+
+  Args:
+    lhs: The left-hand side operand, potentially a PaddedQArray.
+    rhs: The right-hand side operand, potentially a PaddedQArray.
+    dimension_numbers: A tuple of `((lhs_contracting_dims,
+      rhs_contracting_dims), (lhs_batch_dims, rhs_batch_dims))`.
+    precision: Optional. See `jax.lax.dot_general`.
+    preferred_element_type: Optional. See `jax.lax.dot_general`.
+    **kwargs: Additional keyword arguments passed to the underlying
+      `core_dot_general`.
+
+  Returns:
+    The result of the dot_general operation.
   """
   lhs = pad_if_needed(lhs)
   rhs = pad_if_needed(rhs)
   use_fast = os.environ.get('QARRAY_USE_FAST_DOT_GENERAL', '1') == '1'
   if use_fast:
-    return _fast_dot_general(
+    return core_dot_general._fast_dot_general(  # pylint: disable=protected-access
         lhs,
         rhs,
         dimension_numbers,
@@ -197,7 +230,7 @@ def dot_general(
         **kwargs,
     )
   else:
-    return _slow_dot_general(
+    return core_dot_general._slow_dot_general(  # pylint: disable=protected-access
         lhs,
         rhs,
         dimension_numbers,
@@ -205,6 +238,7 @@ def dot_general(
         precision=precision,
         **kwargs,
     )
+
 
 def quantize_act(
     array: jax.Array,
@@ -222,7 +256,7 @@ def create_quantized_param(
     name: str,
     value: jax.Array,
     how: HowToQuantize,
-) -> _ptq.WithAux[QArray]:
+) -> _ptq.WithAux[qarray.QArray]:
   """Wrapper that delegates to PTQ.create_quantized_param using this backend."""
   return _ptq.create_quantized_param(
       name, value, how, _qarray_module=sys.modules[__name__]
@@ -242,16 +276,16 @@ def quantize_params(
       _qarray_module=sys.modules[__name__],
   )
 
+
 # ---------------------------
 # Provider
 # ---------------------------
 
-PaddedPtqProvider = partial(
+PaddedPtqProvider = functools.partial(
     qwix.PtqProvider,
     _qarray_module=sys.modules[__name__],
     _dot_general_fn=dot_general,
 )
-
 
 
 __all__ = [
