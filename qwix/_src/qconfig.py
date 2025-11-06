@@ -16,6 +16,7 @@
 from collections.abc import Callable, Collection, Sequence
 import dataclasses
 import re
+import sys
 from typing import Any
 
 from absl import logging
@@ -125,17 +126,19 @@ class QuantizationProvider:
   def get_intercept_map(self) -> dict[str, Callable[..., Any]]:
     """Returns the intercept map for interception.wrap_func_intercepted."""
     # Common functions that are intercepted by all quantization providers.
-    return {
+    intercept_map = {
         'qwix._src.qconfig.get_current_rule': (
             lambda op: self._get_current_rule_and_op_id(op, only_rule=True)[0]
-        ),
-        # Disable interception for ops in pallas_call.
-        'jax.experimental.pallas.pallas_call': (
-            lambda *args, **kwargs: interception.disable_interceptions(
-                pl.pallas_call(*args, **kwargs)
-            )
-        ),
+        )
     }
+    if 'jax.experimental.pallas' in sys.modules:
+      # Disable interception for ops in pallas_call.
+      intercept_map['jax.experimental.pallas.pallas_call'] = (
+          lambda *args, **kwargs: interception.disable_interceptions(
+              pl.pallas_call(*args, **kwargs)
+          )
+      )
+    return intercept_map
 
   def process_model_inputs(
       self, model: Any, model_args: Sequence[Any], model_kwargs: dict[str, Any]
