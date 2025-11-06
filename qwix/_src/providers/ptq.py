@@ -88,6 +88,20 @@ class PtqProvider(qconfig.QuantizationProvider):
     `quantize_params` if partial param quantization is not needed.
   """
 
+  def __init__(
+      self,
+      rules: Sequence[qconfig.QuantizationRule],
+      *,
+      _qarray_module=qarray,
+      _dot_general_fn=dot_general.dot_general,
+      _conv_general_dilated_fn=conv_general.conv_general_dilated,
+  ):
+    """Initializes the PTQ provider."""
+    super().__init__(rules)
+    self._qarray_module = _qarray_module
+    self._dot_general_fn = _dot_general_fn
+    self._conv_general_dilated_fn = _conv_general_dilated_fn
+
   def dot_general(
       self,
       lhs: jax.Array,
@@ -125,7 +139,9 @@ class PtqProvider(qconfig.QuantizationProvider):
           tile_size=rule.tile_size,
           calibration_method=rule.weight_calibration_method,
       )
-      rhs = create_quantized_param(weight_name, rhs, rhs_how).array
+      rhs = create_quantized_param(
+          weight_name, rhs, rhs_how, _qarray_module=self._qarray_module
+      ).array
     elif rule.act_qtype is not None:  # act
       rhs_how = get_how_to_quantize(
           for_lhs=False,
@@ -133,7 +149,9 @@ class PtqProvider(qconfig.QuantizationProvider):
           tile_size=rule.tile_size,
           calibration_method=rule.act_calibration_method,
       )
-      rhs = quantize_act(rhs, rhs_how, rule, op_id + '_rhs')
+      rhs = quantize_act(
+          rhs, rhs_how, rule, op_id + '_rhs', _qarray_module=self._qarray_module
+      )
 
     # Prepare lhs.
     if rule.act_qtype is not None:
@@ -143,8 +161,10 @@ class PtqProvider(qconfig.QuantizationProvider):
           tile_size=rule.tile_size,
           calibration_method=rule.act_calibration_method,
       )
-      lhs = quantize_act(lhs, lhs_how, rule, op_id + '_lhs')
-    return dot_general.dot_general(
+      lhs = quantize_act(
+          lhs, lhs_how, rule, op_id + '_lhs', _qarray_module=self._qarray_module
+      )
+    return self._dot_general_fn(
         lhs, rhs, dimension_numbers, out_sharding=out_sharding
     )
 
@@ -187,7 +207,9 @@ class PtqProvider(qconfig.QuantizationProvider):
           tile_size=rule.tile_size,
           calibration_method=rule.weight_calibration_method,
       )
-      rhs = create_quantized_param(weight_name, rhs, rhs_how).array
+      rhs = create_quantized_param(
+          weight_name, rhs, rhs_how, _qarray_module=self._qarray_module
+      ).array
     elif rule.act_qtype is not None:  # act
       rhs_how = get_how_to_quantize(
           for_lhs=False,
@@ -195,7 +217,9 @@ class PtqProvider(qconfig.QuantizationProvider):
           tile_size=rule.tile_size,
           calibration_method=rule.act_calibration_method,
       )
-      rhs = quantize_act(rhs, rhs_how, rule, op_id + '_rhs')
+      rhs = quantize_act(
+          rhs, rhs_how, rule, op_id + '_rhs', _qarray_module=self._qarray_module
+      )
 
     # Prepare lhs.
     if rule.act_qtype is not None:
@@ -205,8 +229,12 @@ class PtqProvider(qconfig.QuantizationProvider):
           tile_size=rule.tile_size,
           calibration_method=rule.act_calibration_method,
       )
-      lhs = quantize_act(lhs, lhs_how, rule, op_id + '_lhs')
-    return einsum.einsum(einsum_str, lhs, rhs)
+      lhs = quantize_act(
+          lhs, lhs_how, rule, op_id + '_lhs', _qarray_module=self._qarray_module
+      )
+    return einsum.einsum(
+        einsum_str, lhs, rhs, _qwix_dot_general=self._dot_general_fn
+    )
 
   def conv_general_dilated(
       self,
@@ -252,7 +280,9 @@ class PtqProvider(qconfig.QuantizationProvider):
           qtype=rule.weight_qtype,
           calibration_method=rule.weight_calibration_method,
       )
-      rhs = create_quantized_param(weight_name, rhs, rhs_how).array
+      rhs = create_quantized_param(
+          weight_name, rhs, rhs_how, _qarray_module=self._qarray_module
+      ).array
 
     # Prepare lhs.
     if rule.act_qtype != rule.weight_qtype:
@@ -266,8 +296,10 @@ class PtqProvider(qconfig.QuantizationProvider):
         qtype=rule.act_qtype,
         calibration_method=rule.act_calibration_method,
     )
-    lhs = quantize_act(lhs, lhs_how, rule, op_id + '_lhs')
-    return conv_general.conv_general_dilated(
+    lhs = quantize_act(
+        lhs, lhs_how, rule, op_id + '_lhs', _qarray_module=self._qarray_module
+    )
+    return self._conv_general_dilated_fn(
         lhs,
         rhs,
         window_strides,
@@ -344,10 +376,12 @@ def quantize_act(
     how: qarray.HowToQuantize,
     rule: qconfig.QuantizationRule,
     act_name: str,
+    *,
+    _qarray_module=qarray,
 ) -> qarray.QArray:
   """Quantizes the input activation with support for static scale."""
   if not rule.act_static_scale:
-    return qarray.quantize(array, how)
+    return _qarray_module.quantize(array, how)
 
   # Construct the scale and zero_point from the quant stats, if available.
   # This is useful in NNX when a PTQ model is converted from a QAT model.
@@ -360,13 +394,13 @@ def quantize_act(
       aggregator = averaging.SimpleMovingAverage()
       calibration = aggregator.get_calibration(quant_stat)
     else:
-      calibration = qarray.calibrate(array, how)
+      calibration = _qarray_module.calibrate(array, how)
       # Apply act_batch_axes for static scale.
       calibration = jax.tree.map(
           lambda x: x.mean(axis=rule.act_batch_axes, keepdims=True), calibration
       )
     nonlocal zp
-    scale, zp = qarray.compute_scale_zero_point(calibration, how.qtype)
+    scale, zp = _qarray_module.compute_scale_zero_point(calibration, how.qtype)
     # Wrap scale in WithAux because quantize_params needs to know the qtype.
     return WithAux(scale, how)
 
@@ -374,13 +408,17 @@ def quantize_act(
   scale = flax_util.get_or_create_param(act_name + '_scale', init)
   if zp is not None:
     zp = flax_util.get_or_create_param(act_name + '_zero_point', lambda: zp)
-  return qarray.quantize_with_scale_zero_point(
+  return _qarray_module.quantize_with_scale_zero_point(
       array, how.qtype, scale.array, zp
   )
 
 
 def create_quantized_param(
-    name: str, value: jax.Array, how: qarray.HowToQuantize
+    name: str,
+    value: jax.Array,
+    how: qarray.HowToQuantize,
+    *,
+    _qarray_module=qarray,
 ) -> WithAux[qarray.QArray]:
   """Creates the quantized param and replaces the original param in the module.
 
@@ -388,11 +426,12 @@ def create_quantized_param(
     name: The name of the param in the module.
     value: The unquantized jax.Array.
     how: How to quantize the param.
+    _qarray_module: The qarray module to use. Useful for extending.
 
   Returns:
     An unboxed WithAux.
   """
-  unboxed = WithAux(qarray.quantize(value, how), how)
+  unboxed = WithAux(_qarray_module.quantize(value, how), how)
 
   # The following code is about replacing the saved param with WithAux, with
   # correct metadata.
@@ -422,6 +461,8 @@ def quantize_params(
     params: Any,
     abstract_quantized_params: Any,
     quant_stats: Any = flax.core.FrozenDict(),
+    *,
+    _qarray_module=qarray,
 ) -> Any:
   """Quantize the param tree for PTQ.
 
@@ -439,6 +480,7 @@ def quantize_params(
       In NN, the tree may contain AxisMetadata. In NNX, this should be the PTQ
       model itself, possibly abstract.
     quant_stats: The quantization statistics. This is only used in SRQ.
+    _qarray_module: The qarray module to use. Useful for extending.
 
   Returns:
     The quantized param tree, which has the same structure as the input params
@@ -459,7 +501,9 @@ def quantize_params(
       # The param might not be in the shape needed for compute, in case the
       # module reshapes before compute. Abstract param has the compute shape.
       param = param.reshape(abs_param.shape)
-      param = abs_param.replace(array=qarray.quantize(param, abs_param.how))
+      param = abs_param.replace(
+          array=_qarray_module.quantize(param, abs_param.how)
+      )
     quantized_params[path] = param
 
   # SRQ only: compute scale and zero_point from the quant_stats.
@@ -478,7 +522,9 @@ def quantize_params(
     act_qtype = abs_scale.how.qtype
 
     calibration = averaging.SimpleMovingAverage().get_calibration(quant_stat)
-    scale, zero_point = qarray.compute_scale_zero_point(calibration, act_qtype)
+    scale, zero_point = _qarray_module.compute_scale_zero_point(
+        calibration, act_qtype
+    )
     quantized_params[scale_path] = abs_scale.replace(array=scale)
     if zero_point is not None:
       quantized_params[(*path[:-1], path[-1] + '_zero_point')] = zero_point
