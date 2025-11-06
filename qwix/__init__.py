@@ -24,3 +24,4 @@ from qwix._src.providers.odml import OdmlConversionProvider, OdmlQatProvider
 from qwix._src.providers.ptq import PtqProvider, quantize_params
 from qwix._src.providers.qt import QtProvider, QtRule
 from qwix._src.qconfig import QuantizationProvider, QuantizationRule
+from qwix.contrib.padded_qarray import PaddedPtqProvider, PaddedQArray
