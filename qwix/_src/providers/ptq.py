@@ -448,7 +448,6 @@ def quantize_params(
     quant_stats: Any = flax.core.FrozenDict(),
     *,
     _qarray_module=qarray,
-    allow_extra_params: bool = False,
 ) -> Any:
   """Quantize the param tree for PTQ.
 
@@ -466,10 +465,7 @@ def quantize_params(
       In NN, the tree may contain AxisMetadata. In NNX, this should be the PTQ
       model itself, possibly abstract.
     quant_stats: The quantization statistics. This is only used in SRQ.
-      _qarray_module: The qarray module to use. Useful for extending.
-    allow_extra_params: If True, allow the params to contain extra parameters
-      that are not present in the abstract_quantized_params, e.g., loss
-      computation that are not triggered in PTQ.
+    _qarray_module: The qarray module to use. Useful for extending.
 
   Returns:
     The quantized param tree, which has the same structure as the input params
