@@ -217,7 +217,11 @@ class LoraTest(parameterized.TestCase):
       self, weight_qtype, apply_sharding_to_base_model
   ):
     """Test QLoRA on nnx.Einsum module param with sharding."""
-    mesh = jax.make_mesh((2, 2), ("fsdp", "tp"))
+    mesh = jax.make_mesh(
+        (2, 2),
+        ("fsdp", "tp"),
+        axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
+    )
     with jax.set_mesh(mesh):
       einsum = nnx.Einsum(
           "btd,dnh->btnh",
@@ -369,7 +373,11 @@ class LoraTest(parameterized.TestCase):
   )
   def test_lora_conv_nnx(self, qtype):
     """Test LoRA on nnx.Conv module."""
-    mesh = jax.make_mesh((2, 2), ("in", "out"))
+    mesh = jax.make_mesh(
+        (2, 2),
+        ("in", "out"),
+        axis_types=(jax.sharding.AxisType.Auto,) * len(("in", "out")),
+    )
     with jax.set_mesh(mesh):
       conv = nnx.Conv(
           in_features=16,
@@ -381,7 +389,14 @@ class LoraTest(parameterized.TestCase):
           rngs=nnx.Rngs(0),
       )
       # Shard the module on a 2x2 mesh.
-      self._shard_nnx_model(conv, jax.make_mesh((2, 2), ("in", "out")))
+      self._shard_nnx_model(
+          conv,
+          jax.make_mesh(
+              (2, 2),
+              ("in", "out"),
+              axis_types=(jax.sharding.AxisType.Auto,) * len(("in", "out")),
+          ),
+      )
     # Check the sharding of both the metadata and the actual jax.Array.
     self.assertEqual(conv.kernel.sharding_names, (None, None, "in", "out"))
     self.assertEqual(conv.kernel.value.sharding.spec, (None, None, "in", "out"))
