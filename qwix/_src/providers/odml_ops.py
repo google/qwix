@@ -373,6 +373,8 @@ class OnlyOutputOp(QuantizedOp):
     if not self._inputs_have_activations(args):
       return self._call_original_op(*args, **kwargs)
     rule, _ = self._get_rule_and_op_id_fn(self._op_name)
+    if rule is None or rule.act_qtype is None:
+      rule = aux_data.get(args[self.input_idx[0]], _FQ_RULE, None)
     # No quantization on the input.
     out = self._call_original_op(*args, **kwargs)
     return self._fake_quant_output(out, rule)
