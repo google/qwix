@@ -146,7 +146,11 @@ class FlaxUtilTest(parameterized.TestCase):
     self.assertIsInstance(variables["lora_b"], nnx.LoRAParam)
 
   def test_unbox(self):
-    mesh = jax.make_mesh((1, 1), ("a", "b"))
+    mesh = jax.make_mesh(
+        (1, 1),
+        ("a", "b"),
+        axis_types=(jax.sharding.AxisType.Auto,) * len(("a", "b")),
+    )
     with jax.set_mesh(mesh):
       array = jnp.ones((4, 8))
       boxed = {
@@ -160,7 +164,11 @@ class FlaxUtilTest(parameterized.TestCase):
     np.testing.assert_array_equal(unboxed["nnx"], array)
 
   def test_update_boxed(self):
-    mesh = jax.make_mesh((1, 1), ("a", "b"))
+    mesh = jax.make_mesh(
+        (1, 1),
+        ("a", "b"),
+        axis_types=(jax.sharding.AxisType.Auto,) * len(("a", "b")),
+    )
     unboxed = jnp.ones((4, 8))
     value = jnp.zeros((4, 8))
     self.assertIs(flax_util.update_boxed(unboxed), unboxed)

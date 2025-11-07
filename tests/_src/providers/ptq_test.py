@@ -143,7 +143,12 @@ class PtqTest(parameterized.TestCase):
     ptq_dense.apply({"params": quantized_params}, model_input)
 
   def test_nnx_ptq(self):
-    mesh = jax.make_mesh((2, 2), ("contraction", "remaining"))
+    mesh = jax.make_mesh(
+        (2, 2),
+        ("contraction", "remaining"),
+        axis_types=(jax.sharding.AxisType.Auto,)
+        * len(("contraction", "remaining")),
+    )
     q_rules = [
         qconfig.QuantizationRule(
             module_path=".*", weight_qtype=jnp.int8, tile_size=4
@@ -204,7 +209,11 @@ class PtqTest(parameterized.TestCase):
     )
 
   def test_nnx_einsum_sharding_ptq(self):
-    mesh = jax.make_mesh((2, 2), ("fsdp", "tp"))
+    mesh = jax.make_mesh(
+        (2, 2),
+        ("fsdp", "tp"),
+        axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
+    )
     q_rules = [
         qconfig.QuantizationRule(
             module_path=".*", weight_qtype=jnp.int8, tile_size=4
