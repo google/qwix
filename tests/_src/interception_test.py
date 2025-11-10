@@ -210,6 +210,11 @@ class InterceptionTest(absltest.TestCase):
     self.assertEqual(out, 1.0)
     self.assertEqual(grads, 0.0)
 
+  def test_has_attribute(self):
+    self.assertTrue(interception.has_attribute("jax.numpy.sin"))
+    self.assertFalse(interception.has_attribute("jax.xxx.sin"))
+    self.assertFalse(interception.has_attribute("xxx.sin"))
+
 
 if __name__ == "__main__":
   absltest.main()
