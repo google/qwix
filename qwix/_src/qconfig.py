@@ -16,7 +16,6 @@
 from collections.abc import Callable, Collection, Sequence
 import dataclasses
 import re
-import sys
 from typing import Any
 
 from absl import logging
@@ -131,7 +130,7 @@ class QuantizationProvider:
             lambda op: self._get_current_rule_and_op_id(op, only_rule=True)[0]
         )
     }
-    if 'jax.experimental.pallas' in sys.modules:
+    if interception.has_attribute('jax.experimental.pallas.pallas_call'):
       # Disable interception for ops in pallas_call.
       intercept_map['jax.experimental.pallas.pallas_call'] = (
           lambda *args, **kwargs: interception.disable_interceptions(
@@ -145,7 +144,7 @@ class QuantizationProvider:
   ) -> tuple[Any, Sequence[Any], dict[str, Any]]:
     """Process the model and its inputs before it is called."""
     if isinstance(model, nnx.Module):
-      for _, node in model.iter_modules():
+      for _, node in nnx.iter_modules(model):
         # Clear the op_count which is used in _get_current_rule_and_op_id below.
         aux_data.clear(node)
     return model, model_args, model_kwargs

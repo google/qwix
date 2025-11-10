@@ -182,7 +182,7 @@ def quantize_nnx_model(
 
   # Unlike linen module, nnx module does not have scope or path attribute, we
   # need to iterate over all modules and set the path for them.
-  for path, module in model.iter_modules():
+  for path, module in nnx.iter_modules(model):
     module.qwix_path = path
     # Disable quant_stats update for the first call.
     module.disable_quant_stats_update = True
@@ -193,7 +193,7 @@ def quantize_nnx_model(
     getattr(model, call_method)(*model_inputs, **model_inputs_kwargs)
 
   # Enable quant_stats update for subsequent calls.
-  for _, module in model.iter_modules():
+  for _, module in nnx.iter_modules(model):
     module.disable_quant_stats_update = False
 
   return model
