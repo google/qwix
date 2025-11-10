@@ -73,8 +73,7 @@ def quantize_with_scale_zero_point(
     scale: jax.Array,
     zero_point: jax.Array | None,
     noise_fn: numerics.NoiseFn | None = None,
-    tile_axes: Mapping[int, int] | None = None,
-    original_shape: tuple[int, ...] | None = None,
+    tile_axes: Mapping[int, int] | None = None
 ) -> PaddedQArray:
   """Quantizes an array with the given scale and zero_point with padding support.
 
@@ -88,8 +87,6 @@ def quantize_with_scale_zero_point(
     zero_point: The zero point for quantization, or None.
     noise_fn: Optional function to add noise during quantization.
     tile_axes: Mapping from axis to tile size for padding.
-    original_shape: The original shape of the array before padding, if
-      applicable.
 
   Returns:
     A PaddedQArray instance.
@@ -104,6 +101,7 @@ def quantize_with_scale_zero_point(
   # Ensure that the scale has the same dtype as the fp array, because
   # dequantize() uses the scale dtype to reconstruct the original array.
   scale = scale.astype(array.dtype)
+  original_shape = array.shape
 
   tile_axes = tile_axes or {}
   padded_array = pad_to_tile(array, tile_axes)
@@ -134,7 +132,6 @@ def quantize(array: jax.Array, how: HowToQuantize) -> PaddedQArray:
       zero_point,
       how.noise_fn,
       tile_axes=how.tiled_axes,
-      original_shape=array.shape,
   )
 
 
@@ -143,13 +140,7 @@ def dequantize(array: PaddedQArray) -> jax.Array:
   qarray.validate_qarray(array)
   original_shape = array.shape
   padded_qvalue = pad_to_tile(array.qvalue, dict(array.tile_axes))
-  qvalue = numerics.convert_from(padded_qvalue, array.qtype)
-  qvalue = qvalue.astype(array.scale.dtype)
-  if array.zero_point is not None:
-    qvalue = qarray.call_with_generic_broadcast(
-        jnp.subtract, qvalue, array.zero_point.astype(qvalue.dtype)
-    )
-  out = qarray.call_with_generic_broadcast(jnp.multiply, qvalue, array.scale)
+  out = qarray.dequantize(dataclasses.replace(array, qvalue=padded_qvalue))
   # If we padded qvalues, crop back to original shape for user output.
   if out.shape != original_shape:
     out = out[tuple(slice(0, d) for d in original_shape)]
