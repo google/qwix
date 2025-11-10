@@ -404,6 +404,7 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
     asymmetric quantization, or {'absmax': ...} for symmetric quantization.
     Each value in the dict has the same shape as the (expected) scale.
   """
+  original_shape = array.shape
   if how.qtype == 'mxfp8' or how.qtype == 'mxfp4':
     last_axis = array.ndim - 1
     how = dataclasses.replace(
@@ -413,7 +414,7 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
     )
   reduce_axes = []  # axes to calibrate.
   tiled_axes_offset = 0
-  for axis, _ in enumerate(array.shape):
+  for axis, _ in enumerate(original_shape):
     if axis in how.channelwise_axes:
       continue  # no reduce needed.
     if axis in how.tiled_axes:
@@ -421,12 +422,13 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
     reduce_axes.append(axis + tiled_axes_offset)
 
   # The returned calibration values should have the same shape as the scale.
-  shape = get_scale_shape(array.shape, how)
+  shape = get_scale_shape(original_shape, how)
   array = split_axis(array, how.tiled_axes)
 
   # Parse the calibration method.
   method, *args = how.calibration_method.lower().split(',')
   args = [float(a) for a in args]
+  mask = None
   if method == 'minmax':
     min_array = jnp.min(array, axis=reduce_axes, keepdims=True)
     max_array = jnp.max(array, axis=reduce_axes, keepdims=True)
@@ -436,17 +438,24 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
     if args:  # args[0] is the scale factor.
       min_array = min_array * args[0]
       max_array = max_array * args[0]
-    return {'min': min_array.reshape(shape), 'max': max_array.reshape(shape)}
+      if args[0] < 1:
+        mask = (array >= min_array) & (array <= max_array)
+    result_dict = {
+        'min': min_array.reshape(shape),
+        'max': max_array.reshape(shape),
+    }
   elif method == 'absmax':
     absmax = jnp.max(jnp.abs(array), axis=reduce_axes, keepdims=True)
     if args:  # args[0] is the scale factor.
       absmax = absmax * args[0]
-    return {'absmax': absmax.reshape(shape)}
+      if args[0] < 1:
+        mask = jnp.abs(array) <= absmax
+    result_dict = {'absmax': absmax.reshape(shape)}
   elif method == 'rms':
     rms = jnp.sqrt(jnp.mean(jnp.square(array), axis=reduce_axes, keepdims=True))
     if not args:
       raise ValueError('A scale factor is required for RMS calibration.')
-    return {'absmax': (rms * args[0]).reshape(shape)}
+    result_dict = {'absmax': (rms * args[0]).reshape(shape)}
   elif method == 'fixed':
     if len(args) not in (1, 2):
       raise ValueError('A fixed range is required for fixed calibration.')
@@ -458,12 +467,15 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
     shape = tuple(1 for _ in shape)
     if args[0] + args[1] == 0:
       return {'absmax': jnp.full(shape, args[1], array.dtype)}
-    return {
+    result_dict = {
         'min': jnp.full(shape, args[0], array.dtype),
         'max': jnp.full(shape, args[1], array.dtype),
     }
   else:
     raise ValueError(f'Unsupported calibration: {how.calibration_method}')
+  if mask is not None:
+    result_dict['mask'] = mask.reshape(original_shape)
+  return result_dict
 
 
 def compute_scale_zero_point(
