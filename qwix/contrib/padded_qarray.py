@@ -9,6 +9,7 @@ behavior.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import os
 import sys
@@ -17,8 +18,8 @@ from typing import Any, Mapping, TypeAlias
 import flax.struct
 import jax
 import jax.numpy as jnp
-import qwix
 from qwix._src.core import dot_general as core_dot_general
+from qwix._src.core import einsum as core_einsum
 from qwix._src.core import numerics
 from qwix._src.core import qarray
 from qwix._src.providers import ptq as _ptq
@@ -49,9 +50,7 @@ class PaddedQArray(qarray.QArray):
 MaybeQArray: TypeAlias = jax.Array | qarray.QArray | PaddedQArray
 
 
-def pad_to_tile(
-    array: jax.Array, tiled_axes: Mapping[int, int | float]
-) -> jax.Array:
+def pad_to_tile(array: jax.Array, tiled_axes: Mapping[int, int | float]) -> jax.Array:
   """Pads array along tiled axes so each dimension is a multiple of tile size."""
   if not tiled_axes:
     return array
@@ -66,15 +65,6 @@ def pad_to_tile(
   if all(p == (0, 0) for p in pad_width):
     return array
   return jnp.pad(array, pad_width, constant_values=0)
-
-
-def get_tiled_axes(array: MaybeQArray) -> Mapping[int, int] | float:
-  """Gets the tiled axes from a MaybeQArray."""
-  if isinstance(array, PaddedQArray):
-    return dict(array.tile_axes)
-  if isinstance(array, qarray.QArray):
-    return qarray.get_tiled_axes(array)
-  return {}
 
 
 def quantize_with_scale_zero_point(
@@ -151,6 +141,7 @@ def quantize(array: jax.Array, how: HowToQuantize) -> PaddedQArray:
 def dequantize(array: PaddedQArray) -> jax.Array:
   """Dequantizes an array. The reverse of |quantize|."""
   qarray.validate_qarray(array)
+  original_shape = array.shape
   padded_qvalue = pad_to_tile(array.qvalue, dict(array.tile_axes))
   qvalue = numerics.convert_from(padded_qvalue, array.qtype)
   qvalue = qvalue.astype(array.scale.dtype)
@@ -158,38 +149,24 @@ def dequantize(array: PaddedQArray) -> jax.Array:
     qvalue = qarray.call_with_generic_broadcast(
         jnp.subtract, qvalue, array.zero_point.astype(qvalue.dtype)
     )
-  return qarray.call_with_generic_broadcast(jnp.multiply, qvalue, array.scale)
+  out = qarray.call_with_generic_broadcast(jnp.multiply, qvalue, array.scale)
+  # If we padded qvalues, crop back to original shape for user output.
+  if out.shape != original_shape:
+    out = out[tuple(slice(0, d) for d in original_shape)]
+  return out
 
 
 # ---------------------------
-# dot_general wrappers
+# dot_general and einsum wrappers
 # ---------------------------
 
 
-def pad_if_needed(arr):
-  """Pads the qvalue of a PaddedQArray if tile_axes are present.
-
-  Args:
-    arr: The array to potentially pad. Can be a PaddedQArray or other types.
-
-  Returns:
-    The array with its qvalue padded if it's a PaddedQArray with tile_axes,
-    otherwise the original array.
-  """
-  if isinstance(arr, PaddedQArray):
-    tile_axes = get_tiled_axes(arr)
-    if tile_axes:
-      padded_qvalue = pad_to_tile(arr.qvalue, tile_axes)
-      if padded_qvalue.shape != arr.qvalue.shape:
-        arr = PaddedQArray(
-            padded_qvalue,
-            arr.scale,
-            arr.zero_point,
-            arr.qtype,
-            tile_axes=tile_axes,
-        )
-  return arr
-
+def _pad_operand(x, tiled_axes):
+  if isinstance(x, PaddedQArray):
+    padded_q = pad_to_tile(x.qvalue, tiled_axes)
+    return dataclasses.replace(x, qvalue=padded_q)
+  else:
+    return pad_to_tile(x, tiled_axes)
 
 def dot_general(
     lhs: MaybeQArray,
@@ -199,26 +176,41 @@ def dot_general(
     preferred_element_type: jax.typing.DTypeLike | None = None,
     **kwargs,
 ) -> jax.Array:
-  """Quantized jax.lax.dot_general with padding support via PaddedQArray.
+  """Pad online based on dimension_numbers and tile_size, then delegate.
 
-  Pads PaddedQArray operands to tile-aligned shapes and lets the user choose
-  fast vs slow path via env `QARRAY_USE_FAST_DOT_GENERAL`.
-
-  Args:
-    lhs: The left-hand side operand, potentially a PaddedQArray.
-    rhs: The right-hand side operand, potentially a PaddedQArray.
-    dimension_numbers: A tuple of `((lhs_contracting_dims,
-      rhs_contracting_dims), (lhs_batch_dims, rhs_batch_dims))`.
-    precision: Optional. See `jax.lax.dot_general`.
-    preferred_element_type: Optional. See `jax.lax.dot_general`.
-    **kwargs: Additional keyword arguments passed to the underlying
-      `core_dot_general`.
-
-  Returns:
-    The result of the dot_general operation.
+  We infer tiled axes using the same helper as core.get_how_to_quantize,
+  using the provided `_tile_size`. This lets us pad even if stored qvalues
+  are not padded, and it pads raw arrays when only the other side is quantized.
   """
-  lhs = pad_if_needed(lhs)
-  rhs = pad_if_needed(rhs)
+  
+  # Infer tile size by inspecting existing quantized operands.
+  _tile_size = None
+  if isinstance(rhs, PaddedQArray):
+    _tile_size = next(iter(rhs.tile_axes.values()))
+  elif isinstance(lhs, PaddedQArray):
+    _tile_size = next(iter(lhs.tile_axes.values()))
+
+  get_how_to_quantize = functools.partial(
+        core_dot_general.get_how_to_quantize,
+        dimension_numbers=dimension_numbers,
+        ndims=(len(lhs.shape), len(rhs.shape)),
+    )
+  how_lhs = get_how_to_quantize(
+      for_lhs=True,
+      qtype=None,
+      tile_size=_tile_size,
+      calibration_method=None,
+  )
+  how_rhs = get_how_to_quantize(
+      for_lhs=False,
+      qtype=None,
+      tile_size=_tile_size,
+      calibration_method=None,
+  )
+
+  lhs = _pad_operand(lhs, how_lhs.tiled_axes)
+  rhs = _pad_operand(rhs, how_rhs.tiled_axes)
+
   use_fast = os.environ.get('QARRAY_USE_FAST_DOT_GENERAL', '1') == '1'
   if use_fast:
     return core_dot_general._fast_dot_general(  # pylint: disable=protected-access
@@ -229,16 +221,63 @@ def dot_general(
         precision=precision,
         **kwargs,
     )
-  else:
-    return core_dot_general._slow_dot_general(  # pylint: disable=protected-access
-        lhs,
-        rhs,
-        dimension_numbers,
-        preferred_element_type=preferred_element_type,
-        precision=precision,
-        **kwargs,
-    )
+  return core_dot_general._slow_dot_general(  # pylint: disable=protected-access
+      lhs,
+      rhs,
+      dimension_numbers,
+      preferred_element_type=preferred_element_type,
+      precision=precision,
+      **kwargs,
+  )
 
+
+def einsum(
+    einsum_str: str,
+    lhs: MaybeQArray,
+    rhs: MaybeQArray,
+    *,
+    _qwix_dot_general=core_dot_general.dot_general,
+    preferred_element_type: jax.typing.DTypeLike | None = None,
+    **kwargs,
+) -> jax.Array:
+  """Pad online based on einsum_str and tile_size, then delegate to core."""
+
+  # Infer tile size by inspecting existing quantized operands.
+  _tile_size = None
+  if isinstance(rhs, PaddedQArray):
+    _tile_size = next(iter(rhs.tile_axes.values()))
+  elif isinstance(lhs, PaddedQArray):
+    _tile_size = next(iter(lhs.tile_axes.values()))
+
+  get_how_to_quantize = functools.partial(
+        core_einsum.get_how_to_quantize,
+        einsum_str=einsum_str,
+        ndims=(len(lhs.shape), len(rhs.shape)),
+    )
+  how_lhs = get_how_to_quantize(
+      for_lhs=True,
+      qtype=None,
+      tile_size=_tile_size,
+      calibration_method=None,
+  )
+  how_rhs = get_how_to_quantize(
+      for_lhs=False,
+      qtype=None,
+      tile_size=_tile_size,
+      calibration_method=None,
+  )
+
+  lhs = _pad_operand(lhs, how_lhs.tiled_axes)
+  rhs = _pad_operand(rhs, how_rhs.tiled_axes)
+  
+  return core_einsum.einsum(
+      einsum_str,
+      lhs,
+      rhs,
+      _qwix_dot_general=_qwix_dot_general,
+      preferred_element_type=preferred_element_type,
+      **kwargs,
+  )
 
 def quantize_act(
     array: jax.Array,
@@ -281,10 +320,12 @@ def quantize_params(
 # Provider
 # ---------------------------
 
+from qwix._src.providers.ptq import PtqProvider
 PaddedPtqProvider = functools.partial(
-    qwix.PtqProvider,
+    PtqProvider,
     _qarray_module=sys.modules[__name__],
     _dot_general_fn=dot_general,
+    _einsum_fn=einsum,
 )
 
 
