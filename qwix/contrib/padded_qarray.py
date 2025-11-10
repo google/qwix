@@ -67,71 +67,19 @@ def pad_to_tile(array: jax.Array, tiled_axes: Mapping[int, int | float]) -> jax.
   return jnp.pad(array, pad_width, constant_values=0)
 
 
-def quantize_with_scale_zero_point(
-    array: jax.Array,
-    qtype: jax.typing.DTypeLike,
-    scale: jax.Array,
-    zero_point: jax.Array | None,
-    noise_fn: numerics.NoiseFn | None = None,
-    tile_axes: Mapping[int, int] | None = None
-) -> PaddedQArray:
-  """Quantizes an array with the given scale and zero_point with padding support.
-
-  Applies quantization to padded values and stores tile_axes.
-  Optionally saves qvalues in padded form based on env `QARRAY_STORE_PADDED`.
-
-  Args:
-    array: The array to quantize.
-    qtype: The quantized dtype.
-    scale: The scale factor for quantization.
-    zero_point: The zero point for quantization, or None.
-    noise_fn: Optional function to add noise during quantization.
-    tile_axes: Mapping from axis to tile size for padding.
-
-  Returns:
-    A PaddedQArray instance.
-  """
-  if not numerics.should_quantize(array.dtype):
-    raise ValueError(f'Refuse to quantize: {array.dtype}')
-  if zero_point is not None and zero_point.shape != scale.shape:
-    raise ValueError(
-        f'Expect zero_point shape {scale.shape} but got {zero_point.shape}'
-    )
-
-  # Ensure that the scale has the same dtype as the fp array, because
-  # dequantize() uses the scale dtype to reconstruct the original array.
-  scale = scale.astype(array.dtype)
-  original_shape = array.shape
-
-  tile_axes = tile_axes or {}
-  padded_array = pad_to_tile(array, tile_axes)
-  qvalue = qarray.call_with_generic_broadcast(jnp.divide, padded_array, scale)
-  if zero_point is not None:
-    qvalue = qarray.call_with_generic_broadcast(
-        jnp.add, qvalue, zero_point.astype(qvalue.dtype)
-    )
-  qvalue = numerics.convert_to(qvalue, qtype, noise_fn)
-
-  # Slice back to original shape if not storing padded version
-  store_padded = os.environ.get('QARRAY_STORE_PADDED', '0') == '1'
-  if not store_padded and original_shape is not None:
-    qvalue = qvalue[tuple(slice(0, dim) for dim in original_shape)]
-
-  return PaddedQArray(qvalue, scale, zero_point, qtype, tile_axes=tile_axes)
-
-
 def quantize(array: jax.Array, how: HowToQuantize) -> PaddedQArray:
   """Quantizes an array using a dynamic range with padding support."""
-  padded_array = pad_to_tile(array, how.tiled_axes)
-  calibration = calibrate(padded_array, how)
-  scale, zero_point = qarray.compute_scale_zero_point(calibration, how.qtype)
-  return quantize_with_scale_zero_point(
-      padded_array,
-      how.qtype,
-      scale,
-      zero_point,
-      how.noise_fn,
-      tile_axes=how.tiled_axes,
+  original_shape = array.shape
+  array = pad_to_tile(array, how.tiled_axes)
+  array = qarray.quantize(array, how)
+  store_padded = os.environ.get('QARRAY_STORE_PADDED', '0') == '1'
+  if not store_padded:
+    qvalue = array.qvalue[tuple(slice(0, dim) for dim in original_shape)]
+  else:
+    qvalue = array.qvalue
+  return dataclasses.replace(
+      PaddedQArray(**dataclasses.asdict(array), tile_axes=how.tiled_axes),
+      qvalue=qvalue,
   )
 
 
