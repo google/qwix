@@ -25,6 +25,43 @@ from qwix._src.providers import qt
 
 class QtTest(absltest.TestCase):
 
+  def test_bwd_reuse_noise(self):
+    """Tests that noise is reused in bwd pass for lhs/rhs."""
+
+    class TestModule(nn.Module):
+      provider: qt.QtProvider
+
+      def test_config(self, lhs, rhs):
+        return self.provider._create_dot_general_qt_config(
+            self.provider._rules[0], "dot_general0", lhs, rhs
+        )
+
+    lhs = jnp.ones((2, 3), dtype=jnp.bfloat16)
+    rhs = jnp.ones((2, 3), dtype=jnp.bfloat16)
+
+    provider_reuse = qt.QtProvider([
+        qt.QtRule(
+            bwd_stochastic_rounding="low_bit_uniform",
+        ),
+    ])
+    module_reuse = TestModule(provider_reuse)
+    rngs = {"stochastic_rounding": jax.random.key(0)}
+    config_reuse = module_reuse.apply(
+        {}, lhs, rhs, rngs=rngs, method=TestModule.test_config
+    )
+
+    self.assertIsNotNone(config_reuse.dlhs_stochastic_rounding_noise_fn)
+    self.assertIsNotNone(config_reuse.drhs_stochastic_rounding_noise_fn)
+    self.assertIs(
+        config_reuse.dlhs_stochastic_rounding_noise_fn,
+        config_reuse.drhs_stochastic_rounding_noise_fn,
+    )
+
+    shape = (8, 32)
+    noise_lhs_reuse = config_reuse.dlhs_stochastic_rounding_noise_fn(shape)
+    noise_rhs_reuse = config_reuse.drhs_stochastic_rounding_noise_fn(shape)
+    self.assertTrue(jnp.array_equal(noise_lhs_reuse, noise_rhs_reuse))
+
   def test_srq_jit_grad(self):
     """Test that the grad of SRQ can be taken inside a jitted function."""
     dense = nn.Dense(features=10, param_dtype=jnp.bfloat16)
