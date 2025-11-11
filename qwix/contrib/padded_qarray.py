@@ -87,7 +87,7 @@ def quantize(array: jax.Array, how: HowToQuantize) -> PaddedQArray:
   """Quantizes an array using a dynamic range with padding support."""
   original_shape = array.shape
   array = pad_to_tile(array, how.tiled_axes)
-  array = dataclasses.asdict(qarray.quantize(array, how))
+  array = qarray.quantize(array, how)
   if not _QARRAY_STORE_PADDED:
     array = dataclasses.replace(
         array,
