@@ -358,6 +358,17 @@ class QtProvider(qconfig.QuantizationProvider):
           key=flax_util.make_rng('stochastic_rounding'),
           channelwise_noise_axes=rule.channelwise_noise_axes,
       )
+    elif rule.bwd_stochastic_rounding == 'low_bit_uniform':
+      dlhs_stochastic_rounding_noise_fn = functools.partial(
+          stochastic_rounding.low_bit_uniform_noise,
+          key=flax_util.make_rng('stochastic_rounding'),
+          channelwise_noise_axes=rule.channelwise_noise_axes,
+      )
+      drhs_stochastic_rounding_noise_fn = functools.partial(
+          stochastic_rounding.low_bit_uniform_noise,
+          key=flax_util.make_rng('stochastic_rounding'),
+          channelwise_noise_axes=rule.channelwise_noise_axes,
+      )
     elif rule.bwd_stochastic_rounding is not None:
       raise ValueError(
           'Stochastic rounding should be "uniform" or None, got:'
