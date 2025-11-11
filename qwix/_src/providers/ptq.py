@@ -231,9 +231,7 @@ class PtqProvider(qconfig.QuantizationProvider):
       lhs = quantize_act(
           lhs, lhs_how, rule, op_id + '_lhs', _qarray_module=self._qarray_module
       )
-    return self._einsum_fn(
-        einsum_str, lhs, rhs
-    )
+    return self._einsum_fn(einsum_str, lhs, rhs)
 
   def conv_general_dilated(
       self,
