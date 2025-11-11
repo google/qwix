@@ -1,10 +1,8 @@
-"""Provides a QArray implementation that supports padding to tile sizes.
+"""QArray implementation with padding to tile sizes.
 
-This module extends the base qwix.QArray with `PaddedQArray`, which
-automatically pads arrays to be multiples of specified tile sizes along
-certain axes before quantization and dequantization. It also provides
-wrappers for `dot_general` and PTQ functions to utilize this padding
-behavior.
+Extends qwix.QArray with PaddedQArray for automatic padding to tile size
+multiples before quantization. Provides wrappers for dot_general and PTQ
+functions.
 """
 
 from __future__ import annotations
@@ -36,10 +34,10 @@ HowToQuantize = qarray.HowToQuantize
 
 @flax.struct.dataclass
 class PaddedQArray(qarray.QArray):
-  """Quantized array supporting padding and tracking original tile sizes.
+  """Quantized array with padding support.
 
-  Additional Attributes:
-    tile_axes: field to store the original tile sizes.
+  Attributes:
+    tile_axes: Maps axis to tile size for padding.
   """
 
   tile_axes: Mapping[int, int] | float = flax.struct.field(
@@ -118,24 +116,21 @@ def dot_general(
     preferred_element_type: jax.typing.DTypeLike | None = None,
     **kwargs,
 ) -> jax.Array:
-  """Pad online based on dimension_numbers and tile_size, then delegate.
+  """Pad operands online based on dimension_numbers, then delegate.
 
-  We infer tiled axes using the same helper as core.get_how_to_quantize,
-  using the provided `_tile_size`. This lets us pad even if stored qvalues
-  are not padded, and it pads raw arrays when only the other side is quantized.
+  Infers tile axes from quantized operands to pad on contracting dimensions.
+  Pads raw arrays when only one operand is quantized.
 
   Args:
-    lhs: The left-hand side operand, can be a jax.Array or a PaddedQArray.
-    rhs: The right-hand side operand, can be a jax.Array or a PaddedQArray.
-    dimension_numbers: A tuple of tuples of the form
-      `((lhs_contracting_dims, rhs_contracting_dims),
-      (lhs_batch_dims, rhs_batch_dims))`.
-    precision: Optional. See `jax.lax.dot_general`.
-    preferred_element_type: Optional. See `jax.lax.dot_general`.
-    **kwargs: Additional keyword arguments passed to the underlying dot_general.
+    lhs: Left-hand side operand.
+    rhs: Right-hand side operand.
+    dimension_numbers: Dimension numbers for dot_general.
+    precision: Optional precision.
+    preferred_element_type: Optional element type.
+    **kwargs: Additional arguments.
 
   Returns:
-    The result of the dot general operation as a jax.Array.
+    Result of dot_general operation.
   """
 
   # Infer tile size by inspecting existing quantized operands.
@@ -195,7 +190,7 @@ def einsum(
     preferred_element_type: jax.typing.DTypeLike | None = None,
     **kwargs,
 ) -> jax.Array:
-  """Pad online based on einsum_str and tile_size, then delegate to core."""
+  """Pad operands online based on einsum_str, then delegate."""
 
   # Infer tile size by inspecting existing quantized operands.
   tile_size = None
