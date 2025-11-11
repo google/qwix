@@ -39,6 +39,9 @@ PtqProvider = _ptq.PtqProvider
 calibrate = qarray.calibrate
 HowToQuantize = qarray.HowToQuantize
 
+_QARRAY_STORE_PADDED = os.environ.get('QARRAY_STORE_PADDED', '0') == '1'
+_QARRAY_USE_FAST_DOT_GENERAL = os.environ.get('QARRAY_USE_FAST_DOT_GENERAL', '1') == '1'
+
 
 # ---------------------------
 # Padded QArray implementation
@@ -85,8 +88,7 @@ def quantize(array: jax.Array, how: HowToQuantize) -> PaddedQArray:
   original_shape = array.shape
   array = pad_to_tile(array, how.tiled_axes)
   array = dataclasses.asdict(qarray.quantize(array, how))
-  store_padded = os.environ.get('QARRAY_STORE_PADDED', '0') == '1'
-  if not store_padded:
+  if not _QARRAY_STORE_PADDED:
     array = dataclasses.replace(
         array,
         qvalue=array.qvalue[tuple(slice(0, dim) for dim in original_shape)],
@@ -172,8 +174,7 @@ def dot_general(
   lhs = _pad_operand(lhs, how_lhs.tiled_axes)
   rhs = _pad_operand(rhs, how_rhs.tiled_axes)
 
-  use_fast = os.environ.get('QARRAY_USE_FAST_DOT_GENERAL', '1') == '1'
-  if use_fast:
+  if _QARRAY_USE_FAST_DOT_GENERAL:
     return core_dot_general._fast_dot_general(  # pylint: disable=protected-access
         lhs,
         rhs,
