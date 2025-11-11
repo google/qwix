@@ -232,7 +232,7 @@ class PtqProvider(qconfig.QuantizationProvider):
           lhs, lhs_how, rule, op_id + '_lhs', _qarray_module=self._qarray_module
       )
     return self._einsum_fn(
-        einsum_str, lhs, rhs, _qwix_dot_general=self._dot_general_fn
+        einsum_str, lhs, rhs
     )
 
   def conv_general_dilated(
