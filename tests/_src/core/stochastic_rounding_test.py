@@ -38,6 +38,25 @@ class StochasticRoundingTest(parameterized.TestCase):
     # Check that the noise is different along the non-shared axis.
     self.assertFalse(jnp.all(noise[0, 0] == noise[1, 0]))
 
+  def test_low_bit_uniform_noise(self):
+    key = jax.random.PRNGKey(0)
+    shape = (2, 3)
+    noise_fn = functools.partial(
+        stochastic_rounding.low_bit_uniform_noise,
+        key=key,
+        channelwise_noise_axes=(0,),
+    )
+    noise = noise_fn(shape)
+    self.assertEqual(noise.shape, (2, 1))
+    noise = jnp.broadcast_to(noise, shape)
+    # Check that the noise is the same along the shared axis.
+    self.assertTrue(jnp.all(noise[0, 0] == noise[0, 1]))
+    self.assertTrue(jnp.all(noise[1, 0] == noise[1, 1]))
+    # Check that the noise is different along the non-shared axis.
+    self.assertFalse(jnp.all(noise[0, 0] == noise[1, 0]))
+    self.assertTrue(jnp.all(noise > -0.5))
+    self.assertTrue(jnp.all(noise < 0.5))
+
 
 if __name__ == "__main__":
   absltest.main()
