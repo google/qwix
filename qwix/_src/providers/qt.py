@@ -348,35 +348,27 @@ class QtProvider(qconfig.QuantizationProvider):
         drhs_tile_size = rule.bwd_weight_grad_tile_size
 
     if rule.bwd_stochastic_rounding == 'uniform':
-      dlhs_stochastic_rounding_noise_fn = functools.partial(
+      key = flax_util.make_rng('stochastic_rounding')
+      bwd_stochastic_rounding_noise_fn = functools.partial(
           stochastic_rounding.uniform_noise,
-          key=flax_util.make_rng('stochastic_rounding'),
-          channelwise_noise_axes=rule.channelwise_noise_axes,
-      )
-      drhs_stochastic_rounding_noise_fn = functools.partial(
-          stochastic_rounding.uniform_noise,
-          key=flax_util.make_rng('stochastic_rounding'),
+          key=key,
           channelwise_noise_axes=rule.channelwise_noise_axes,
       )
     elif rule.bwd_stochastic_rounding == 'low_bit_uniform':
-      dlhs_stochastic_rounding_noise_fn = functools.partial(
+      key = flax_util.make_rng('stochastic_rounding')
+      bwd_stochastic_rounding_noise_fn = functools.partial(
           stochastic_rounding.low_bit_uniform_noise,
-          key=flax_util.make_rng('stochastic_rounding'),
+          key=key,
           channelwise_noise_axes=rule.channelwise_noise_axes,
       )
-      drhs_stochastic_rounding_noise_fn = functools.partial(
-          stochastic_rounding.low_bit_uniform_noise,
-          key=flax_util.make_rng('stochastic_rounding'),
-          channelwise_noise_axes=rule.channelwise_noise_axes,
-      )
+
     elif rule.bwd_stochastic_rounding is not None:
       raise ValueError(
           'Stochastic rounding should be "uniform" or None, got:'
           f' {rule.bwd_stochastic_rounding}'
       )
     else:
-      dlhs_stochastic_rounding_noise_fn = None
-      drhs_stochastic_rounding_noise_fn = None
+      bwd_stochastic_rounding_noise_fn = None
 
     qt_config = dot_general_qt.DotGeneralQtConfig(
         # fwd configs.
@@ -391,12 +383,12 @@ class QtProvider(qconfig.QuantizationProvider):
         dlhs_grad_qtype=rule.bwd_qtype,
         dlhs_grad_calibration_method=rule.bwd_calibration_method,
         dlhs_tile_size=dlhs_tile_size,
-        dlhs_stochastic_rounding_noise_fn=dlhs_stochastic_rounding_noise_fn,
+        dlhs_stochastic_rounding_noise_fn=bwd_stochastic_rounding_noise_fn,
         # drhs configs.
         drhs_grad_qtype=rule.bwd_qtype,
         drhs_tile_size=drhs_tile_size,
         drhs_grad_calibration_method=rule.bwd_calibration_method,
-        drhs_stochastic_rounding_noise_fn=drhs_stochastic_rounding_noise_fn,
+        drhs_stochastic_rounding_noise_fn=bwd_stochastic_rounding_noise_fn,
         # misc.
         disable_channelwise_axes=rule.disable_channelwise_axes,
     )
