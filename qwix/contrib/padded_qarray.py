@@ -39,10 +39,10 @@ PtqProvider = _ptq.PtqProvider
 calibrate = qarray.calibrate
 HowToQuantize = qarray.HowToQuantize
 
-_QARRAY_STORE_PADDED = os.environ.get('QARRAY_STORE_PADDED', '0') == '1'
-_QARRAY_USE_FAST_DOT_GENERAL = (
-    os.environ.get('QARRAY_USE_FAST_DOT_GENERAL', '1') == '1'
-)
+# Permanently keep shapes in padded form.
+_QARRAY_KEEP_PADDED_SHAPE = False
+# Which dot_general implementation to use.
+_QARRAY_USE_FAST_DOT_GENERAL = True
 
 
 # ---------------------------
@@ -60,6 +60,9 @@ class PaddedQArray(qarray.QArray):
 
   tile_axes: Mapping[int, int] | float = flax.struct.field(
       pytree_node=False, default_factory=dict
+  )
+  original_shape: tuple[int, ...] = flax.struct.field(
+      pytree_node=False, default=()
   )
 
 
@@ -90,12 +93,16 @@ def quantize(array: jax.Array, how: HowToQuantize) -> PaddedQArray:
   original_shape = array.shape
   array = pad_to_tile(array, how.tiled_axes)
   array = qarray.quantize(array, how)
-  if not _QARRAY_STORE_PADDED:
+  if not _QARRAY_KEEP_PADDED_SHAPE:
     array = dataclasses.replace(
         array,
         qvalue=array.qvalue[tuple(slice(0, dim) for dim in original_shape)],
     )
-  return PaddedQArray(**dataclasses.asdict(array), tile_axes=how.tiled_axes)
+  return PaddedQArray(
+      **dataclasses.asdict(array),
+      tile_axes=how.tiled_axes,
+      original_shape=original_shape,
+  )
 
 
 def dequantize(array: PaddedQArray) -> jax.Array:
@@ -104,8 +111,7 @@ def dequantize(array: PaddedQArray) -> jax.Array:
   original_shape = array.shape
   padded_qvalue = pad_to_tile(array.qvalue, dict(array.tile_axes))
   out = qarray.dequantize(dataclasses.replace(array, qvalue=padded_qvalue))
-  # If we padded qvalues, crop back to original shape for user output.
-  if out.shape != original_shape:
+  if out.shape != array.original_shape and not _QARRAY_KEEP_PADDED_SHAPE:
     out = out[tuple(slice(0, d) for d in original_shape)]
   return out
 
