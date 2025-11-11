@@ -15,6 +15,7 @@
 
 from collections.abc import Collection, Sequence
 import itertools
+from typing import Any
 import jax
 from jax import numpy as jnp
 from qwix._src.core import numerics
@@ -26,9 +27,8 @@ def get_how_to_quantize(
     dimension_numbers: jax.lax.DotDimensionNumbers,
     ndims: tuple[int, int],
     for_lhs: bool,
-    qtype: jax.typing.DTypeLike,
     tile_size: int | float | None,
-    calibration_method: str,
+    **kwargs: Any,
 ) -> qarray.HowToQuantize:
   """Get how to quantize from dimension_numbers and remaining_dims.
 
@@ -39,9 +39,8 @@ def get_how_to_quantize(
     dimension_numbers: The dimension numbers passed to dot_general.
     ndims: The number of dimensions for lhs and rhs.
     for_lhs: Whether to quantize lhs or rhs.
-    qtype: The logical type of the quantized value.
     tile_size: The tile size for subchannel quantization.
-    calibration_method: The calibration method to use.
+    **kwargs: Additional keyword arguments to HowToQuantize.
 
   Returns:
     How to quantize.
@@ -59,10 +58,9 @@ def get_how_to_quantize(
     tiled_axes = {contracting_axes[0]: tile_size}
 
   return qarray.HowToQuantize(
-      qtype=qtype,
       channelwise_axes=channelwise_axes,
       tiled_axes=tiled_axes,
-      calibration_method=calibration_method,
+      **kwargs,
   )
 
 

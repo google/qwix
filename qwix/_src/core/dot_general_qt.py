@@ -188,9 +188,8 @@ def dot_general_qt_bwd(
           qtype=g_qtype,
           tile_size=g_tile_size,
           calibration_method=g_calibration_method,
+          noise_fn=g_noise_fn,
       )
-      if g_noise_fn is not None:
-        g_how = dataclasses.replace(g_how, noise_fn=g_noise_fn)
       if config.disable_channelwise_axes:
         g_how = dataclasses.replace(g_how, channelwise_axes=[])
 

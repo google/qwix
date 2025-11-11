@@ -14,7 +14,7 @@
 """Quantized einsum with subchannel support."""
 
 import dataclasses
-from typing import Collection
+from typing import Any, Collection
 
 import jax
 from jax import numpy as jnp
@@ -51,9 +51,8 @@ def get_how_to_quantize(
     einsum_str: str,
     ndims: tuple[int, int],
     for_lhs: bool,
-    qtype: jax.typing.DTypeLike,
     tile_size: int | float | None,
-    calibration_method: str,
+    **kwargs: Any,
 ) -> qarray.HowToQuantize:
   """Get how to quantize from an einsum string.
 
@@ -66,9 +65,8 @@ def get_how_to_quantize(
       when ellipsis is in subscripts and we need to determine the number of
       dimensions represented by ellipsis.
     for_lhs: Whether to quantize lhs or rhs.
-    qtype: The logical type for quantized value.
     tile_size: The tile size for subchannel quantization.
-    calibration_method: The calibration method to use.
+    **kwargs: Additional keyword arguments to HowToQuantize.
 
   Returns:
     How to quantize the lhs or rhs.
@@ -84,10 +82,9 @@ def get_how_to_quantize(
       tiled_axes[axis] = tile_size
 
   return qarray.HowToQuantize(
-      qtype=qtype,
       channelwise_axes=channelwise_axes,
       tiled_axes=tiled_axes,
-      calibration_method=calibration_method,
+      **kwargs,
   )
 
 
