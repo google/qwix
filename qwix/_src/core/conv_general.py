@@ -14,7 +14,7 @@
 """Quantized jax.lax.conv_general_dilated."""
 
 from collections.abc import Sequence
-
+from typing import Any
 import jax
 from jax import numpy as jnp
 from qwix._src.core import numerics
@@ -25,8 +25,7 @@ def get_how_to_quantize(
     *,
     dimension_numbers: jax.lax.ConvDimensionNumbers,
     for_lhs: bool,
-    qtype: jax.typing.DTypeLike,
-    calibration_method: str,
+    **kwargs: Any,
 ) -> qarray.HowToQuantize:
   """Gets how to quantize from conv's dimension_numbers.
 
@@ -35,8 +34,7 @@ def get_how_to_quantize(
   Args:
     dimension_numbers: The conv's dimension_numbers.
     for_lhs: Whether to quantize lhs or rhs.
-    qtype: The logical type of the quantized value.
-    calibration_method: The calibration method to use.
+    **kwargs: Additional keyword arguments to HowToQuantize.
 
   Returns:
     How to quantize lhs or rhs.
@@ -45,13 +43,10 @@ def get_how_to_quantize(
     channelwise_axes = [dimension_numbers.lhs_spec[0]]
   else:
     channelwise_axes = [dimension_numbers.rhs_spec[0]]
-    if calibration_method == 'minmax':
-      raise ValueError('Asymmetric quantization for rhs is not supported.')
   return qarray.HowToQuantize(
-      qtype=qtype,
       channelwise_axes=channelwise_axes,
       tiled_axes={},
-      calibration_method=calibration_method,
+      **kwargs,
   )
 
 

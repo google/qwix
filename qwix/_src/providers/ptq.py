@@ -128,6 +128,7 @@ class PtqProvider(qconfig.QuantizationProvider):
         dot_general.get_how_to_quantize,
         dimension_numbers=dimension_numbers,
         ndims=(len(lhs.shape), len(rhs.shape)),
+        tile_size=rule.tile_size,
     )
 
     # Prepare rhs.
@@ -137,7 +138,6 @@ class PtqProvider(qconfig.QuantizationProvider):
       rhs_how = get_how_to_quantize(
           for_lhs=False,
           qtype=rule.weight_qtype,
-          tile_size=rule.tile_size,
           calibration_method=rule.weight_calibration_method,
       )
       rhs = create_quantized_param(
@@ -147,7 +147,6 @@ class PtqProvider(qconfig.QuantizationProvider):
       rhs_how = get_how_to_quantize(
           for_lhs=False,
           qtype=rule.act_qtype,
-          tile_size=rule.tile_size,
           calibration_method=rule.act_calibration_method,
       )
       rhs = quantize_act(
@@ -159,7 +158,6 @@ class PtqProvider(qconfig.QuantizationProvider):
       lhs_how = get_how_to_quantize(
           for_lhs=True,
           qtype=rule.act_qtype,
-          tile_size=rule.tile_size,
           calibration_method=rule.act_calibration_method,
       )
       lhs = quantize_act(
@@ -196,6 +194,7 @@ class PtqProvider(qconfig.QuantizationProvider):
         einsum.get_how_to_quantize,
         einsum_str=einsum_str,
         ndims=(len(lhs.shape), len(rhs.shape)),
+        tile_size=rule.tile_size,
     )
 
     # Prepare rhs.
@@ -205,7 +204,6 @@ class PtqProvider(qconfig.QuantizationProvider):
       rhs_how = get_how_to_quantize(
           for_lhs=False,
           qtype=rule.weight_qtype,
-          tile_size=rule.tile_size,
           calibration_method=rule.weight_calibration_method,
       )
       rhs = create_quantized_param(
@@ -215,7 +213,6 @@ class PtqProvider(qconfig.QuantizationProvider):
       rhs_how = get_how_to_quantize(
           for_lhs=False,
           qtype=rule.act_qtype,
-          tile_size=rule.tile_size,
           calibration_method=rule.act_calibration_method,
       )
       rhs = quantize_act(
@@ -227,7 +224,6 @@ class PtqProvider(qconfig.QuantizationProvider):
       lhs_how = get_how_to_quantize(
           for_lhs=True,
           qtype=rule.act_qtype,
-          tile_size=rule.tile_size,
           calibration_method=rule.act_calibration_method,
       )
       lhs = quantize_act(
