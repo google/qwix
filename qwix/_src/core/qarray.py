@@ -539,16 +539,58 @@ def quantize_with_scale_zero_point(
   return QArray(qvalue, scale, zero_point, qtype)
 
 
-def quantize(
-    array: jax.Array,
-    how: HowToQuantize,
-) -> QArray:
+def quantize(array: jax.Array, how: HowToQuantize) -> QArray:
   """Quantizes an array using a dynamic range."""
   calibration = calibrate(array, how)
   scale, zero_point = compute_scale_zero_point(calibration, how.qtype)
   return quantize_with_scale_zero_point(
       array, how.qtype, scale, zero_point, how.noise_fn
   )
+
+
+def quantize_api(
+    array: jax.Array,
+    qtype: jax.typing.DTypeLike,
+    *,
+    channelwise_axes: Collection[int] = (),
+    tiled_axes: Mapping[int, int | float] | None = None,
+    calibration_method: str = 'absmax',
+    scale_dtype: jax.typing.DTypeLike | None = None,
+) -> QArray:
+  """Quantize a Jax Array into QArray using a dynamic range.
+
+  This function exists as a public API to avoid constructing a HowToQuantize.
+
+  Args:
+    array: The array to quantize.
+    qtype: The logical type of the quantized value, e.g. jnp.int8, jnp.int4,
+      jnp.float8_e4m3fn, "nf4", etc.
+    channelwise_axes: Channelwise axes have individual scales. This has the same
+      effect as setting their tile sizes to 1 in tiled_axes.
+    tiled_axes: Tiled axes have blockwise scales, aka subchannel quantization.
+      The value is a mapping from the tiled axis to the tile size. If the tile
+      size is a float, it will be interpreted as "1 / tile_count" and the actual
+      tile size will be round(axis_size * tile_size).
+    calibration_method: The calibration method to use. The format is
+      "<method>[,<args>]", e.g. "absmax" or "fixed,-10,10".
+    scale_dtype: The dtype of the scale. If not given, the dtype will be the
+      same as the array's dtype. Note that the scale's dtype decides the
+      dequantized array's dtype.
+
+  Returns:
+    The quantized array.
+  """
+  # A stable API for qarray.quantize()
+  how = HowToQuantize(
+      qtype=qtype,
+      channelwise_axes=channelwise_axes,
+      tiled_axes=tiled_axes or {},
+      calibration_method=calibration_method,
+  )
+  array = quantize(array, how)
+  if scale_dtype is not None:
+    array = dataclasses.replace(array, scale=array.scale.astype(scale_dtype))
+  return array
 
 
 def dequantize(array: QArray) -> jax.Array:

@@ -16,7 +16,12 @@
 
 # pylint: disable=g-multiple-import, g-importing-member
 
-from qwix._src.core.qarray import QArray, dequantize
+from qwix._src.core.conv_general import conv_general_dilated
+from qwix._src.core.dot import dot
+from qwix._src.core.dot_general import dot_general
+from qwix._src.core.einsum import einsum
+from qwix._src.core.qarray import QArray, dequantize, quantize_api as quantize
+from qwix._src.core.ragged_dot import ragged_dot, ragged_dot_general
 from qwix._src.flax_util import QuantStat
 from qwix._src.model import quantize_model
 from qwix._src.providers.lora import LoraProvider, LoraRule, apply_lora_to_model

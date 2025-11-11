@@ -26,102 +26,40 @@ To add quantization support to a Pallas kernel, generally users need to
    `dequantize` on the QArray to obtain the dequantized jax.Array.
 
 Note: dot_general / einsum / dot in this module should only be called inside
-pallas kernels.
+pallas kernels, as they can be inefficient when called outside of the kernel.
 """
 
-__all__ = [
-    'quantize',
-    'dot',
-    'dot_general',
-    'einsum',
-    'pallas_call',
-    'transform_block_specs_for_tpu',
-    'update_block_specs_for_qarray',
-    'QArray',
-    'dequantize',
-    'get_current_rule',
-]
-
-# pylint: disable=g-multiple-import, g-importing-member
-
-from collections.abc import Collection, Mapping
-import dataclasses
 import functools
 
-import jax
+from qwix._src import qconfig
+from qwix._src.core import dot as qwix_dot
+from qwix._src.core import dot_general as qwix_dot_general
+from qwix._src.core import einsum as qwix_einsum
+from qwix._src.core import pallas
 from qwix._src.core import qarray
-from qwix._src.core.dot_general import loop_dot_general as dot_general
-from qwix._src.core.einsum import einsum as _einsum
-from qwix._src.core.pallas import pallas_call, transform_block_specs_for_tpu, update_block_specs_for_qarray
-from qwix._src.core.qarray import QArray, dequantize
-from qwix._src.qconfig import get_current_rule
 
-einsum = functools.partial(_einsum, _qwix_dot_general=dot_general)
+__all__ = [
+    'QArray',
+    'quantize',
+    'dequantize',
+    'get_current_rule',
+    'pallas_call',
+    'dot_general',
+    'dot',
+    'einsum',
+]
 
+# APIs for generic QArray operations. These are deprecated in favor of the
+# qwix.* APIs.
+QArray = qarray.QArray
+quantize = qarray.quantize_api
+dequantize = qarray.dequantize
 
-def quantize(
-    array: jax.Array,
-    qtype: jax.typing.DTypeLike,
-    *,
-    channelwise_axes: Collection[int] = (),
-    tiled_axes: Mapping[int, int | float] | None = None,
-    calibration_method: str = 'absmax',
-    scale_dtype: jax.typing.DTypeLike | None = None,
-) -> QArray:
-  """Quantize a Jax Array into QArray.
+# APIs for quantizing Pallas kernels.
+get_current_rule = qconfig.get_current_rule
+pallas_call = pallas.pallas_call
 
-  Args:
-    array: The array to quantize.
-    qtype: The logical type of the quantized value, e.g. jnp.int8, jnp.int4,
-      jnp.float8_e4m3fn, "nf4", etc.
-    channelwise_axes: Channelwise axes have individual scales. This has the same
-      effect as setting their tile sizes to 1 in tiled_axes.
-    tiled_axes: Tiled axes have blockwise scales, aka subchannel quantization.
-      The value is a mapping from the tiled axis to the tile size. If the tile
-      size is a float, it will be interpreted as "1 / tile_count" and the actual
-      tile size will be round(axis_size * tile_size).
-    calibration_method: The calibration method to use. The format is
-      "<method>[,<args>]", e.g. "absmax" or "fixed,-10,10".
-    scale_dtype: The dtype of the scale. If not given, the dtype will be the
-      same as the array's dtype.
-
-  Returns:
-    The quantized array.
-  """
-  # A stable API for qarray.quantize()
-  how = qarray.HowToQuantize(
-      qtype=qtype,
-      channelwise_axes=channelwise_axes,
-      tiled_axes=tiled_axes or {},
-      calibration_method=calibration_method,
-  )
-  array = qarray.quantize(array, how)
-  if scale_dtype is not None:
-    array = dataclasses.replace(array, scale=array.scale.astype(scale_dtype))
-  return array
-
-
-def dot(
-    a: jax.Array | QArray,
-    b: jax.Array | QArray,
-    precision: jax.lax.PrecisionLike = None,
-    preferred_element_type: jax.typing.DTypeLike | None = None,
-    out_sharding=None,
-):
-  """jnp.dot with QArray support."""
-  a_ndim = a.ndim
-  b_ndim = b.ndim
-  if a_ndim == 0 or b_ndim == 0:
-    contract_dims = ((), ())
-  elif b_ndim == 1:
-    contract_dims = ((a_ndim - 1,), (0,))
-  else:
-    contract_dims = ((a_ndim - 1,), (b_ndim - 2,))
-  return dot_general(
-      a,
-      b,
-      dimension_numbers=(contract_dims, ((), ())),
-      precision=precision,
-      preferred_element_type=preferred_element_type,
-      out_sharding=out_sharding,
-  )
+# Use loop-based implementations for Pallas kernels.
+dot_general = qwix_dot_general.loop_dot_general
+dot = functools.partial(qwix_dot.dot, _qwix_dot_general=dot_general)
+einsum = functools.partial(qwix_einsum.einsum, _qwix_dot_general=dot_general)

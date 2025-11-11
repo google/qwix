@@ -272,7 +272,7 @@ def loop_dot_general(
     preferred_element_type: jax.typing.DTypeLike | None = None,
     **kwargs,
 ) -> jax.Array:
-  """Loop-based tiled dot general implementation."""
+  """Loop-based tiled dot general implementation, mainly used in Pallas kernels."""
   if isinstance(lhs, qarray.QArray):
     lhs_value = lhs.qvalue
     lhs_scale = lhs.scale

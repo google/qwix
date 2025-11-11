@@ -606,6 +606,59 @@ class OdmlTest(parameterized.TestCase):
         },
     )
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='first_encoder_conv',
+          module_path='Conv_0',
+      ),
+      dict(
+          testcase_name='last_model_conv',
+          module_path='Conv_9',
+      ),
+      dict(
+          testcase_name='first_and_last_convs',
+          module_path='Conv_0|Conv_9',
+      ),
+  )
+  def test_partial_quantization_unet_succeeds(self, module_path: str):
+    rules = [
+        qconfig.QuantizationRule(
+            module_path=module_path,
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+        ),
+    ]
+    model = UNet()
+    qat_provider = odml.OdmlQatProvider(rules)
+    qat_model = qwix_model.quantize_model(model, qat_provider)
+    model_input = model.create_input()
+    qat_variables = qat_model.init(jax.random.key(0), model_input)
+
+    # Run the forward pass once to get the quant_stats and batch stats.
+    _, new_vars = qat_model.apply(
+        qat_variables, model_input, mutable=['quant_stats', 'batch_stats']
+    )
+    qat_variables.update(new_vars)
+    logging.info(
+        'quant_stats for partial quantization unet: %s',
+        qat_variables['quant_stats'],
+    )
+
+    conversion_provider = odml.OdmlConversionProvider(
+        rules,
+        qat_variables['params'],
+        qat_variables['quant_stats'],
+    )
+    odml_model = qwix_model.quantize_model(model, conversion_provider)
+    ai_edge_jax.convert(
+        odml_model.apply,
+        qat_variables,
+        (model_input,),
+        _litert_converter_flags={
+            '_experimental_strict_qdq': True,
+        },
+    )
+
   @parameterized.named_parameters(*drq_test_cases)
   def test_drq(self, model: nn.Module):
     rules = [

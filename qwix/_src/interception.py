@@ -287,3 +287,16 @@ def disable_interceptions(fn):
         _intercepted_threads[key] = True
 
   return wrapper
+
+
+def has_attribute(name: str) -> bool:
+  """Returns if the module exists and has the attribute."""
+  name_parts = name.split(".")
+  if name_parts[0] not in sys.modules:
+    return False
+  obj = sys.modules[name_parts[0]]
+  for attr in name_parts[1:]:
+    obj = getattr(obj, attr, None)
+    if obj is None:
+      return False
+  return True

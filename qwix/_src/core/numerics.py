@@ -59,19 +59,19 @@ def get_symmetric_bound(qtype: jax.typing.DTypeLike) -> float:
       # of the qmax bucket. This is more important for fewer bits of int.
       return 2 ** (int(qtype[3:]) - 1) - 0.5
     case 'mxfp8':
-      return float(jnp.finfo(jnp.float8_e4m3fn).max)
+      qtype = jnp.float8_e4m3fn
     case 'mxfp4':
-      return float(jnp.finfo(jnp.float4_e2m1fn).max)
-    case _:  # builtin dtypes
-      # Prevent common misconfigurations, e.g., use bf16 as qtype.
-      if jax.dtypes.canonicalize_dtype(qtype).itemsize > 1:
-        raise ValueError(f'Cannot use {qtype} as qtype.')
-      try:
-        # TODO(dangyi): Extend the finfo.max bucket for a better utilization.
-        return float(jnp.finfo(qtype).max)
-      except ValueError:
-        # See the comment above for why we add 0.5.
-        return jnp.iinfo(qtype).max + 0.5
+      qtype = jnp.float4_e2m1fn
+
+  # Prevent common misconfigurations, e.g., use bf16 as qtype.
+  if jnp.dtype(qtype).itemsize > 1:
+    raise ValueError(f'Cannot use {qtype} as qtype.')
+  try:
+    # TODO(dangyi): Extend the finfo.max bucket for a better utilization.
+    return float(jnp.finfo(qtype).max)
+  except ValueError:
+    # See the comment above for why we add 0.5.
+    return jnp.iinfo(qtype).max + 0.5
 
 
 def convert_to(
@@ -80,6 +80,7 @@ def convert_to(
     noise_fn: NoiseFn | None = None,
 ) -> jax.Array:
   """Rounds and converts x to the given qtype."""
+  # Handles synthetic qtypes.
   match qtype:
     case 'nf4':
       return fp_to_nf4(x)
@@ -95,32 +96,28 @@ def convert_to(
         raise ValueError(f'Unsupported integer dtype: {qtype}')
       return jnp.round(x).clip(qmin, qmax).astype(qtype)
     case 'mxfp8':
-      finfo = jnp.finfo(jnp.float8_e4m3fn)
-      return x.clip(float(finfo.min), float(finfo.max)).astype(
-          jnp.float8_e4m3fn
-      )
+      qtype = jnp.float8_e4m3fn
     case 'mxfp4':
-      finfo = jnp.finfo(jnp.float4_e2m1fn)
-      return x.clip(float(finfo.min), float(finfo.max)).astype(
-          jnp.float4_e2m1fn
-      )
-    case _:  # builtin dtypes
-      try:
-        finfo = jnp.finfo(qtype)
-      except ValueError:
-        finfo = None
-      if finfo is None:
-        # dtype is an integer type. We need to round manually but clipping can
-        # be handled by "astype".
-        if noise_fn is not None:
-          # Stochastic rounding is done in fp32 to avoid bias from bf16, e.g.
-          # round(bf16(41)-bf16(0.4)) ~= round(40.5) = 40, rather than
-          # round(41-0.4) = round(40.6) = 41.
-          x = x.astype(jnp.float32) + noise_fn(x.shape)
-        return jnp.round(x).astype(qtype)
-      # dtype is a floating point type. No rounding needed, but we need to
-      # clip to the range to avoid inf or nan (e.g. for e4m3fn).
-      return x.clip(float(finfo.min), float(finfo.max)).astype(qtype)
+      qtype = jnp.float4_e2m1fn
+
+  # Handles builtin qtypes.
+  try:
+    finfo = jnp.finfo(qtype)
+  except ValueError:
+    pass
+  else:
+    # dtype is a floating point type. No rounding needed, but we need to clip to
+    # the range to avoid inf or nan (e.g. for e4m3fn).
+    return x.clip(float(finfo.min), float(finfo.max)).astype(qtype)
+
+  # dtype is an integer type. We need to round manually but clipping can be
+  # handled by "astype".
+  if noise_fn is not None:
+    # Stochastic rounding is done in fp32 to avoid bias from bf16, e.g.
+    # round(bf16(41)-bf16(0.4)) ~= round(40.5) = 40, rather than
+    # round(41-0.4) = round(40.6) = 41.
+    x = x.astype(jnp.float32) + noise_fn(x.shape)
+  return jnp.round(x).astype(qtype)
 
 
 def convert_from(x: jax.Array, qtype: jax.typing.DTypeLike) -> jax.Array:

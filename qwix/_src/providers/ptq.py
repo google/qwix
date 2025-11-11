@@ -20,11 +20,11 @@ from flax import linen as nn
 from flax import nnx
 import flax.linen.dtypes
 import jax
-import numpy as np
 from qwix._src import averaging
 from qwix._src import flax_util
 from qwix._src import qconfig
 from qwix._src.core import conv_general
+from qwix._src.core import dot
 from qwix._src.core import dot_general
 from qwix._src.core import einsum
 from qwix._src.core import qarray
@@ -54,6 +54,7 @@ class WithAux(Generic[ArrayTypeVar]):
   # This allows us to appear like nnx.Variable.
   value = property(flax_util.unbox)
   shape = property(lambda self: flax_util.unbox(self.array).shape)
+  ndim = property(lambda self: flax_util.unbox(self.array).ndim)
   __getitem__ = lambda self, key: jax.tree.map(lambda x: x[key], self.value)
 
   def reshape(self, *shape):
@@ -332,32 +333,20 @@ class PtqProvider(qconfig.QuantizationProvider):
 
   def dot(
       self,
-      a,
-      b,
+      a: jax.Array,
+      b: jax.Array | WithAux[qarray.QArray],
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
       out_sharding=None,
   ):
     """Intercepts jax.numpy.dot."""
-    a_ndim = np.ndim(a)
-    if isinstance(b, WithAux):
-      b_ndim = b.array.qvalue.ndim
-    else:
-      b_ndim = np.ndim(b)
-    if a_ndim == 0 or b_ndim == 0:
-      contract_dims = ((), ())
-    else:
-      if b_ndim == 1:
-        contract_dims = ((a_ndim - 1,), (0,))
-      else:
-        contract_dims = ((a_ndim - 1,), (b_ndim - 2,))
-    return self.dot_general(
+    return dot.dot(
         a,
         b,
-        dimension_numbers=(contract_dims, ((), ())),
         precision=precision,
         preferred_element_type=preferred_element_type,
         out_sharding=out_sharding,
+        _qwix_dot_general=self.dot_general,
     )
 
   def get_intercept_map(self):
@@ -465,11 +454,12 @@ def quantize_params(
     quant_stats: Any = flax.core.FrozenDict(),
     *,
     _qarray_module=qarray,
+    allow_extra_params: bool = False,
 ) -> Any:
   """Quantize the param tree for PTQ.
 
-  This function provides advanced param quantization for PTQ. It is useful when
-  the original params are too large to fit in the HBM.
+  This function provides advanced param quantization for PTQ. It is useful
+  when the original params are too large to fit in the HBM.
 
   Args:
     params: The floating-point param tree to quantize, which is usually
@@ -482,7 +472,10 @@ def quantize_params(
       In NN, the tree may contain AxisMetadata. In NNX, this should be the PTQ
       model itself, possibly abstract.
     quant_stats: The quantization statistics. This is only used in SRQ.
-    _qarray_module: The qarray module to use. Useful for extending.
+      _qarray_module: The qarray module to use. Useful for extending.
+    allow_extra_params: If True, allow the params to contain extra parameters
+      that are not present in the abstract_quantized_params, e.g., loss
+      computation that are not triggered in PTQ.
 
   Returns:
     The quantized param tree, which has the same structure as the input params
@@ -491,7 +484,9 @@ def quantize_params(
 
   def get_value_from_path(obj, path: tuple[str, ...]):
     for key in path:
-      obj = obj[key] if isinstance(obj, dict) else getattr(obj, key)
+      if obj is None:
+        return None
+      obj = obj.get(key) if isinstance(obj, dict) else getattr(obj, key)
     return obj
 
   quantized_params = {}
@@ -499,6 +494,14 @@ def quantize_params(
     if not isinstance(param, jax.Array):
       raise TypeError(f'params is not a pure dict of jax.Array: {type(param)}')
     abs_param = get_value_from_path(abstract_quantized_params, path)
+    if abs_param is None:
+      if allow_extra_params:
+        continue
+      else:
+        raise ValueError(
+            f'Quantized param {path} is not found in the abstract quantized'
+            ' params.'
+        )
     if isinstance(abs_param, WithAux):
       # The param might not be in the shape needed for compute, in case the
       # module reshapes before compute. Abstract param has the compute shape.
