@@ -20,11 +20,11 @@ import jax
 import jax.numpy as jnp
 from qwix._src.core import dot_general as core_dot_general
 from qwix._src.core import einsum as core_einsum
-from qwix._src.core import numerics
 from qwix._src.core import qarray
 from qwix._src.providers import ptq as _ptq
 
 
+PtqProvider = _ptq.PtqProvider
 calibrate = qarray.calibrate
 HowToQuantize = qarray.HowToQuantize
 
@@ -50,7 +50,9 @@ class PaddedQArray(qarray.QArray):
 MaybeQArray: TypeAlias = jax.Array | qarray.QArray | PaddedQArray
 
 
-def pad_to_tile(array: jax.Array, tiled_axes: Mapping[int, int | float]) -> jax.Array:
+def pad_to_tile(
+    array: jax.Array, tiled_axes: Mapping[int, int | float]
+) -> jax.Array:
   """Pads array along tiled axes so each dimension is a multiple of tile size."""
   if not tiled_axes:
     return array
@@ -107,6 +109,7 @@ def _pad_operand(x, tiled_axes):
   else:
     return pad_to_tile(x, tiled_axes)
 
+
 def dot_general(
     lhs: MaybeQArray,
     rhs: MaybeQArray,
@@ -120,30 +123,43 @@ def dot_general(
   We infer tiled axes using the same helper as core.get_how_to_quantize,
   using the provided `_tile_size`. This lets us pad even if stored qvalues
   are not padded, and it pads raw arrays when only the other side is quantized.
+
+  Args:
+    lhs: The left-hand side operand, can be a jax.Array or a PaddedQArray.
+    rhs: The right-hand side operand, can be a jax.Array or a PaddedQArray.
+    dimension_numbers: A tuple of tuples of the form
+      `((lhs_contracting_dims, rhs_contracting_dims),
+      (lhs_batch_dims, rhs_batch_dims))`.
+    precision: Optional. See `jax.lax.dot_general`.
+    preferred_element_type: Optional. See `jax.lax.dot_general`.
+    **kwargs: Additional keyword arguments passed to the underlying dot_general.
+
+  Returns:
+    The result of the dot general operation as a jax.Array.
   """
-  
+
   # Infer tile size by inspecting existing quantized operands.
-  _tile_size = None
+  tile_size = None
   if isinstance(rhs, PaddedQArray):
-    _tile_size = next(iter(rhs.tile_axes.values()))
+    tile_size = next(iter(dict(rhs.tile_axes).values()))
   elif isinstance(lhs, PaddedQArray):
-    _tile_size = next(iter(lhs.tile_axes.values()))
+    tile_size = next(iter(dict(lhs.tile_axes).values()))
 
   get_how_to_quantize = functools.partial(
-        core_dot_general.get_how_to_quantize,
-        dimension_numbers=dimension_numbers,
-        ndims=(len(lhs.shape), len(rhs.shape)),
-    )
+      core_dot_general.get_how_to_quantize,
+      dimension_numbers=dimension_numbers,
+      ndims=(len(lhs.shape), len(rhs.shape)),
+  )
   how_lhs = get_how_to_quantize(
       for_lhs=True,
       qtype=None,
-      tile_size=_tile_size,
+      tile_size=tile_size,
       calibration_method=None,
   )
   how_rhs = get_how_to_quantize(
       for_lhs=False,
       qtype=None,
-      tile_size=_tile_size,
+      tile_size=tile_size,
       calibration_method=None,
   )
 
@@ -182,33 +198,33 @@ def einsum(
   """Pad online based on einsum_str and tile_size, then delegate to core."""
 
   # Infer tile size by inspecting existing quantized operands.
-  _tile_size = None
+  tile_size = None
   if isinstance(rhs, PaddedQArray):
-    _tile_size = next(iter(rhs.tile_axes.values()))
+    tile_size = next(iter(dict(rhs.tile_axes).values()))
   elif isinstance(lhs, PaddedQArray):
-    _tile_size = next(iter(lhs.tile_axes.values()))
+    tile_size = next(iter(dict(lhs.tile_axes).values()))
 
   get_how_to_quantize = functools.partial(
-        core_einsum.get_how_to_quantize,
-        einsum_str=einsum_str,
-        ndims=(len(lhs.shape), len(rhs.shape)),
-    )
+      core_einsum.get_how_to_quantize,
+      einsum_str=einsum_str,
+      ndims=(len(lhs.shape), len(rhs.shape)),
+  )
   how_lhs = get_how_to_quantize(
       for_lhs=True,
       qtype=None,
-      tile_size=_tile_size,
+      tile_size=tile_size,
       calibration_method=None,
   )
   how_rhs = get_how_to_quantize(
       for_lhs=False,
       qtype=None,
-      tile_size=_tile_size,
+      tile_size=tile_size,
       calibration_method=None,
   )
 
   lhs = _pad_operand(lhs, how_lhs.tiled_axes)
   rhs = _pad_operand(rhs, how_rhs.tiled_axes)
-  
+
   return core_einsum.einsum(
       einsum_str,
       lhs,
@@ -217,6 +233,7 @@ def einsum(
       preferred_element_type=preferred_element_type,
       **kwargs,
   )
+
 
 def quantize_act(
     array: jax.Array,
@@ -259,7 +276,6 @@ def quantize_params(
 # Provider
 # ---------------------------
 
-from qwix._src.providers.ptq import PtqProvider
 PaddedPtqProvider = functools.partial(
     PtqProvider,
     _qarray_module=sys.modules[__name__],
