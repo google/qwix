@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import dataclasses
 import functools
-import os
 import sys
 from typing import Any, Mapping, TypeAlias
 
