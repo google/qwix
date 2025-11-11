@@ -452,11 +452,12 @@ def quantize_params(
     quant_stats: Any = flax.core.FrozenDict(),
     *,
     _qarray_module=qarray,
+    allow_extra_params: bool = False,
 ) -> Any:
   """Quantize the param tree for PTQ.
 
-  This function provides advanced param quantization for PTQ. It is useful when
-  the original params are too large to fit in the HBM.
+  This function provides advanced param quantization for PTQ. It is useful
+  when the original params are too large to fit in the HBM.
 
   Args:
     params: The floating-point param tree to quantize, which is usually
@@ -469,7 +470,10 @@ def quantize_params(
       In NN, the tree may contain AxisMetadata. In NNX, this should be the PTQ
       model itself, possibly abstract.
     quant_stats: The quantization statistics. This is only used in SRQ.
-    _qarray_module: The qarray module to use. Useful for extending.
+      _qarray_module: The qarray module to use. Useful for extending.
+    allow_extra_params: If True, allow the params to contain extra parameters
+      that are not present in the abstract_quantized_params, e.g., loss
+      computation that are not triggered in PTQ.
 
   Returns:
     The quantized param tree, which has the same structure as the input params
@@ -478,7 +482,9 @@ def quantize_params(
 
   def get_value_from_path(obj, path: tuple[str, ...]):
     for key in path:
-      obj = obj[key] if isinstance(obj, dict) else getattr(obj, key)
+      if obj is None:
+        return None
+      obj = obj.get(key) if isinstance(obj, dict) else getattr(obj, key)
     return obj
 
   quantized_params = {}
@@ -486,6 +492,14 @@ def quantize_params(
     if not isinstance(param, jax.Array):
       raise TypeError(f'params is not a pure dict of jax.Array: {type(param)}')
     abs_param = get_value_from_path(abstract_quantized_params, path)
+    if abs_param is None:
+      if allow_extra_params:
+        continue
+      else:
+        raise ValueError(
+            f'Quantized param {path} is not found in the abstract quantized'
+            ' params.'
+        )
     if isinstance(abs_param, WithAux):
       # The param might not be in the shape needed for compute, in case the
       # module reshapes before compute. Abstract param has the compute shape.
