@@ -40,7 +40,9 @@ calibrate = qarray.calibrate
 HowToQuantize = qarray.HowToQuantize
 
 _QARRAY_STORE_PADDED = os.environ.get('QARRAY_STORE_PADDED', '0') == '1'
-_QARRAY_USE_FAST_DOT_GENERAL = os.environ.get('QARRAY_USE_FAST_DOT_GENERAL', '1') == '1'
+_QARRAY_USE_FAST_DOT_GENERAL = (
+    os.environ.get('QARRAY_USE_FAST_DOT_GENERAL', '1') == '1'
+)
 
 
 # ---------------------------
