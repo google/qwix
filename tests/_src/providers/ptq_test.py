@@ -482,6 +482,54 @@ class PtqTest(parameterized.TestCase):
     out = jax.jit(ptq_model.apply)(variables, jnp.ones((3, 4)))
     self.assertEqual(out.shape, (3, 5))
 
+  def test_allow_extra_params(self):
+    class TestModel(nn.Module):
+
+      def setup(self):
+        self.dense_layer = nn.Dense(features=5)
+        self.ssl_loss_layer = nn.Dense(features=1)
+
+      def __call__(self, x):
+        return self.dense_layer(x)
+
+      def predict(self, x):
+        return self(x)
+
+      def compute_loss(self, x):
+        predict = self(x)
+        ssl_loss_out = self.ssl_loss_layer(predict)
+        return jnp.mean(ssl_loss_out)
+
+    model = TestModel()
+    variables = model.init(
+        jax.random.key(0), jnp.ones((3, 4)), method="compute_loss"
+    )
+    self.assertIn("ssl_loss_layer", variables["params"])
+    q_rules = [qconfig.QuantizationRule(weight_qtype=jnp.int8)]
+    ptq_model = qwix_model.quantize_model(
+        model, ptq.PtqProvider(q_rules), methods=["predict"]
+    )
+
+    def init_fn(prng, inputs):
+      return ptq_model.init(prng, inputs, method="predict")
+
+    init_fn = jax.jit(init_fn)
+    abstract_variables = jax.eval_shape(
+        jax.jit(init_fn), jax.random.key(0), jnp.ones((3, 4))
+    )
+    with self.assertRaisesRegex(ValueError, "ssl_loss_layer"):
+      ptq.quantize_params(
+          variables,
+          abstract_variables,
+          allow_extra_params=False,
+      )
+    ptq_params = ptq.quantize_params(
+        variables,
+        abstract_variables,
+        allow_extra_params=True,
+    )
+    self.assertNotIn("ssl_loss_layer", ptq_params["params"])
+
 
 if __name__ == "__main__":
   absltest.main()
