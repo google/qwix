@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from absl.testing import absltest
+from absl.testing import parameterized
 from flax import linen as nn
 import jax
 from jax import numpy as jnp
@@ -23,25 +24,31 @@ from qwix._src.providers import ptq
 from qwix.contrib import padded_qarray as ptq_pad
 
 D = 2880
-tile_size = 256
-D_PADDED = ((D + tile_size - 1) // tile_size) * tile_size
 T, E, F = 16, 32, 5760
 
 
-class PaddedPtqEquivalenceTest(absltest.TestCase):
+class PaddedPtqEquivalenceTest(parameterized.TestCase):
 
-  def test_einsum_simple(self):
+  @parameterized.parameters(
+      ('float4_e2m1fn', 'float8_e4m3fn', 32),
+      ('float4_e2m1fn', 'float8_e4m3fn', 256),
+      ('float4_e2m1fn', None, 32),
+      ('float4_e2m1fn', None, 256),
+  )
+  def test_einsum_simple(self, weight_qtype, act_qtype, tile_size):
+    d_padded = ((D + tile_size - 1) // tile_size) * tile_size
+
     x = jax.random.normal(jax.random.key(0), (T, D), dtype=jnp.float32)
     w = jax.random.normal(jax.random.key(1), (E, D, F), dtype=jnp.float32)
 
     # Pad the weight for PTQ
-    w_padded = jnp.pad(w, ((0, 0), (0, D_PADDED - D), (0, 0)))
-    x_padded = jnp.pad(x, ((0, 0), (0, D_PADDED - D)))
+    w_padded = jnp.pad(w, ((0, 0), (0, d_padded - D), (0, 0)))
+    x_padded = jnp.pad(x, ((0, 0), (0, d_padded - D)))
 
     rule = qconfig.QuantizationRule(
         module_path='.*',
-        weight_qtype='float8_e4m3fn',
-        act_qtype='float8_e4m3fn',
+        weight_qtype=weight_qtype,
+        act_qtype=act_qtype,
         tile_size=tile_size,
     )
 
@@ -89,7 +96,7 @@ class PaddedPtqEquivalenceTest(absltest.TestCase):
     pad_vars = pad_qmodel.init(jax.random.key(0), x)
     result_pad = pad_qmodel.apply(pad_vars, x)
 
-    ptq_model = EinsumModel(E, D_PADDED, F, w_padded)
+    ptq_model = EinsumModel(E, d_padded, F, w_padded)
     base_qmodel = qwix_model.quantize_model(ptq_model, ptq.PtqProvider([rule]))
     base_vars = base_qmodel.init(jax.random.key(1), x_padded)
     result_ptq = base_qmodel.apply(base_vars, x_padded)
@@ -99,17 +106,25 @@ class PaddedPtqEquivalenceTest(absltest.TestCase):
 
     assert jnp.allclose(result_pad, result_ptq, atol=1e-3)
 
-  def test_dot_general_simple(self):
+  @parameterized.parameters(
+      ('float4_e2m1fn', 'float8_e4m3fn', 32),
+      ('float4_e2m1fn', 'float8_e4m3fn', 256),
+      ('float4_e2m1fn', None, 32),
+      ('float4_e2m1fn', None, 256),
+  )
+  def test_dot_general_simple(self, weight_qtype, act_qtype, tile_size):
+    d_padded = ((D + tile_size - 1) // tile_size) * tile_size
+
     x = jax.random.normal(jax.random.key(0), (T, D), dtype=jnp.float32)
     w = jax.random.normal(jax.random.key(1), (E, D, F), dtype=jnp.float32)
 
-    w_padded = jnp.pad(w, ((0, 0), (0, D_PADDED - D), (0, 0)))
-    x_padded = jnp.pad(x, ((0, 0), (0, D_PADDED - D)))
+    w_padded = jnp.pad(w, ((0, 0), (0, d_padded - D), (0, 0)))
+    x_padded = jnp.pad(x, ((0, 0), (0, d_padded - D)))
 
     rule = qconfig.QuantizationRule(
         module_path='.*',
-        weight_qtype='float8_e4m3fn',
-        act_qtype='float8_e4m3fn',
+        weight_qtype=weight_qtype,
+        act_qtype=act_qtype,
         tile_size=tile_size,
     )
 
@@ -157,7 +172,7 @@ class PaddedPtqEquivalenceTest(absltest.TestCase):
     pad_vars = pad_qmodel.init(jax.random.key(0), x)
     result_pad = pad_qmodel.apply(pad_vars, x)
 
-    ptq_model = DotModel(E, D_PADDED, F, w_padded)
+    ptq_model = DotModel(E, d_padded, F, w_padded)
     base_qmodel = qwix_model.quantize_model(ptq_model, ptq.PtqProvider([rule]))
     base_vars = base_qmodel.init(jax.random.key(1), x_padded)
     result_ptq = base_qmodel.apply(base_vars, x_padded)
