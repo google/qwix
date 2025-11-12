@@ -24,7 +24,7 @@ from qwix._src.providers import ptq
 from qwix.contrib import padded_qarray as ptq_pad
 
 D = 2880
-T, E, F = 16, 32, 5760
+T, E, F = 16, 4, 1440
 
 
 class PaddedPtqEquivalenceTest(parameterized.TestCase):
