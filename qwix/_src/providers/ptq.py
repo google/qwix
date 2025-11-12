@@ -95,12 +95,14 @@ class PtqProvider(qconfig.QuantizationProvider):
       *,
       _qarray_module=qarray,
       _dot_general_fn=dot_general.dot_general,
+      _einsum_fn=einsum.einsum,
       _conv_general_dilated_fn=conv_general.conv_general_dilated,
   ):
     """Initializes the PTQ provider."""
     super().__init__(rules)
     self._qarray_module = _qarray_module
     self._dot_general_fn = _dot_general_fn
+    self._einsum_fn = _einsum_fn
     self._conv_general_dilated_fn = _conv_general_dilated_fn
 
   def dot_general(
@@ -229,9 +231,7 @@ class PtqProvider(qconfig.QuantizationProvider):
       lhs = quantize_act(
           lhs, lhs_how, rule, op_id + '_lhs', _qarray_module=self._qarray_module
       )
-    return einsum.einsum(
-        einsum_str, lhs, rhs, _qwix_dot_general=self._dot_general_fn
-    )
+    return self._einsum_fn(einsum_str, lhs, rhs)
 
   def conv_general_dilated(
       self,
