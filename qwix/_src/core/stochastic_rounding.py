@@ -13,16 +13,14 @@
 # limitations under the License.
 """Stochastic rounding utilities."""
 
-from typing import Sequence
+from typing import Callable, Sequence
 import jax
 import jax.numpy as jnp
 
 
 def low_bit_uniform_noise(
-    shape: tuple[int, ...],
-    *,
     key: jax.Array,
-    channelwise_noise_axes: Sequence[int] = (0,),
+    shape: tuple[int, ...],
 ) -> jax.Array:
   """Random float32 numbers in nearly (-0.5, 0.5) of shape `shape`.
 
@@ -34,17 +32,12 @@ def low_bit_uniform_noise(
   with scaling up (converges fine for 8bits+).
 
   Args:
-    shape: Shape of the array.
     key: Random key.
-    channelwise_noise_axes: Axes along which to generate channelwise noise.
+    shape: Shape of the noise.
 
   Returns:
     A random float32 array of shape `shape` in range (-0.5, 0.5).
   """
-  shape = tuple(
-      dim if axis in channelwise_noise_axes else 1
-      for axis, dim in enumerate(shape)
-  )
   nbits = 8
   rand_u8 = jax.random.bits(key, shape, dtype=jnp.uint8)
 
@@ -71,16 +64,33 @@ def low_bit_uniform_noise(
 
 
 def uniform_noise(
-    shape: tuple[int, ...],
-    *,
     key: jax.Array,
-    channelwise_noise_axes: Sequence[int] = (0,),
+    shape: tuple[int, ...],
 ) -> jax.Array:
   """Uniform noise."""
+  return jax.random.uniform(key, shape) - 0.5
 
-  # Keep shape dimensions only for channelwise_noise_axes.
-  noise_shape = tuple(
-      dim if axis in channelwise_noise_axes else 1
-      for axis, dim in enumerate(shape)
-  )
-  return jax.random.uniform(key, noise_shape) - 0.5
+
+def get_noise_fn(
+    method: str,
+    key: jax.Array,
+    channelwise_noise_axes: Sequence[int] = (0,),
+) -> Callable[[tuple[int, ...]], jax.Array]:
+  """Returns a noise function for stochastic rounding."""
+  if method == 'uniform':
+    fn = uniform_noise
+  elif method == 'low_bit_uniform':
+    fn = low_bit_uniform_noise
+  else:
+    raise ValueError(f'Unsupported stochastic rounding method: {method}')
+
+  def noise_fn(shape: tuple[int, ...]) -> jax.Array:
+    # Apply channelwise_noise_axes to get the noise shape. This significantly
+    # reduces the overhead of creating a full noise array.
+    noise_shape = tuple(
+        dim if axis in channelwise_noise_axes else 1
+        for axis, dim in enumerate(shape)
+    )
+    return fn(key, noise_shape)
+
+  return noise_fn

@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-import functools
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
@@ -26,8 +24,8 @@ class StochasticRoundingTest(parameterized.TestCase):
   def test_uniform_noise(self):
     key = jax.random.PRNGKey(0)
     shape = (2, 3)
-    noise_fn = functools.partial(
-        stochastic_rounding.uniform_noise, key=key, channelwise_noise_axes=(0,)
+    noise_fn = stochastic_rounding.get_noise_fn(
+        "uniform", key=key, channelwise_noise_axes=(0,)
     )
     noise = noise_fn(shape)
     self.assertEqual(noise.shape, (2, 1))
@@ -41,8 +39,8 @@ class StochasticRoundingTest(parameterized.TestCase):
   def test_low_bit_uniform_noise(self):
     key = jax.random.PRNGKey(0)
     shape = (2, 3)
-    noise_fn = functools.partial(
-        stochastic_rounding.low_bit_uniform_noise,
+    noise_fn = stochastic_rounding.get_noise_fn(
+        "low_bit_uniform",
         key=key,
         channelwise_noise_axes=(0,),
     )

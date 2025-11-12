@@ -41,6 +41,7 @@ class QtTest(absltest.TestCase):
 
     provider_reuse = qt.QtProvider([
         qt.QtRule(
+            bwd_qtype=jnp.int8,
             bwd_stochastic_rounding="low_bit_uniform",
         ),
     ])

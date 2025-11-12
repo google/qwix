@@ -83,7 +83,7 @@ class NumericsTest(absltest.TestCase):
   def test_stochastic_rounding(self):
     key = jax.random.PRNGKey(0)
     x = jnp.full((10000,), 0.5)
-    noise_fn = functools.partial(stochastic_rounding.uniform_noise, key=key)
+    noise_fn = functools.partial(stochastic_rounding.uniform_noise, key)
     y = numerics.convert_to(x, jnp.int8, noise_fn=noise_fn)
     # Without stochastic rounding, this would be rounded to all zeros based on
     # round-half-to-even.
@@ -92,7 +92,7 @@ class NumericsTest(absltest.TestCase):
     # Test with negative values.
     x = jnp.full((10000,), -0.5)
     _, subkey = jax.random.split(key)
-    noise_fn = functools.partial(stochastic_rounding.uniform_noise, key=subkey)
+    noise_fn = functools.partial(stochastic_rounding.uniform_noise, subkey)
     y = numerics.convert_to(x, jnp.int8, noise_fn=noise_fn)
     # Without stochastic rounding, this would be rounded to all zeros based on
     # round-half-to-even.
