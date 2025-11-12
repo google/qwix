@@ -39,7 +39,7 @@ calibrate = qarray.calibrate
 HowToQuantize = qarray.HowToQuantize
 
 # Whether to keep shape of qvalue in padded form during "quantize"
-QARRAY_KEEP_PADDED_SHAPE = True
+QARRAY_KEEP_PADDED_SHAPE = False
 
 
 # ---------------------------
