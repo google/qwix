@@ -199,10 +199,10 @@ def einsum(
     **kwargs,
 ) -> jax.Array:
   """Pad operands and delegate to core einsum.
-  
+
   PaddedQArray operands are padded to their stored padded_shape. Regular arrays
   are padded along contraction dimensions to match PaddedQArray operands.
-  
+
   Args:
     einsum_str: The einsum equation string.
     lhs: Left-hand side operand.
