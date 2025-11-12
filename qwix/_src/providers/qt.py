@@ -48,7 +48,8 @@ class QtRule(qconfig.QuantizationRule):
   # If True, disable channelwise axes for both forward and backward passes.
   disable_channelwise_axes: bool = False
 
-  # Use stochastic rounding for the gradients. (Only 'uniform' is supported.)
+  # Use stochastic rounding for the gradients.
+  # Currently supports "uniform" and "low_bit_uniform".
   bwd_stochastic_rounding: str | None = None
 
   # Use channelwise noise for stochastic rounding. By default, it will generate
@@ -340,35 +341,19 @@ class QtProvider(qconfig.QuantizationProvider):
     # bwd config, which is only enabled when bwd_qtype is set.
     dlhs_tile_size = None
     drhs_tile_size = None
+    bwd_stochastic_rounding_noise_fn = None
 
     if rule.bwd_qtype is not None:
       if lhs_is_weight:
         dlhs_tile_size = rule.bwd_weight_grad_tile_size
       if rhs_is_weight:
         drhs_tile_size = rule.bwd_weight_grad_tile_size
-
-    if rule.bwd_stochastic_rounding == 'uniform':
-      key = flax_util.make_rng('stochastic_rounding')
-      bwd_stochastic_rounding_noise_fn = functools.partial(
-          stochastic_rounding.uniform_noise,
-          key=key,
-          channelwise_noise_axes=rule.channelwise_noise_axes,
-      )
-    elif rule.bwd_stochastic_rounding == 'low_bit_uniform':
-      key = flax_util.make_rng('stochastic_rounding')
-      bwd_stochastic_rounding_noise_fn = functools.partial(
-          stochastic_rounding.low_bit_uniform_noise,
-          key=key,
-          channelwise_noise_axes=rule.channelwise_noise_axes,
-      )
-
-    elif rule.bwd_stochastic_rounding is not None:
-      raise ValueError(
-          'Stochastic rounding should be "uniform" or None, got:'
-          f' {rule.bwd_stochastic_rounding}'
-      )
-    else:
-      bwd_stochastic_rounding_noise_fn = None
+      if rule.bwd_stochastic_rounding is not None:
+        bwd_stochastic_rounding_noise_fn = stochastic_rounding.get_noise_fn(
+            method=rule.bwd_stochastic_rounding,
+            key=flax_util.make_rng('stochastic_rounding'),
+            channelwise_noise_axes=rule.channelwise_noise_axes,
+        )
 
     qt_config = dot_general_qt.DotGeneralQtConfig(
         # fwd configs.
