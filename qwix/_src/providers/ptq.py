@@ -215,7 +215,6 @@ class PtqProvider(qconfig.QuantizationProvider):
       rhs_how = get_how_to_quantize(
           for_lhs=False,
           qtype=rule.act_qtype,
-          tile_size=rule.tile_size,
           calibration_method=rule.act_calibration_method,
       )
       rhs = quantize_act(
@@ -227,7 +226,6 @@ class PtqProvider(qconfig.QuantizationProvider):
       lhs_how = get_how_to_quantize(
           for_lhs=True,
           qtype=rule.act_qtype,
-          tile_size=rule.tile_size,
           calibration_method=rule.act_calibration_method,
       )
       lhs = quantize_act(

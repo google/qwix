@@ -38,10 +38,8 @@ PtqProvider = _ptq.PtqProvider
 calibrate = qarray.calibrate
 HowToQuantize = qarray.HowToQuantize
 
-# Permanently keep shapes in padded form.
-_QARRAY_KEEP_PADDED_SHAPE = False
-# Which dot_general implementation to use.
-_QARRAY_USE_FAST_DOT_GENERAL = True
+# Keep shapes in padded form during quantization.
+QARRAY_KEEP_PADDED_SHAPE = False
 
 
 # ---------------------------
@@ -54,11 +52,12 @@ class PaddedQArray(qarray.QArray):
   """Quantized array with padding support.
 
   Attributes:
-    tile_axes: Maps axis to tile size for padding.
+    padded_shape: The shape after padding to tile boundaries.
+    original_shape: The original shape before padding.
   """
 
-  tile_axes: Mapping[int, int] | float = flax.struct.field(
-      pytree_node=False, default_factory=dict
+  padded_shape: tuple[int, ...] = flax.struct.field(
+      pytree_node=False, default=()
   )
   original_shape: tuple[int, ...] = flax.struct.field(
       pytree_node=False, default=()
@@ -68,12 +67,21 @@ class PaddedQArray(qarray.QArray):
 MaybeQArray: TypeAlias = jax.Array | qarray.QArray | PaddedQArray
 
 
+def pad_to_shape(array: jax.Array, target_shape: tuple[int, ...]) -> jax.Array:
+  """Pads array to target shape."""
+  if array.shape == target_shape:
+    return array
+  pad_width = [
+      (0, target - current)
+      for current, target in zip(array.shape, target_shape)
+  ]
+  return jnp.pad(array, pad_width, constant_values=0)
+
+
 def pad_to_tile(
     array: jax.Array, tiled_axes: Mapping[int, int | float]
 ) -> jax.Array:
   """Pads array along tiled axes so each dimension is a multiple of tile size."""
-  if not tiled_axes:
-    return array
   pad_width = [(0, 0)] * array.ndim
   for axis, tile_size in tiled_axes.items():
     if isinstance(tile_size, float):
@@ -91,15 +99,16 @@ def quantize(array: jax.Array, how: HowToQuantize) -> PaddedQArray:
   """Quantizes an array using a dynamic range with padding support."""
   original_shape = array.shape
   array = pad_to_tile(array, how.tiled_axes)
+  padded_shape = array.shape
   array = qarray.quantize(array, how)
-  if not _QARRAY_KEEP_PADDED_SHAPE:
+  if not QARRAY_KEEP_PADDED_SHAPE:
     array = dataclasses.replace(
         array,
         qvalue=array.qvalue[tuple(slice(0, dim) for dim in original_shape)],
     )
   return PaddedQArray(
       **dataclasses.asdict(array),
-      tile_axes=how.tiled_axes,
+      padded_shape=padded_shape,
       original_shape=original_shape,
   )
 
@@ -107,11 +116,10 @@ def quantize(array: jax.Array, how: HowToQuantize) -> PaddedQArray:
 def dequantize(array: PaddedQArray) -> jax.Array:
   """Dequantizes an array. The reverse of |quantize|."""
   qarray.validate_qarray(array)
-  original_shape = array.shape
-  padded_qvalue = pad_to_tile(array.qvalue, dict(array.tile_axes))
+  padded_qvalue = pad_to_shape(array.qvalue, array.padded_shape)
   out = qarray.dequantize(dataclasses.replace(array, qvalue=padded_qvalue))
-  if out.shape != array.original_shape and not _QARRAY_KEEP_PADDED_SHAPE:
-    out = out[tuple(slice(0, d) for d in original_shape)]
+  if out.shape != array.original_shape:
+    out = out[tuple(slice(0, d) for d in array.original_shape)]
   return out
 
 
@@ -120,12 +128,11 @@ def dequantize(array: PaddedQArray) -> jax.Array:
 # ---------------------------
 
 
-def _pad_operand(x, tiled_axes):
+def _pad_operand(x):
   if isinstance(x, PaddedQArray):
-    padded_q = pad_to_tile(x.qvalue, tiled_axes)
+    padded_q = pad_to_shape(x.qvalue, x.padded_shape)
     return dataclasses.replace(x, qvalue=padded_q)
-  else:
-    return pad_to_tile(x, tiled_axes)
+  return x
 
 
 def dot_general(
@@ -136,10 +143,10 @@ def dot_general(
     preferred_element_type: jax.typing.DTypeLike | None = None,
     **kwargs,
 ) -> jax.Array:
-  """Pad operands online based on dimension_numbers, then delegate.
+  """Pad operands and delegate to core dot_general.
 
-  Infers tile axes from quantized operands to pad on contracting dimensions.
-  Pads raw arrays when only one operand is quantized.
+  PaddedQArray operands are padded to their stored padded_shape. Regular arrays
+  are padded along contraction dimensions to match PaddedQArray operands.
 
   Args:
     lhs: Left-hand side operand.
@@ -153,44 +160,27 @@ def dot_general(
     Result of dot_general operation.
   """
 
-  # Infer tile size by inspecting existing quantized operands.
-  tile_size = None
-  if isinstance(rhs, PaddedQArray):
-    tile_size = next(iter(dict(rhs.tile_axes).values()))
-  elif isinstance(lhs, PaddedQArray):
-    tile_size = next(iter(dict(lhs.tile_axes).values()))
+  # Pad PaddedQArray operands to their padded_shape
+  lhs = _pad_operand(lhs)
+  rhs = _pad_operand(rhs)
 
-  get_how_to_quantize = functools.partial(
-      core_dot_general.get_how_to_quantize,
-      dimension_numbers=dimension_numbers,
-      ndims=(len(lhs.shape), len(rhs.shape)),
-  )
-  how_lhs = get_how_to_quantize(
-      for_lhs=True,
-      qtype=None,
-      tile_size=tile_size,
-      calibration_method=None,
-  )
-  how_rhs = get_how_to_quantize(
-      for_lhs=False,
-      qtype=None,
-      tile_size=tile_size,
-      calibration_method=None,
-  )
+  # If only one operand is PaddedQArray, pad the other to match along
+  # contraction dims
+  (lhs_contract, rhs_contract), _ = dimension_numbers
 
-  lhs = _pad_operand(lhs, how_lhs.tiled_axes)
-  rhs = _pad_operand(rhs, how_rhs.tiled_axes)
+  if not isinstance(rhs, PaddedQArray):
+    target_shape = list(rhs.shape)
+    for rhs_axis, lhs_axis in zip(rhs_contract, lhs_contract):
+      target_shape[rhs_axis] = lhs.shape[lhs_axis]
+    rhs = pad_to_shape(rhs, tuple(target_shape))
 
-  if _QARRAY_USE_FAST_DOT_GENERAL:
-    return core_dot_general._fast_dot_general(  # pylint: disable=protected-access
-        lhs,
-        rhs,
-        dimension_numbers,
-        preferred_element_type=preferred_element_type,
-        precision=precision,
-        **kwargs,
-    )
-  return core_dot_general._slow_dot_general(  # pylint: disable=protected-access
+  if not isinstance(lhs, PaddedQArray):
+    target_shape = list(lhs.shape)
+    for lhs_axis, rhs_axis in zip(lhs_contract, rhs_contract):
+      target_shape[lhs_axis] = rhs.shape[rhs_axis]
+    lhs = pad_to_shape(lhs, tuple(target_shape))
+
+  return core_dot_general.dot_general(
       lhs,
       rhs,
       dimension_numbers,
@@ -205,45 +195,57 @@ def einsum(
     lhs: MaybeQArray,
     rhs: MaybeQArray,
     *,
-    _qwix_dot_general=core_dot_general.dot_general,
     preferred_element_type: jax.typing.DTypeLike | None = None,
     **kwargs,
 ) -> jax.Array:
-  """Pad operands online based on einsum_str, then delegate."""
+  """Pad operands and delegate to core einsum.
+  
+  PaddedQArray operands are padded to their stored padded_shape. Regular arrays
+  are padded along contraction dimensions to match PaddedQArray operands.
+  
+  Args:
+    einsum_str: The einsum equation string.
+    lhs: Left-hand side operand.
+    rhs: Right-hand side operand.
+    preferred_element_type: Optional element type.
+    **kwargs: Additional arguments.
 
-  # Infer tile size by inspecting existing quantized operands.
-  tile_size = None
-  if isinstance(rhs, PaddedQArray):
-    tile_size = next(iter(dict(rhs.tile_axes).values()))
-  elif isinstance(lhs, PaddedQArray):
-    tile_size = next(iter(dict(lhs.tile_axes).values()))
+  Returns:
+    Result of the einsum operation.
+  """
 
-  get_how_to_quantize = functools.partial(
-      core_einsum.get_how_to_quantize,
-      einsum_str=einsum_str,
-      ndims=(len(lhs.shape), len(rhs.shape)),
-  )
-  how_lhs = get_how_to_quantize(
-      for_lhs=True,
-      qtype=None,
-      tile_size=tile_size,
-      calibration_method=None,
-  )
-  how_rhs = get_how_to_quantize(
-      for_lhs=False,
-      qtype=None,
-      tile_size=tile_size,
-      calibration_method=None,
-  )
+  # Pad PaddedQArray operands to their padded_shape
+  lhs = _pad_operand(lhs)
+  rhs = _pad_operand(rhs)
 
-  lhs = _pad_operand(lhs, how_lhs.tiled_axes)
-  rhs = _pad_operand(rhs, how_rhs.tiled_axes)
+  # If only one operand is PaddedQArray, pad the other to match along
+  # contraction dims
+  if not isinstance(rhs, PaddedQArray):
+    info = core_einsum.get_einsum_info(
+        einsum_str, (len(lhs.shape), len(rhs.shape))
+    )
+    target_shape = list(rhs.shape)
+    for axis, name in enumerate(info.rhs):
+      if name in info.contractions:
+        lhs_axis = info.lhs.index(name)
+        target_shape[axis] = lhs.shape[lhs_axis]
+    rhs = pad_to_shape(rhs, tuple(target_shape))
+
+  if not isinstance(lhs, PaddedQArray):
+    info = core_einsum.get_einsum_info(
+        einsum_str, (len(lhs.shape), len(rhs.shape))
+    )
+    target_shape = list(lhs.shape)
+    for axis, name in enumerate(info.lhs):
+      if name in info.contractions:
+        rhs_axis = info.rhs.index(name)
+        target_shape[axis] = rhs.shape[rhs_axis]
+    lhs = pad_to_shape(lhs, tuple(target_shape))
 
   return core_einsum.einsum(
       einsum_str,
       lhs,
       rhs,
-      _qwix_dot_general=_qwix_dot_general,
       preferred_element_type=preferred_element_type,
       **kwargs,
   )
