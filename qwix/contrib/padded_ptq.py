@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""QArray implementation with padding to tile sizes.
+"""PTQ extension with unevenly subchannel quantization support.
 
 Extends qwix.QArray with PaddedQArray for automatic padding to tile size
 multiples before quantization. Provides wrappers for dot_general and PTQ

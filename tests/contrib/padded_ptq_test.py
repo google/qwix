@@ -21,13 +21,13 @@ from qwix._src import qconfig
 from qwix._src.core import dot_general as core_dot
 from qwix._src.core import einsum as core_einsum
 from qwix._src.providers import ptq
-from qwix.contrib import padded_qarray as ptq_pad
+from qwix.contrib import padded_ptq
 
 D = 2880
 T, E, F = 16, 4, 1440
 
 
-class PaddedPtqEquivalenceTest(parameterized.TestCase):
+class PaddedPtqTest(parameterized.TestCase):
 
   @parameterized.parameters(
       ('float4_e2m1fn', 'float8_e4m3fn', 32),
@@ -61,7 +61,7 @@ class PaddedPtqEquivalenceTest(parameterized.TestCase):
         calibration_method='absmax',
     )
 
-    w_qarray_pad = ptq_pad.quantize_act(w, how, rule, None)
+    w_qarray_pad = padded_ptq.quantize_act(w, how, rule, None)
     w_qarray_ptq = ptq.quantize_act(w_padded, how, rule, None)
 
     q_diff = jnp.max(
@@ -91,7 +91,7 @@ class PaddedPtqEquivalenceTest(parameterized.TestCase):
 
     pad_model = EinsumModel(E, D, F, w)
     pad_qmodel = qwix_model.quantize_model(
-        pad_model, ptq_pad.PaddedPtqProvider([rule])
+        pad_model, padded_ptq.PaddedPtqProvider([rule])
     )
     pad_vars = pad_qmodel.init(jax.random.key(0), x)
     result_pad = pad_qmodel.apply(pad_vars, x)
@@ -138,7 +138,7 @@ class PaddedPtqEquivalenceTest(parameterized.TestCase):
         calibration_method='absmax',
     )
 
-    w_qarray_pad = ptq_pad.quantize_act(w, how, rule, None)
+    w_qarray_pad = padded_ptq.quantize_act(w, how, rule, None)
     w_qarray_ptq = ptq.quantize_act(w_padded, how, rule, None)
 
     q_diff = jnp.max(
@@ -167,7 +167,7 @@ class PaddedPtqEquivalenceTest(parameterized.TestCase):
 
     pad_model = DotModel(E, D, F, w)
     pad_qmodel = qwix_model.quantize_model(
-        pad_model, ptq_pad.PaddedPtqProvider([rule])
+        pad_model, padded_ptq.PaddedPtqProvider([rule])
     )
     pad_vars = pad_qmodel.init(jax.random.key(0), x)
     result_pad = pad_qmodel.apply(pad_vars, x)
