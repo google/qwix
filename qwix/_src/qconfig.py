@@ -16,6 +16,7 @@
 from collections.abc import Callable, Collection, Sequence
 import dataclasses
 import re
+import sys
 from typing import Any
 
 from absl import logging
@@ -130,7 +131,11 @@ class QuantizationProvider:
             lambda op: self._get_current_rule_and_op_id(op, only_rule=True)[0]
         )
     }
+<<<<<<< HEAD
     if interception.has_attribute('jax.experimental.pallas.pallas_call'):
+=======
+    if 'jax.experimental.pallas' in sys.modules:
+>>>>>>> 9c6d0bc (Conditionally add pallas_call to the intercept map.)
       # Disable interception for ops in pallas_call.
       intercept_map['jax.experimental.pallas.pallas_call'] = (
           lambda *args, **kwargs: interception.disable_interceptions(
