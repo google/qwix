@@ -180,12 +180,20 @@ def quantize_nnx_model(
   }
   model.__class__ = type(model_class.__name__, (model_class,), new_fields)
 
+  rngs = model_inputs_kwargs.pop("rngs", None)
+  if rngs is not None and not isinstance(rngs, nnx.Rngs):
+    raise ValueError("Rngs must be an nnx.Rngs instance.")
+
   # Unlike linen module, nnx module does not have scope or path attribute, we
   # need to iterate over all modules and set the path for them.
   for path, module in model.iter_modules():
     module.qwix_path = path
     # Disable quant_stats update for the first call.
     module.disable_quant_stats_update = True
+    # Set the rngs, which is shared by all modules and useful for stochastic
+    # rounding, lora dropout, etc.
+    if rngs is not None:
+      module.qwix_rngs = rngs
 
   # Because nnx modules are stateful, we need to call them once to initialize
   # them (convert weights, create quant_stats) unless users explicitly opt out.
