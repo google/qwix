@@ -14,8 +14,7 @@
 """Low-Rank Adapation (LoRA) support."""
 import dataclasses
 import string
-from typing import Any, Callable, Collection, Sequence
-import warnings
+from typing import Callable, Sequence
 
 from flax import linen as nn
 from flax import nnx
@@ -30,30 +29,8 @@ from qwix._src.core import qarray
 from qwix._src.providers import ptq
 
 
-def apply_lora_to_model(
-    model: qwix_model.ModelType,
-    provider: qconfig.QuantizationProvider,
-    *model_inputs: Any,
-    methods: Collection[str] = ('__call__',),
-    **model_inputs_kwargs: Any,
-) -> qwix_model.ModelType:
-  """Applies LoRA to a model."""
-  # RNG is always needed for LoRA, so we eagerly check it here.
-  if isinstance(model, nnx.Module) and 'rngs' not in model_inputs_kwargs:
-    warnings.warn(
-        'rngs must be provided for NNX models with LoRA. '
-        'Please specify rngs=nnx.Rngs(...) in apply_lora_to_model.'
-    )
-    model_inputs_kwargs['rngs'] = nnx.Rngs(0)
-
-  # apply_lora_to_model is just an alias for quantize_model.
-  return qwix_model.quantize_model(
-      model,
-      provider,
-      *model_inputs,
-      methods=methods,
-      **model_inputs_kwargs,
-  )
+# apply_lora_to_model is just an alias for quantize_model.
+apply_lora_to_model = qwix_model.quantize_model
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -197,7 +174,7 @@ class LoraProvider(ptq.PtqProvider):
         and not dimension_numbers[1][1]
     ), f'Unsupported: {rhs.shape=} {dimension_numbers=}'
 
-    lora_a, lora_b = _get_or_create_lora_params(
+    lora_a, lora_b, dropout_layer = _get_or_create_lora_params(
         name=weight_name,
         rule=rule,
         a_shape=(rhs.shape[0], rule.rank),
@@ -206,9 +183,11 @@ class LoraProvider(ptq.PtqProvider):
         b_sharding_transpose=(None, 1),
     )
 
-    if rule.dropout > 0:
-      # This also works for linen.
-      lhs = nnx.Dropout(rule.dropout)(lhs, rngs=flax_util.make_rng('dropout'))
+    if dropout_layer is not None:
+      # TODO(zhuyunx): Use nnx.Rngs(0) for now. Need to check `deterministic`
+      # to decide whether to provide a rng.
+      # NOTE: this is wrong because it always uses the same rng.
+      lhs = dropout_layer(lhs, rngs=nnx.Rngs(0))
 
     return res + lhs @ lora_a @ lora_b * (rule.alpha / rule.rank)
 
@@ -245,7 +224,7 @@ class LoraProvider(ptq.PtqProvider):
     module = flax_util.get_current_module()
     setattr(module, weight_name + '_lora_einsum_str', lora_einsum_str)
 
-    lora_a, lora_b = _get_or_create_lora_params(
+    lora_a, lora_b, dropout_layer = _get_or_create_lora_params(
         name=weight_name,
         rule=rule,
         a_shape=a_shape,
@@ -254,9 +233,11 @@ class LoraProvider(ptq.PtqProvider):
         b_sharding_transpose=b_sharding_transpose,
     )
 
-    if rule.dropout > 0:
-      # This also works for linen.
-      lhs = nnx.Dropout(rule.dropout)(lhs, rngs=flax_util.make_rng('dropout'))
+    if dropout_layer is not None:
+      # TODO(zhuyunx): Use nnx.Rngs(0) for now. Need to check `deterministic`
+      # to decide whether to provide a rng.
+      # NOTE: this is wrong because it always uses the same rng.
+      lhs = dropout_layer(lhs, rngs=nnx.Rngs(0))
 
     return res + (
         jax.numpy.einsum(lora_einsum_str, lhs, lora_a, lora_b, **kwargs)
@@ -310,7 +291,7 @@ class LoraProvider(ptq.PtqProvider):
         and dimension_numbers.out_spec[1] == len(lhs.shape) - 1
     ), f'Unsupported: {dimension_numbers=}'
 
-    lora_a, lora_b = _get_or_create_lora_params(
+    lora_a, lora_b, dropout_layer = _get_or_create_lora_params(
         name=weight_name,
         rule=rule,
         a_shape=(*rhs.shape[:-1], rule.rank),
@@ -319,9 +300,11 @@ class LoraProvider(ptq.PtqProvider):
         b_sharding_transpose=(None, len(rhs.shape) - 1),
     )
 
-    if rule.dropout > 0:
-      # This also works for linen.
-      lhs = nnx.Dropout(rule.dropout)(lhs, rngs=flax_util.make_rng('dropout'))
+    if dropout_layer is not None:
+      # TODO(zhuyunx): Use nnx.Rngs(0) for now. Need to check `deterministic`
+      # to decide whether to provide a rng.
+      # NOTE: this is wrong because it always uses the same rng.
+      lhs = dropout_layer(lhs, rngs=nnx.Rngs(0))
 
     return res + jax.lax.conv_general_dilated(
         lhs,
@@ -346,7 +329,7 @@ def _get_or_create_lora_params(
     b_shape: typing.Shape,
     a_sharding_transpose: Sequence[int | None],
     b_sharding_transpose: Sequence[int | None],
-) -> tuple[jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, nnx.Dropout | None]:
   """Get or create LoRA params.
 
   Args:
@@ -358,8 +341,12 @@ def _get_or_create_lora_params(
     b_sharding_transpose: The transpose to derive the sharding for lora_b.
 
   Returns:
-    A tuple of LoRA weights (lora_a, lora_b).
+    A tuple of (lora_a, lora_b, dropout_layer).
   """
+  dropout_layer = None
+  if rule.dropout > 0:
+    dropout_layer = nnx.Dropout(rule.dropout)
+
   # Get the boxed param so that we can access the metadata.
   module = flax_util.get_current_module()
   if isinstance(module, nn.Module):
@@ -372,7 +359,7 @@ def _get_or_create_lora_params(
     lora_b = getattr(module, name + '_lora_b', None)
 
   if lora_a is not None and lora_b is not None:
-    return flax_util.unbox(lora_a), flax_util.unbox(lora_b)
+    return flax_util.unbox(lora_a), flax_util.unbox(lora_b), dropout_layer
 
   def get_canonical_pspec(x):
     """Returns the canonical sharding.spec if x contains a concrete array."""
@@ -394,8 +381,9 @@ def _get_or_create_lora_params(
     boxed = param
     sharding = get_canonical_pspec(boxed)
 
-  def init_with_sharding(initializer, rng, shape, transpose):
-    value = initializer(rng, shape, lora_dtype)
+  def init(initializer, shape, transpose):
+    # TODO(dangyi): use the actual rng.
+    value = initializer(jax.random.key(0), shape, lora_dtype)
     if sharding is not None:
       lora_pspec = flax_util.update_sharding(sharding.spec, transpose=transpose)
       value = jax.device_put(value, sharding.update(spec=lora_pspec))
@@ -406,18 +394,12 @@ def _get_or_create_lora_params(
 
   lora_a = flax_util.get_or_create_param(
       name + '_lora_a',
-      lambda rng: init_with_sharding(
-          rule.lora_a_initializer, rng, a_shape, a_sharding_transpose
-      ),
-      nnx_param_type=nnx.LoRAParam,
-      need_rng=True,
+      lambda: init(rule.lora_a_initializer, a_shape, a_sharding_transpose),
+      nnx.LoRAParam,
   )
   lora_b = flax_util.get_or_create_param(
       name + '_lora_b',
-      lambda rng: init_with_sharding(
-          rule.lora_b_initializer, rng, b_shape, b_sharding_transpose
-      ),
-      nnx_param_type=nnx.LoRAParam,
-      need_rng=True,
+      lambda: init(rule.lora_b_initializer, b_shape, b_sharding_transpose),
+      nnx.LoRAParam,
   )
-  return lora_a, lora_b
+  return lora_a, lora_b, dropout_layer

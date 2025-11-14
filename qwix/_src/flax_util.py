@@ -15,7 +15,6 @@
 
 from collections.abc import Callable, Collection, Sequence
 import dataclasses
-import functools
 import inspect
 from typing import Any
 
@@ -147,49 +146,32 @@ def get_and_delete_variable(collection: str, name: str) -> Any | None:
 
 def get_or_create_param(
     name: str,
-    init_fn: Callable[..., Any],
-    *,
+    init_fn: Callable[[], Any],
     nnx_param_type: type[nnx.Param] = nnx.Param,
-    need_rng: bool = False,
 ) -> Any:
   """Gets or creates a param in the current module.
 
   Args:
     name: The param name.
     init_fn: The function that will be called to compute the initial value of
-      this variable, which may take a jax.Array as the RNG key.
+      this variable.
     nnx_param_type: The nnx param type of the param, if it's not a nnx.Param.
-    need_rng: If True, the init_fn will be called with a rng key as the first
-      argument.
 
   Returns:
     The unboxed param.
   """
   module = get_current_module()
   if isinstance(module, nn.Module):
-    # Instead of module.param, use module.scope.param which allows us to
+    # Instead of module.variable, use module.scope.variable which allows us to
     # create params in non-compact modules.
     assert module.scope is not None
-    return module.scope.param(
-        name, init_fn if need_rng else lambda _: init_fn()
-    )
+    return module.scope.param(name, lambda _: init_fn())
   elif isinstance(module, nnx.Module):
     if hasattr(module, name):
       param = getattr(module, name)
-      if need_rng:
-        init_fn = functools.partial(init_fn, jax.random.key(0))
       _check_shape(param.value, init_fn)
     else:
-      if need_rng:
-        if not hasattr(module, 'qwix_rngs'):
-          raise ValueError(
-              'Cannot find rngs in the current module. '
-              'Please specify rngs=nnx.Rngs(...) in qwix.quantize_model.'
-          )
-        init_value = init_fn(module.qwix_rngs.params())
-      else:
-        init_value = init_fn()
-      param = jax.tree.map(nnx_param_type, init_value)
+      param = jax.tree.map(nnx_param_type, init_fn())
       setattr(module, name, param)
     return unbox(param)
 
@@ -229,7 +211,7 @@ def find_param(x: Any) -> str | None:
         candidates[name] = value
   elif isinstance(module, nnx.Module):
     for name, node in module.__dict__.items():
-      if hasattr(node, 'shape') and not isinstance(node, nnx.Rngs):
+      if hasattr(node, 'shape'):
         candidates[name] = node.value
   else:
     raise ValueError('Current module is not known.')
@@ -411,12 +393,9 @@ def make_rng(rng_stream: str) -> jax.Array:
   if isinstance(module, nn.Module):
     return module.make_rng(rng_stream)
   elif isinstance(module, nnx.Module):
-    rngs = getattr(module, 'qwix_rngs', None)
+    rngs = getattr(module, 'rngs', None)
     if not isinstance(rngs, nnx.Rngs):
-      raise ValueError(
-          'Cannot find rngs in the current module. '
-          'Please specify rngs=nnx.Rngs(...) in qwix.quantize_model.'
-      )
+      raise ValueError('Cannot find rngs in the current module.')
     return rngs[rng_stream]()
   else:
     raise ValueError('Current module is not known.')
