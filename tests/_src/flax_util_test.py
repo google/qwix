@@ -31,7 +31,6 @@ class FlaxUtilTest(parameterized.TestCase):
     class Bar(nnx.Module):
 
       def __init__(self, rngs: nnx.Rngs):
-        self.rngs = rngs
         self.linear1 = nnx.Linear(2, 3, rngs=rngs)
         self.linear2 = nnx.Linear(3, 4, rngs=rngs)
 
@@ -44,7 +43,6 @@ class FlaxUtilTest(parameterized.TestCase):
     class Foo(nnx.Module):
 
       def __init__(self, rngs: nnx.Rngs):
-        self.rngs = rngs
         self.bar = Bar(rngs=rngs)
         self.linear1 = nnx.Linear(4, 5, rngs=rngs)
 
@@ -113,6 +111,8 @@ class FlaxUtilTest(parameterized.TestCase):
     class Foo(nnx.Module):
 
       def __init__(self):
+        # Usually this is set by qwix.quantize_nnx_model.
+        self.qwix_rngs = nnx.Rngs(0)
         self.weight = nnx.Param(jnp.ones((4, 5), jnp.float32))
 
       def __call__(self, x):
@@ -121,22 +121,22 @@ class FlaxUtilTest(parameterized.TestCase):
         )  # should not change weight
         flax_util.get_or_create_param(
             "lora_a",
-            lambda: initializers.he_uniform()(
-                jax.random.key(0), (4, 1), jnp.float32
-            ),
-            nnx.LoRAParam,
+            lambda rng: initializers.he_uniform()(rng, (4, 1), jnp.float32),
+            nnx_param_type=nnx.LoRAParam,
+            need_rng=True,
         )
         flax_util.get_or_create_param(
             "lora_b",
-            lambda: jnp.zeros((1, 5), jnp.float32),
-            nnx.LoRAParam,
+            lambda rng: jnp.zeros((1, 5), jnp.float32),
+            nnx_param_type=nnx.LoRAParam,
+            need_rng=True,
         )
         return x @ self.weight + x @ self.lora_a + self.lora_b
 
     foo = Foo()
 
     foo(jnp.ones((1, 4)))
-    variables = nnx.variables(foo)
+    variables = nnx.variables(foo, nnx.Param)
     self.assertLen(variables.flat_state(), 3)
     np.testing.assert_array_equal(
         variables["weight"].value, jnp.ones((4, 5), jnp.float32)
@@ -216,7 +216,8 @@ class FlaxUtilTest(parameterized.TestCase):
     class MyModule(nnx.Module):
 
       def __init__(self, *, rngs: nnx.Rngs):
-        self.rngs = rngs
+        # Usually this is set by qwix.quantize_nnx_model.
+        self.qwix_rngs = rngs
 
       def __call__(self):
         return flax_util.make_rng("stochastic_rounding")

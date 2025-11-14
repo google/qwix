@@ -134,6 +134,7 @@ class LoraTest(parameterized.TestCase):
 
     model_input = jnp.ones((10, 12))
     lora_linear = lora.apply_lora_to_model(linear, lora_provider, model_input)
+    lora_linear.set_attributes(qwix_rngs=nnx.Rngs(dropout=0))
 
     @nnx.jit
     def jit_apply(model, x):
@@ -177,6 +178,7 @@ class LoraTest(parameterized.TestCase):
     ])
     model_input = jnp.ones((16, 4, 12))
     lora_einsum = lora.apply_lora_to_model(einsum, lora_provider, model_input)
+    lora_einsum.set_attributes(qwix_rngs=nnx.Rngs(dropout=0))
     self.assertEqual(lora_einsum.kernel_lora_einsum_str, "btd,dr,rnh->btnh")
 
     @nnx.jit
