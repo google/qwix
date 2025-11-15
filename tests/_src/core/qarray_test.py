@@ -288,6 +288,53 @@ class QArrayTest(parameterized.TestCase):
       astype_array = q_array.astype(jnp.float32)
       self.assertEqual(astype_array.scale.dtype, jnp.float32)
 
+  def test_calibration_mask(self):
+    """Verifies that a mask is generated when the calibration range is restricted."""
+    # Array range: -2.0 to 2.0
+    array = jnp.array([-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0])
+
+    with self.subTest('absmax_masking'):
+      # Absmax is 2.0. Factor is 0.5 -> Effective range [-1.0, 1.0].
+      # -2.0 and 2.0 should be masked out (False).
+      how = qarray.HowToQuantize(
+          qtype=jnp.int8, calibration_method='absmax,0.5'
+      )
+      stats = qarray.calibrate(array, how)
+
+      self.assertIn('mask', stats)
+      self.assertEqual(stats['absmax'].item(), 1.0)
+
+      expected_mask = jnp.array([False, True, True, True, True, True, False])
+      self.assertTrue(
+          jnp.array_equal(stats['mask'], expected_mask),
+          f"Expected {expected_mask}, got {stats['mask']}",
+      )
+
+    with self.subTest('minmax_masking'):
+      # Min -2.0, Max 2.0. Factor 0.5 -> Effective range [-1.0, 1.0].
+      how = qarray.HowToQuantize(
+          qtype=jnp.int8, calibration_method='minmax,0.5'
+      )
+      stats = qarray.calibrate(array, how)
+
+      self.assertIn('mask', stats)
+      self.assertEqual(stats['min'].item(), -1.0)
+      self.assertEqual(stats['max'].item(), 1.0)
+
+      expected_mask = jnp.array([False, True, True, True, True, True, False])
+      self.assertTrue(
+          jnp.array_equal(stats['mask'], expected_mask),
+          f"Expected {expected_mask}, got {stats['mask']}",
+      )
+
+    with self.subTest('no_mask_normal_scale'):
+      # Factor >= 1.0 should not produce a mask.
+      how = qarray.HowToQuantize(
+          qtype=jnp.int8, calibration_method='absmax,1.0'
+      )
+      stats = qarray.calibrate(array, how)
+      self.assertNotIn('mask', stats)
+
 
 if __name__ == '__main__':
   absltest.main()

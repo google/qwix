@@ -129,6 +129,8 @@ def dot_general_qt_fwd(
     config: DotGeneralQtConfig,
 ):
   """Forward pass for dot_general_qt custom VJP."""
+  lhs_mask = None
+  rhs_mask = None
   if lhs_calibration is not None:
     scale, zero_point = qarray.compute_scale_zero_point(
         lhs_calibration, config.lhs_qtype
@@ -136,6 +138,7 @@ def dot_general_qt_fwd(
     lhs = qarray.quantize_with_scale_zero_point(
         lhs, config.lhs_qtype, scale, zero_point
     )
+    lhs_mask = lhs_calibration.get('mask')
   if rhs_calibration is not None:
     scale, zero_point = qarray.compute_scale_zero_point(
         rhs_calibration, config.rhs_qtype
@@ -143,17 +146,24 @@ def dot_general_qt_fwd(
     rhs = qarray.quantize_with_scale_zero_point(
         rhs, config.rhs_qtype, scale, zero_point
     )
-  return dot_general.dot_general(lhs, rhs, dimension_numbers), (lhs, rhs)
+    rhs_mask = rhs_calibration.get('mask')
+  residuals = (lhs, rhs, lhs_mask, rhs_mask)
+  return dot_general.dot_general(lhs, rhs, dimension_numbers), residuals
 
 
 def dot_general_qt_bwd(
     fwd_dimension_numbers: jax.lax.DotDimensionNumbers,
     config: DotGeneralQtConfig,
-    residuals: tuple[qarray.MaybeQArray, qarray.MaybeQArray],
+    residuals: tuple[
+        qarray.MaybeQArray,
+        qarray.MaybeQArray,
+        jax.Array | None,
+        jax.Array | None,
+    ],
     g: jax.Array,
 ):
   """Backward pass for dot_general_qt custom VJP."""
-  lhs, rhs = residuals
+  lhs, rhs, lhs_mask, rhs_mask = residuals
 
   def _compute_gradient_for_operand(
       g: jax.Array, y: qarray.MaybeQArray, *, for_dlhs: bool
@@ -200,6 +210,11 @@ def dot_general_qt_bwd(
 
   dlhs = _compute_gradient_for_operand(g, rhs, for_dlhs=True)
   drhs = _compute_gradient_for_operand(g, lhs, for_dlhs=False)
+
+  if lhs_mask is not None:
+    dlhs *= lhs_mask
+  if rhs_mask is not None:
+    drhs *= rhs_mask
 
   return dlhs, drhs, None, None
 
