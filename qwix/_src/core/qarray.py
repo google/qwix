@@ -632,6 +632,56 @@ def clip_to_calibration(
   return array.reshape(original_shape)
 
 
+def clip_gradient_to_calibration(
+    g: jax.Array,
+    array: jax.Array,
+    calibration: dict[str, jax.Array],
+    calibration_method: str,
+) -> jax.Array:
+  """Clips the gradient if data falls outside calibration bounds.
+
+  Optimization: If the calibration method is data-derived (absmax/minmax) and
+  the scale factor is >= 1.0, we assume all data is within bounds and skip
+  the masking operation to save memory/compute.
+
+  Args:
+    g: The incoming gradient.
+    array: The original input array.
+    calibration: The dictionary containing 'min'/'max' or 'absmax'.
+    calibration_method: The string defining the method (e.g., 'absmax,0.9').
+
+  Returns:
+    The masked gradient.
+  """
+  method, *args = calibration_method.lower().split(',')
+  args = [float(a) for a in args]
+
+  # Optimization: Skip clipping if method covers the full data range.
+  if method in ('absmax', 'minmax') and (not args or args[0] >= 1.0):
+    return g
+
+  # Retrieve bounds
+  if 'min' in calibration and 'max' in calibration:
+    lower = calibration['min']
+    upper = calibration['max']
+  elif 'absmax' in calibration:
+    upper = calibration['absmax']
+    lower = -upper
+  else:
+    raise ValueError(
+        'Calibration dictionary must contain "min"/"max" or "absmax". '
+        f'Got keys: {list(calibration.keys())}'
+    )
+
+  # Apply mask using generic broadcasting to handle tiling automatically.
+  # call_with_generic_broadcast handles the (N,) vs (N/TileSize,) shape logic.
+  mask_lower = call_with_generic_broadcast(jnp.greater_equal, array, lower)
+  mask_upper = call_with_generic_broadcast(jnp.less_equal, array, upper)
+  mask = mask_lower & mask_upper
+
+  return jnp.where(mask, g, 0.0)
+
+
 def get_accumulator_and_result_type(
     *args: MaybeQArray,
     preferred_element_type: jax.typing.DTypeLike | None,

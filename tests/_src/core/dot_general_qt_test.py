@@ -247,6 +247,42 @@ class DotGeneralQtTest(parameterized.TestCase):
     # are actually used but the jaxpr includes all of them.
     self.assertEqual(dot_general_count, 9)
 
+  def test_gradient_clipping_integration(self):
+    """Verifies that calibration scaling triggers gradient masking (STE)."""
+    lhs = jnp.array([[-2.0, 0.0, 2.0]], dtype=jnp.float32)
+    rhs = jnp.array([[1.0], [1.0], [1.0]], dtype=jnp.float32)
+
+    dimension_numbers = (((1,), (0,)), ((), ()))
+
+    def run_step(calibration_method):
+      config = dot_general_qt.DotGeneralQtConfig(
+          lhs_qtype='int8',
+          rhs_qtype='int8',
+          lhs_calibration_method=calibration_method,
+          rhs_calibration_method='absmax',
+      )
+
+      def loss_fn(l, r):
+        return jnp.sum(
+            dot_general_qt.dot_general_qt(l, r, dimension_numbers, config)
+        )
+
+      return jax.grad(loss_fn)(lhs, rhs)
+
+    grads_unmasked = run_step('absmax,1.0')
+    self.assertTrue(
+        jnp.all(grads_unmasked != 0), 'Unmasked grads should be non-zero'
+    )
+
+    grads_masked = run_step('absmax,0.5')
+    expected_mask = jnp.array([[0.0, 1.0, 0.0]])
+    self.assertTrue(
+        jnp.allclose(grads_masked, expected_mask, atol=0.1),
+        f'Expected {expected_mask} but got {grads_masked}',
+    )
+
+    self.assertFalse(jnp.array_equal(grads_unmasked, grads_masked))
+
 
 if __name__ == '__main__':
   absltest.main()

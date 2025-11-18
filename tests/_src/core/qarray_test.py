@@ -288,6 +288,46 @@ class QArrayTest(parameterized.TestCase):
       astype_array = q_array.astype(jnp.float32)
       self.assertEqual(astype_array.scale.dtype, jnp.float32)
 
+  def test_clip_gradient_to_calibration(self):
+    with self.subTest('optimization_skip_masking'):
+      array = jnp.array([100.0])
+      grad = jnp.array([1.0])
+      calibration = {'absmax': jnp.array([1.0])}
+      out_g = qarray.clip_gradient_to_calibration(
+          grad, array, calibration, 'absmax,1.0'
+      )
+      self.assertTrue(jnp.array_equal(out_g, grad))
+
+    with self.subTest('basic_clipping'):
+      array = jnp.array([-2.0, -1.0, 0.0, 1.0, 2.0])
+      grad = jnp.ones_like(array)
+      calibration = {'absmax': jnp.array([1.0])}
+      out_g = qarray.clip_gradient_to_calibration(
+          grad, array, calibration, 'absmax,0.5'
+      )
+      expected = jnp.array([0.0, 1.0, 1.0, 1.0, 0.0])
+      self.assertTrue(jnp.array_equal(out_g, expected))
+
+    with self.subTest('tiling_broadcast'):
+      array = jnp.array([10.0, 10.0, 2.0, 2.0])
+      grad = jnp.ones_like(array)
+      calibration = {'absmax': jnp.array([2.5, 2.5])}
+      out_g = qarray.clip_gradient_to_calibration(
+          grad, array, calibration, 'absmax,0.5'
+      )
+      expected = jnp.array([0.0, 0.0, 1.0, 1.0])
+      self.assertTrue(jnp.array_equal(out_g, expected))
+
+    with self.subTest('fixed_range'):
+      array = jnp.array([-2.0, 0.0, 2.0])
+      grad = jnp.ones_like(array)
+      calibration = {'min': jnp.array([-1.0]), 'max': jnp.array([1.0])}
+      out_g = qarray.clip_gradient_to_calibration(
+          grad, array, calibration, 'fixed,1.0'
+      )
+      expected = jnp.array([0.0, 1.0, 0.0])
+      self.assertTrue(jnp.array_equal(out_g, expected))
+
 
 if __name__ == '__main__':
   absltest.main()
