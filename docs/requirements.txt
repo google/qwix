@@ -1,5 +1,8 @@
 # docs/requirements.txt
 
+# Markdown and Jupyter support
+myst-nb
+
 # Sphinx and theme
 sphinx
 sphinx-book-theme
