@@ -11,209 +11,150 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""GPTQ algorithm.
 
-This is a JAX implementation of the GPTQ algorithm from:
-https://arxiv.org/pdf/2210.17323
+"""Integration of GPTQ into Qwix.
 
-The original implementation is in PyTorch and can be found here:
-https://github.com/IST-DASLab/gptq/blob/main/gptq.py
+During inference, GPTQ uses the same PtqProvider as PTQ. The only difference is
+that GPTQ requires an extra calibration step to produce gptq_quant_stats, which
+will then be consumed by the GPTQ's quantize_params function. After that, the
+quantized params tree will look exactly the same as PTQ's.
+
+Please check the test for an example usage.
 """
 
-# We try to use the same naming as in the PyTorch implementation, thus
-# pylint: disable=invalid-name
+import dataclasses
+from typing import Any, Callable
 
+import flax
 import jax
-import jax.numpy as jnp
-from qwix._src.core import qarray
+from jax import numpy as jnp
+from qwix._src import averaging
+from qwix._src import flax_util
+from qwix._src import qconfig
+from qwix._src.providers import ptq
+from qwix.contrib import gptq_core
 
 
-def cholesky_inverse(L: jax.Array) -> jax.Array:
-  return jax.scipy.linalg.cho_solve((L, True), jnp.eye(L.shape[0]))
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class GptqRule(qconfig.QuantizationRule):
+  """Use this rule to enable GPTQ."""
 
 
-def find_params(
-    w: jax.Array, how: qarray.HowToQuantize
-) -> tuple[jax.Array, jax.Array | None]:
-  """Finds the optimal quantization parameters for a given weight tensor.
+class GptqCalibrationProvider(qconfig.QuantizationProvider):
+  """Calibration for GPTQ.
+
+  This provider is used to collect gptq_quant_stats, which will be used by the
+  quantize_params function below. It does not perform the actual quantization of
+  the model parameters, nor use any quantized ops.
+  """
+
+  def dot_general(
+      self,
+      lhs: jax.Array,
+      rhs: jax.Array,
+      dimension_numbers: jax.lax.DotDimensionNumbers,
+      *args,
+      **kwargs,
+  ) -> jax.Array:
+    res = jax.lax.dot_general(lhs, rhs, dimension_numbers, *args, **kwargs)
+    rule, _ = self._get_current_rule_and_op_id('dot_general')
+    if not isinstance(rule, GptqRule):
+      return res
+
+    (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dimension_numbers
+    if lhs_ba or rhs_ba or len(lhs_ca) != 1 or len(rhs_ca) != 1:
+      raise NotImplementedError(f'Unsupported: {dimension_numbers}')
+
+    weight_name = flax_util.find_param(rhs)
+    assert weight_name is not None
+
+    # Reorder lhs to (ca, rest).
+    lhs = jnp.moveaxis(lhs, lhs_ca[0], 0)
+    lhs = lhs.reshape(lhs.shape[0], -1)
+    hessian = gptq_core.compute_hessian(lhs)
+
+    # Collect the hessian.
+    hessian = {'hessian': hessian}
+    aggregator = averaging.SimpleMovingAverage()
+    quant_stat = flax_util.get_or_create_variable(
+        'quant_stats', weight_name + '_gptq', lambda: aggregator.init(hessian)
+    )
+    if flax_util.should_update_quant_stats():
+      quant_stat.value = aggregator.update(quant_stat.value, hessian)
+
+    return res
+
+  def get_intercept_map(self) -> dict[str, Callable[..., Any]]:
+    return super().get_intercept_map() | {
+        'jax.lax.dot_general': self.dot_general
+    }
+
+
+def quantize_params(
+    params: Any,
+    abstract_quantized_params: Any,
+    gptq_quant_stats: Any,
+    *,
+    allow_extra_params: bool = False,
+    gptq_block_size: int = 128,
+    gptq_damping_factor: float = 0.01,
+) -> Any:
+  """Quantizes the params with GPTQ.
 
   Args:
-    w: weight matrix of shape (rows, groupsize).
-    how: how to quantize this group of weights. tiled_axes should either be
-      empty or {1: groupsize}.
+    params: See ptq.quantize_params.
+    abstract_quantized_params: See ptq.quantize_params.
+    gptq_quant_stats: The quant_stats dict from GptqCalibrationProvider. SRQ is
+      not supported yet. For params with no gptq_quant_stats, they will be
+      quantized with the default PTQ algorithm.
+    allow_extra_params: See ptq.quantize_params.
+    gptq_block_size: The block size of GPTQ.
+    gptq_damping_factor: The damping factor of GPTQ.
 
   Returns:
-    A tuple of scale and optional zero_point, which should have shape (1, 1) or
-    (rows, 1) when channelwise quantization is enabled.
+    The quantized params consumable by PtqProvider.
   """
-  calibration = qarray.calibrate(w, how)
-  return qarray.compute_scale_zero_point(calibration, how.qtype)
+  quantized_params = {}
+  not_quantized_params = {}
+  for path, w in flax.traverse_util.flatten_dict(params).items():
+    abs_w = ptq.get_value_from_path(abstract_quantized_params, path)
+    gptq_stats_path = (*path[:-1], path[-1] + '_gptq')
+    gptq_stats = ptq.get_value_from_path(gptq_quant_stats, gptq_stats_path)
 
+    if not isinstance(abs_w, ptq.WithAux) or gptq_stats is None:
+      # Not quantized by GPTQ.
+      not_quantized_params[path] = w
+      continue
 
-def quantize(
-    w: jax.Array,
-    qtype: jax.typing.DTypeLike,
-    scale: jax.Array,
-    zero_point: jax.Array | None,
-) -> tuple[jax.Array, jax.Array]:
-  """Quantize w and return the raw quantized and dequantized w.
+    # Get the hessian.
+    calibration = averaging.SimpleMovingAverage().get_calibration(gptq_stats)
+    hessian = calibration['hessian']
 
-  Args:
-    w: weight matrix of shape (rows, 1).
-    qtype: The target quantized data type (e.g., jnp.int8).
-    scale: The quantization scale returned by find_params.
-    zero_point: The quantization zero point (optional) returned by find_params.
+    # We only support 2D weights in (ca, ra). Hessian should be (ca, ca).
+    assert w.ndim == 2 and hessian.shape[0] == w.shape[0]
+    # Transpose w to (ca, ra) to match the requirements of gptq_core and adjust
+    # the HowToQuantize accordingly.
+    w = gptq_core.quantize_weight(
+        w.T,
+        hessian,
+        dataclasses.replace(
+            abs_w.how,
+            channelwise_axes=[1 - a for a in abs_w.how.channelwise_axes],
+            tiled_axes={1 - a: s for a, s in abs_w.how.tiled_axes.items()},
+        ),
+        blocksize=gptq_block_size,
+        percdamp=gptq_damping_factor,
+    )[0].T
+    quantized_params[path] = abs_w.replace(array=w)
 
-  Returns:
-    A tuple of:
-      - The raw quantized integer values.
-      - The dequantized floating-point values (approximation of original w).
-  """
-  qw = qarray.quantize_with_scale_zero_point(w, qtype, scale, zero_point)
-  return qw.qvalue, qarray.dequantize(qw)
+  # Quantize the non-GPTQ params with PTQ.
+  not_quantized_params = flax.traverse_util.unflatten_dict(not_quantized_params)
+  ptq_quantized_params = ptq.quantize_params(
+      not_quantized_params,
+      abstract_quantized_params,
+      allow_extra_params=allow_extra_params,
+  )
+  ptq_quantized_params = flax.traverse_util.flatten_dict(ptq_quantized_params)
+  quantized_params.update(ptq_quantized_params)
 
-
-def quantize_weight(
-    W: jax.Array,
-    H: jax.Array,
-    how: qarray.HowToQuantize,
-    blocksize: int = 128,
-    percdamp: float = 0.01,
-) -> tuple[qarray.QArray, jax.Array]:
-  """Quantize a weight matrix using GPTQ.
-
-  This function minimizes Loss = ||W @ X - W_q @ X||^2 using the Hessian as
-  H = X @ X.T.
-
-  Args:
-    W: weight matrix in W @ X with shape (rows, columns), where columns is the
-      input/contraction dimension and rows is the output dimension.
-    H: Hessian of with shape (columns, columns), usually computed as X @ X.T.
-    how: how to quantize W.
-    blocksize: the GPTQ algorithm blocksize (should usually not be changed)
-    percdamp: the percentage of the average diagonal used for dampening H.
-
-  Returns:
-    a tuple of (W_q, Losses), where W_q is the quantized weight matrix as a
-    QArray and Losses is the overall quantization losses.
-  """
-  rows, columns = W.shape
-  assert H.shape == (columns, columns)
-
-  groupsize = how.tiled_axes.get(1, rows)
-
-  H_diag = jnp.diag(H)
-  dead = H_diag == 0
-  H = jnp.where(dead & jnp.eye(columns, dtype=bool), 1.0, H)
-  W = jnp.where(dead, 0.0, W)
-
-  # Dampen the Hessian.
-  damp = percdamp * jnp.mean(H_diag)
-  diag = jnp.arange(columns)
-  H = H.at[diag, diag].add(damp)
-
-  # Cholesky Inverse for Hessian.
-  H = jnp.linalg.cholesky(H)
-  H = cholesky_inverse(H)
-  H = jnp.linalg.cholesky(H, upper=True)
-  Hinv = H
-
-  # Q: the final low-precision integer weights. Will be populated step by step.
-  # TODO(dangyi): support synthetic qtype.
-  Q = jax.new_ref(jnp.zeros_like(W, dtype=how.qtype))
-  # Losses: the quantization error for each element in W. Will be populated step
-  # by step.
-  Losses = jax.new_ref(jnp.zeros_like(W))
-
-  # scales, zero_points: quantization parameters for each group.
-  scales, zero_points = [], []
-
-  # The GPTQ algorithm processes the weight matrix `W` in blocks of columns.
-  # In each block, weights are quantized column by column, and an error
-  # compensation is applied to the remaining unquantized columns in the block.
-  for i1 in range(0, columns, blocksize):
-    i2 = min(i1 + blocksize, columns)
-    count = i2 - i1
-
-    # Prepare a block of columns from the entire weight matrix and hessian:
-    # W1 and Hinv1.
-    W1 = jax.new_ref(W[:, i1:i2])
-    Err1 = jax.new_ref(jnp.zeros_like(W1))
-    Losses1 = jax.new_ref(jnp.zeros_like(W1))
-    Hinv1 = Hinv[i1:i2, i1:i2]
-
-    # Process each column within the current block.
-    for i in range(count):
-      w = W1[:, i]
-      d = Hinv1[i, i]
-
-      # Find the quantization parameters for the current group of weights.
-      # This is done once every `groupsize` columns.
-      if (i1 + i) % groupsize == 0:
-        scale, zero_point = find_params(
-            W[:, (i1 + i) : (i1 + i + groupsize)], how
-        )
-        scales.append(scale.squeeze(1))
-        zero_points.append(zero_point and zero_point.squeeze(1))
-
-      # Quantize the current column `w` and get the dequantized value `dq`.
-      q, dq = quantize(w, how.qtype, scales[-1], zero_points[-1])
-      Q[:, i1 + i] = q
-      # Calculate the quantization loss for this column.
-      Losses1[:, i] = (w - dq) ** 2 / d**2
-
-      # Update all remaining unquantized columns in the current block to
-      # compensate for the quantization error introduced in the current column.
-      err1 = (w - dq) / d
-      W1[:, i:] -= jnp.outer(err1, Hinv1[i, i:])
-      Err1[:, i] = err1
-
-    # Accumulate the losses from the current block to the total Losses.
-    Losses[:, i1:i2] = Losses1[...] / 2
-
-    # Update the full weight matrix `W`. The columns in the current block are
-    # updated with the error-compensated `W1`. The columns in subsequent blocks
-    # are also adjusted based on the errors accumulated in `Err1`.
-    W = W.at[:, i1:i2].set(W1[...])
-    W = W.at[:, i2:].subtract(Err1[...] @ Hinv[i1:i2, i2:])
-
-  # Stack the scales and zero points along the column axis.
-  scale = jnp.stack(scales, axis=1)
-  zero_point = None
-  if None not in zero_points:
-    zero_point = jnp.stack(zero_points, axis=1)
-  return qarray.QArray(Q[...], scale, zero_point), Losses[...]
-
-
-def compute_hessian(X: jax.Array) -> jax.Array:
-  """Computes the Hessian of the GPTQ objective function.
-
-  The GPTQ algorithm minimizes the squared error of the layer's output, rather
-  than just the weights. This specifically relies on the input data X to
-  determine which weights are most critical to maintain accurately.
-
-  Derivation:
-    1. Objective: Minimize difference between original output (Y = W @ X)
-       and quantized output (Y_q = W_q @ X).
-          L(W_q) = || W @ X - W_q @ X ||^2
-
-    2. Define error term ∆W = W - W_q:
-          L(W_q) = || ∆W @ X ||^2
-
-    3. Express squared Frobenius norm as a Trace (||A||^2 = Trace(A @ A.T)):
-          L(W_q) = Trace((∆W @ X) @ (∆W @ X).T)
-               = Trace(∆W @ X @ X.T @ ∆W.T)
-
-    4. Identify the Hessian:
-      The loss is a quadratic form with respect to ∆W. The second derivative
-      (Hessian) is exactly twice the constant matrix in the middle term.
-          Hessian = 2 * (X @ X.T)
-      By convention, the constant factor of 2 is ignored during implementation.
-
-  Args:
-    X: Input data matrix of shape (in_features, n_samples).
-
-  Returns:
-    The Hessian matrix of shape (in_features, in_features).
-  """
-  return X @ X.T
+  return flax.traverse_util.unflatten_dict(quantized_params)
