@@ -27,7 +27,7 @@ NoiseFn = Callable[[Sequence[int]], jax.Array]
 
 def should_quantize(dtype: jax.typing.DTypeLike) -> bool:
   """Returns True if the dtype should be quantized."""
-  return jnp.dtype(dtype) in [jnp.bfloat16, jnp.float32]
+  return jnp.dtype(dtype) in [jnp.bfloat16, jnp.float16, jnp.float32]
 
 
 def can_dequant_on_output(qtype: jax.typing.DTypeLike) -> bool:
