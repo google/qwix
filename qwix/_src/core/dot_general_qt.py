@@ -38,21 +38,22 @@ class DotGeneralQtConfig:
   rhs_calibration_method: str = 'absmax'
   lhs_collect_quant_stat: Callable[[Any], Any] | None = None
   rhs_collect_quant_stat: Callable[[Any], Any] | None = None
+  lhs_disable_channelwise_axes: bool = False
+  rhs_disable_channelwise_axes: bool = False
 
   # Backward pass (dlhs).
   dlhs_grad_qtype: jax.typing.DTypeLike | None = None  # incoming gradient
   dlhs_grad_calibration_method: str = 'absmax'
   dlhs_tile_size: int | float | None = None
   dlhs_stochastic_rounding_noise_fn: numerics.NoiseFn | None = None
+  dlhs_grad_disable_channelwise_axes: bool = False
 
   # Backward pass (drhs).
   drhs_grad_qtype: jax.typing.DTypeLike | None = None  # incoming gradient
   drhs_grad_calibration_method: str = 'absmax'
   drhs_tile_size: int | float | None = None
   drhs_stochastic_rounding_noise_fn: numerics.NoiseFn | None = None
-
-  # Misc.
-  disable_channelwise_axes: bool = False
+  drhs_grad_disable_channelwise_axes: bool = False
 
 
 def _ranges_like(*xs):
@@ -176,11 +177,13 @@ def dot_general_qt_bwd(
       g_tile_size = config.dlhs_tile_size
       g_calibration_method = config.dlhs_grad_calibration_method
       g_noise_fn = config.dlhs_stochastic_rounding_noise_fn
+      g_disable_channelwise_axes = config.dlhs_grad_disable_channelwise_axes
     else:
       g_qtype = config.drhs_grad_qtype
       g_tile_size = config.drhs_tile_size
       g_calibration_method = config.drhs_grad_calibration_method
       g_noise_fn = config.drhs_stochastic_rounding_noise_fn
+      g_disable_channelwise_axes = config.drhs_grad_disable_channelwise_axes
 
     if g_qtype and numerics.should_quantize(g.dtype):
       if isinstance(y, qarray.QArray) and not qarray.get_tiled_axes(y):
@@ -199,7 +202,7 @@ def dot_general_qt_bwd(
           calibration_method=g_calibration_method,
           noise_fn=g_noise_fn,
       )
-      if config.disable_channelwise_axes:
+      if g_disable_channelwise_axes:
         g_how = dataclasses.replace(g_how, channelwise_axes=[])
 
       g = qarray.quantize(g, g_how)
@@ -260,7 +263,7 @@ def dot_general_qt(
         tile_size=config.tile_size,
         calibration_method=config.lhs_calibration_method,
     )
-    if config.disable_channelwise_axes:
+    if config.lhs_disable_channelwise_axes:
       lhs_how = dataclasses.replace(lhs_how, channelwise_axes=[])
     lhs_calibration = qarray.calibrate(lhs, lhs_how)
     if config.lhs_collect_quant_stat:
@@ -275,7 +278,7 @@ def dot_general_qt(
         tile_size=config.tile_size,
         calibration_method=config.rhs_calibration_method,
     )
-    if config.disable_channelwise_axes:
+    if config.rhs_disable_channelwise_axes:
       rhs_how = dataclasses.replace(rhs_how, channelwise_axes=[])
     rhs_calibration = qarray.calibrate(rhs, rhs_how)
     if config.rhs_collect_quant_stat:

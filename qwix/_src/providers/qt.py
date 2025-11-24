@@ -282,13 +282,15 @@ class QtProvider(qconfig.QuantizationProvider):
         rhs_calibration_method=rule.weight_calibration_method,
         lhs_collect_quant_stat=lhs_collect_quant_stat,
         rhs_collect_quant_stat=None,
+        lhs_disable_channelwise_axes=rule.disable_channelwise_axes,
+        rhs_disable_channelwise_axes=rule.disable_channelwise_axes,
         # bwd configs.
         dlhs_grad_qtype=rule.bwd_qtype,
-        dlhs_grad_calibration_method=rule.bwd_calibration_method,
         drhs_grad_qtype=rule.bwd_qtype,
+        dlhs_grad_calibration_method=rule.bwd_calibration_method,
         drhs_grad_calibration_method=rule.bwd_calibration_method,
-        # misc.
-        disable_channelwise_axes=rule.disable_channelwise_axes,
+        dlhs_grad_disable_channelwise_axes=rule.disable_channelwise_axes,
+        drhs_grad_disable_channelwise_axes=rule.disable_channelwise_axes,
     )
 
   def _create_dot_general_qt_config(
@@ -364,18 +366,20 @@ class QtProvider(qconfig.QuantizationProvider):
         rhs_calibration_method=rhs_calibration_method,
         lhs_collect_quant_stat=lhs_collect_quant_stat,
         rhs_collect_quant_stat=rhs_collect_quant_stat,
+        lhs_disable_channelwise_axes=rule.disable_channelwise_axes,
+        rhs_disable_channelwise_axes=rule.disable_channelwise_axes,
         # dlhs configs.
         dlhs_grad_qtype=rule.bwd_qtype,
         dlhs_grad_calibration_method=rule.bwd_calibration_method,
         dlhs_tile_size=dlhs_tile_size,
         dlhs_stochastic_rounding_noise_fn=bwd_stochastic_rounding_noise_fn,
+        dlhs_grad_disable_channelwise_axes=rule.disable_channelwise_axes,
         # drhs configs.
         drhs_grad_qtype=rule.bwd_qtype,
-        drhs_tile_size=drhs_tile_size,
         drhs_grad_calibration_method=rule.bwd_calibration_method,
+        drhs_tile_size=drhs_tile_size,
         drhs_stochastic_rounding_noise_fn=bwd_stochastic_rounding_noise_fn,
-        # misc.
-        disable_channelwise_axes=rule.disable_channelwise_axes,
+        drhs_grad_disable_channelwise_axes=rule.disable_channelwise_axes,
     )
 
     if rule.additional_qt_config:
