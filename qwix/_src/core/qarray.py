@@ -220,7 +220,7 @@ def validate_qarray(array: QArray):
     )
   if array.qvalue.dtype.itemsize > 1:
     raise ValueError(f'{array.qvalue.dtype} is not a valid type for qvalue.')
-  if array.scale.dtype not in (jnp.bfloat16, jnp.float32, jnp.float64):
+  if not numerics.should_quantize(array.scale.dtype):
     raise ValueError(f'{array.scale.dtype} is not a valid type for scale.')
   if array.zero_point is not None:
     if array.zero_point.ndim != array.qvalue.ndim:

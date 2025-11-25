@@ -23,11 +23,12 @@ from jax import numpy as jnp
 # returns: Noise as a jax.Array whose shape is broadcastable to the requested
 #   shape, and whose dtype can be promoted to fp32 implicitly.
 NoiseFn = Callable[[Sequence[int]], jax.Array]
+_QUANTIZE_DTYPES = (jnp.bfloat16, jnp.float16, jnp.float32, jnp.float64)
 
 
 def should_quantize(dtype: jax.typing.DTypeLike) -> bool:
   """Returns True if the dtype should be quantized."""
-  return jnp.dtype(dtype) in [jnp.bfloat16, jnp.float16, jnp.float32]
+  return jnp.dtype(dtype) in _QUANTIZE_DTYPES
 
 
 def can_dequant_on_output(qtype: jax.typing.DTypeLike) -> bool:
