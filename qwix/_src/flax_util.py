@@ -194,7 +194,7 @@ def get_or_create_param(
     return unbox(param)
 
 
-def find_param(x: Any) -> str | None:
+def find_param(x: Any, ptq_array_type=None) -> str | None:
   """Finds the param name of a given array in the current module.
 
   This function is useful when
@@ -208,6 +208,10 @@ def find_param(x: Any) -> str | None:
   Args:
     x: jax.Array or array-like object (such as ptq.WithAux) that has the "shape"
       attribute.
+    ptq_array_type: when looking for a param in the current module, also
+      consider this type in addition to jax.Array. This is only used in QLoRA
+      mode and should be set to ptq.WithAux. We don't import ptq here to avoid a
+      circular dependency.
 
   Returns:
     The name of the param that contains the given array, or None if not found.
@@ -222,14 +226,16 @@ def find_param(x: Any) -> str | None:
   module = get_current_module()
   candidates: dict[str, Any] = {}
   if isinstance(module, nn.Module):
+    array_types = jax.Array | ptq_array_type if ptq_array_type else jax.Array
     assert module.scope is not None
     for name, value in module.scope._collection('params').items():  # pylint: disable=protected-access
       value = nn.unbox(value)
-      if hasattr(value, 'shape'):
+      if isinstance(value, array_types):
         candidates[name] = value
   elif isinstance(module, nnx.Module):
+    array_types = nnx.Param | ptq_array_type if ptq_array_type else nnx.Param
     for name, node in module.__dict__.items():
-      if hasattr(node, 'shape') and not isinstance(node, nnx.Rngs):
+      if isinstance(node, array_types):
         candidates[name] = node.value
   else:
     raise ValueError('Current module is not known.')

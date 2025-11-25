@@ -186,7 +186,7 @@ class LoraProvider(ptq.PtqProvider):
     if not isinstance(rule, LoraRule):
       return res
 
-    weight_name = flax_util.find_param(rhs)
+    weight_name = flax_util.find_param(rhs, ptq.WithAux)
     if weight_name is None:  # rhs is not a weight.
       return res
 
@@ -229,7 +229,7 @@ class LoraProvider(ptq.PtqProvider):
       raise ValueError(f'Unsupported einsum format: {einsum_str=} {operands=}')
     lhs, rhs = operands
 
-    weight_name = flax_util.find_param(rhs)
+    weight_name = flax_util.find_param(rhs, ptq.WithAux)
     if weight_name is None:  # rhs is not a weight.
       return res
 
@@ -298,7 +298,7 @@ class LoraProvider(ptq.PtqProvider):
     if not isinstance(rule, LoraRule):
       return res
 
-    weight_name = flax_util.find_param(rhs)
+    weight_name = flax_util.find_param(rhs, ptq.WithAux)
     assert weight_name is not None, 'rhs must be a weight.'
 
     dimension_numbers = jax.lax.conv_dimension_numbers(
