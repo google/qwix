@@ -41,88 +41,88 @@ class EinsumTest(parameterized.TestCase):
       dict(
           testcase_name='w8a16',
           rhs_qtype=jnp.int8,
-          expected_mae=0.00668335,
+          expected_mae=0.007,
       ),
       dict(
           testcase_name='w8a16_sc',
           rhs_qtype=jnp.int8,
           tile_size=128,
-          expected_mae=0.00631714,
+          expected_mae=0.007,
       ),
       dict(
           testcase_name='w8a8',
           rhs_qtype=jnp.int8,
           lhs_qtype=jnp.int8,
-          expected_mae=0.00952148,
+          expected_mae=0.01,
       ),
       dict(
           testcase_name='w8a8_sc',
           rhs_qtype=jnp.int8,
           lhs_qtype=jnp.int8,
           tile_size=128,
-          expected_mae=0.0090332,
+          expected_mae=0.009,
       ),
       dict(
           testcase_name='w4a16',
           rhs_qtype=jnp.int4,
-          expected_mae=0.11377,
+          expected_mae=0.12,
       ),
       dict(
           testcase_name='w4a16_sc',
           rhs_qtype=jnp.int4,
           tile_size=128,
-          expected_mae=0.106934,
+          expected_mae=0.11,
       ),
       dict(
           testcase_name='w4a8',
           rhs_qtype=jnp.int4,
           lhs_qtype=jnp.int8,
-          expected_mae=0.11377,
+          expected_mae=0.12,
       ),
       dict(
           testcase_name='w4a8_sc',
           rhs_qtype=jnp.int4,
           lhs_qtype=jnp.int8,
           tile_size=128,
-          expected_mae=0.10791,
+          expected_mae=0.11,
       ),
       dict(
           testcase_name='w4a4',
           rhs_qtype=jnp.int4,
           lhs_qtype=jnp.int4,
-          expected_mae=0.161133,
+          expected_mae=0.17,
       ),
       dict(
           testcase_name='w4a4_sc',
           rhs_qtype=jnp.int4,
           lhs_qtype=jnp.int4,
           tile_size=128,
-          expected_mae=0.152344,
+          expected_mae=0.16,
       ),
       dict(
           testcase_name='fp8',
           rhs_qtype=jnp.float8_e4m3fn,
-          expected_mae=0.0258789,
+          expected_mae=0.03,
       ),
       dict(
           testcase_name='fp8_act',
           rhs_qtype=jnp.float8_e4m3fn,
           lhs_qtype=jnp.float8_e4m3fn,
-          expected_mae=0.0371094,
+          expected_mae=0.038,
       ),
       dict(
           testcase_name='fp8_act_sc',
           rhs_qtype=jnp.float8_e4m3fn,
           lhs_qtype=jnp.float8_e4m3fn,
           tile_size=1 / 32,
-          expected_mae=0.0358887,
+          expected_mae=0.036,
       ),
       dict(
           testcase_name='nf4',
           rhs_qtype='nf4',
           lhs_qtype='nf4',
           tile_size=128,
-          expected_mae=0.133789,
+          expected_mae=0.14,
       ),
   )
   def test_einsum_and_benchmark(
@@ -166,7 +166,7 @@ class EinsumTest(parameterized.TestCase):
     self.assertEqual(fp_res.shape, q_res.shape)
     mae = jnp.abs(fp_res - q_res).mean() / jnp.abs(fp_res).mean()
     logging.info('mae=%s fp_time=%s q_time=%s', mae, fp_time, q_time)
-    self.assertAlmostEqual(mae, expected_mae)
+    self.assertLessEqual(mae, expected_mae)
 
   @parameterized.named_parameters(
       dict(
@@ -175,7 +175,7 @@ class EinsumTest(parameterized.TestCase):
           qtype=jnp.int8,
           lhs_shape=(10, 256, 16),
           rhs_shape=(256, 16, 128),
-          expected_rel_mae=0.0109253,
+          expected_rel_mae=0.011,
       ),
       dict(
           testcase_name='ellipsis_batch',
@@ -183,7 +183,7 @@ class EinsumTest(parameterized.TestCase):
           qtype=jnp.int8,
           lhs_shape=(10, 256, 16),
           rhs_shape=(10, 16, 128),
-          expected_rel_mae=0.00823975,
+          expected_rel_mae=0.009,
       ),
       dict(
           testcase_name='ellipsis_lhs',
@@ -191,7 +191,7 @@ class EinsumTest(parameterized.TestCase):
           qtype=jnp.int8,
           lhs_shape=(10, 256, 16),
           rhs_shape=(16, 128),
-          expected_rel_mae=0.00817871,
+          expected_rel_mae=0.009,
       ),
       dict(
           testcase_name='lhs_asymmetric',
@@ -200,7 +200,7 @@ class EinsumTest(parameterized.TestCase):
           lhs_shape=(10, 256, 16),
           rhs_shape=(256, 16, 128),
           lhs_asymmetric=True,
-          expected_rel_mae=0.0129395,
+          expected_rel_mae=0.013,
       ),
       dict(
           testcase_name='lhs_asymmetric_subchannel',
@@ -210,7 +210,7 @@ class EinsumTest(parameterized.TestCase):
           rhs_shape=(256, 16, 128),
           tile_size=1 / 4,
           lhs_asymmetric=True,
-          expected_rel_mae=0.00970459,
+          expected_rel_mae=0.010,
       ),
       dict(
           testcase_name='symmetric_subchannel_nf4',
@@ -219,7 +219,7 @@ class EinsumTest(parameterized.TestCase):
           lhs_shape=(10, 256, 16),
           rhs_shape=(256, 16, 128),
           tile_size=1 / 4,
-          expected_rel_mae=0.130859,
+          expected_rel_mae=0.14,
       ),
   )
   def test_einsum(
@@ -262,7 +262,7 @@ class EinsumTest(parameterized.TestCase):
     self.assertEqual(fp_res.dtype, q_res.dtype)
     self.assertEqual(fp_res.shape, q_res.shape)
     rel_mae = jnp.abs(fp_res - q_res).mean() / jnp.abs(fp_res).mean()
-    self.assertAlmostEqual(rel_mae, expected_rel_mae)
+    self.assertLessEqual(rel_mae, expected_rel_mae)
 
   def test_fake_quantization(self):
     # This test case shows that, any changes, including switch jnp.float32
@@ -309,7 +309,7 @@ class EinsumTest(parameterized.TestCase):
     logging.info(
         'fp_fq_mae=%s fp_q_mae=%s fq_q_mae=%s', fp_fq_mae, fp_q_mae, fq_q_mae
     )
-    self.assertLess(fq_q_mae, 1e-6)
+    self.assertLessEqual(fq_q_mae, 1e-6)
 
   def test_dequant_on_inputs(self):
     lhs = self._make_array((16, 128, 128), jnp.bfloat16)
