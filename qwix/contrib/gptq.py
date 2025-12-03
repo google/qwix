@@ -126,25 +126,30 @@ def quantize_params(
       not_quantized_params[path] = w
       continue
 
-    # Get the hessian.
+    # HACK: get the contracting axis by assuming that all non-contracting axes
+    # are in channelwise_axes.
+    contracting_axis = set(range(w.ndim)) - set(abs_w.how.channelwise_axes)
+    assert len(contracting_axis) == 1
+    contracting_axis = list(contracting_axis)[0]
+
+    # Normalize the weight to (ra, ca) format.
+    w, restore_shape = gptq_core.normalize_weight(w, contracting_axis)
+    how = dataclasses.replace(abs_w.how, channelwise_axes=[0])
+    if contracting_axis in how.tiled_axes:
+      how = dataclasses.replace(
+          how, tiled_axes={1: how.tiled_axes[contracting_axis]}
+      )
+
+    # Get the hessian, which should be (ca, ca).
     calibration = averaging.SimpleMovingAverage().get_calibration(gptq_stats)
     hessian = calibration['hessian']
+    assert hessian.shape[0] == w.shape[1] and hessian.shape[1] == w.shape[1]
 
-    # We only support 2D weights in (ca, ra). Hessian should be (ca, ca).
-    assert w.ndim == 2 and hessian.shape[0] == w.shape[0]
-    # Transpose w to (ca, ra) to match the requirements of gptq_core and adjust
-    # the HowToQuantize accordingly.
+    # Quantize the weight with GPTQ.
     w = gptq_core.quantize_weight(
-        w.T,
-        hessian,
-        dataclasses.replace(
-            abs_w.how,
-            channelwise_axes=[1 - a for a in abs_w.how.channelwise_axes],
-            tiled_axes={1 - a: s for a, s in abs_w.how.tiled_axes.items()},
-        ),
-        blocksize=gptq_block_size,
-        percdamp=gptq_damping_factor,
-    )[0].T
+        w, hessian, how, blocksize=gptq_block_size, percdamp=gptq_damping_factor
+    )[0]
+    w = restore_shape(w)
     quantized_params[path] = abs_w.replace(array=w)
 
   # Quantize the non-GPTQ params with PTQ.

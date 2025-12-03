@@ -23,6 +23,8 @@ https://github.com/IST-DASLab/gptq/blob/main/gptq.py
 # We try to use the same naming as in the PyTorch implementation, thus
 # pylint: disable=invalid-name
 
+from collections.abc import Callable
+
 import jax
 import jax.numpy as jnp
 from qwix._src.core import qarray
@@ -217,3 +219,20 @@ def compute_hessian(X: jax.Array) -> jax.Array:
     The Hessian matrix of shape (in_features, in_features).
   """
   return X @ X.T
+
+
+def normalize_weight(
+    x: jax.Array, contraction_axis: int
+) -> tuple[jax.Array, Callable[..., jax.Array]]:
+  """Normalizes the weight into (ra, ca) format for GPTQ."""
+  # Move the contraction axis to the last dimension.
+  x = jnp.moveaxis(x, contraction_axis, -1)
+  before_shape = x.shape
+  # Reshape the weight to (ra, ca).
+  x = x.reshape(-1, x.shape[-1])
+
+  def restore_shape(x: qarray.MaybeQArray) -> qarray.MaybeQArray:
+    x = x.reshape(before_shape)
+    return jax.tree.map(lambda x: jnp.moveaxis(x, -1, contraction_axis), x)
+
+  return x, restore_shape
