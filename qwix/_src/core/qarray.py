@@ -32,14 +32,14 @@ class QArray:
   """A quantized array implementation with subchannel support.
 
   The following conditions hold:
-    * qvalue.shape == original.shape
-    * len(scale.shape) == len(original.shape)
-    * len(scale.shape) == len(zero_point.shape)
-    * To enable subchannel quantization, scale and zero_point can be
-      "generic broadcasted" to original.shape, which means
-        all(o % s == 0 for o, s in zip(original.shape, scale.shape))
-    * original ≈ (qvalue - zero_point) * generic_broadcast(
-        scale, original.shape)
+
+  * qvalue.shape == original.shape
+  * len(scale.shape) == len(original.shape)
+  * len(scale.shape) == len(zero_point.shape)
+  * To enable subchannel quantization, scale and zero_point can be  "generic
+    broadcasted" to original.shape, which means all(o % s == 0 for o, s in
+    zip(original.shape, scale.shape))
+  * original ≈ (qvalue - zero_point) * generic_broadcast(scale, original.shape)
 
   Attributes:
     qvalue: The quantized value.
@@ -594,7 +594,7 @@ def quantize_api(
 
 
 def dequantize(array: QArray) -> jax.Array:
-  """Dequantizes an array. The reverse of |quantize|.
+  """Dequantizes an array. The reverse of `quantize`.
 
   Args:
     array: The quantized array to dequantize.

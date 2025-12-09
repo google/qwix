@@ -1,0 +1,41 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Environments ---
+.env
+.venv
+env/
+venv/
+ENV/
+
+# --- Documentation (Sphinx) ---
+# Common locations for Sphinx build artifacts
+docs/build/
+docs/_build/
+docs/generated/
+
+# --- Distribution / Packaging ---
+docs/build/
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- Unit Testing & Type Checking ---
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- IDEs & Editors ---
+# VS Code
+.vscode/
+# PyCharm / IntelliJ
+.idea/
+# macOS
+.DS_Store
+
+# --- Jupyter Notebooks (Optional) ---
+.ipynb_checkpoints
