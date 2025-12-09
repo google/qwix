@@ -270,7 +270,40 @@ def loop_dot_general(
     preferred_element_type: jax.typing.DTypeLike | None = None,
     **kwargs,
 ) -> jax.Array:
-  """Loop-based tiled dot general implementation, mainly used in Pallas kernels."""
+  """Loop-based tiled dot general implementation for the internal accumulation loop.
+
+  This function computes the dot product by iterating over the contracting
+  dimensions
+  (the temporal loop), while assuming the inputs are already spatially sharded.
+
+  **Input State:**
+  The `lhs` and `rhs` inputs to this function are expected to be **Spatial
+  Shards**
+  (chunks of the M and N dimensions) determined by the Pallas grid, but they
+  contain the **Full Contracting Dimension** (K) (or large chunks of it).
+
+  **Why loop?**
+  We cannot simply pass the full K-dimension to the hardware in one shot
+  because:
+  1.  **MXU Constraints:** The TPU Matrix Unit (MXU) operates on fixed tile
+  sizes
+      (typically 128x128). A large contracting dimension (e.g., K=512 or K=1024)
+      must be broken down into these smaller hardware-native tiles.
+  2.  **Quantization/Accumulation:** For quantized operations, we often need to
+      dequantize and accumulate partial results periodically (e.g., every 128
+      steps)
+      to prevent integer overflow or precision loss in the accumulator.
+
+  Args:
+    lhs: The left-hand side input (spatially sharded).
+    rhs: The right-hand side input (spatially sharded).
+    dimension_numbers: The contracting/batch dims.
+    preferred_element_type: Accumulator dtype.
+    **kwargs: Extra args for jax.lax.dot_general.
+
+  Returns:
+    The accumulated result of the dot product.
+  """
   if isinstance(lhs, qarray.QArray):
     lhs_value = lhs.qvalue
     lhs_scale = lhs.scale
