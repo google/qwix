@@ -7,3 +7,7 @@ myst-nb
 sphinx
 sphinx-book-theme
 sphinx-tabs
+
+# Jax and flax support
+jax
+flax

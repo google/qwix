@@ -35,10 +35,11 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
   """QAT provider for ODML.
 
   Compared with the regular QAT provider, this provider
-    * Quantizes all ops more than just conv, einsum, and dot_general.
-    * Quantizes output activations via a delayed fake_quant.
-    * Supports limited per-channel quantization for weights.
-    * Doesn't support subchannel quantization.
+
+  * Quantizes all ops more than just conv, einsum, and dot_general.
+  * Quantizes output activations via a delayed fake_quant.
+  * Supports limited per-channel quantization for weights.
+  * Doesn't support subchannel quantization.
   """
 
   def __init__(
@@ -236,10 +237,12 @@ class OdmlConversionProvider(OdmlQatProvider):
   by composites and the scales are computed statically in numpy.
 
   Supported modes:
-    * Weight-only quantization.
-    * Static-range quantization.
 
-  Usage:
+  * Weight-only quantization.
+  * Static-range quantization.
+
+  Usage::
+
     # The params can be from QAT or the FP model.
     params = ...
 

@@ -15,3 +15,19 @@ ptq.md
 odml.md
 lora.md
 ```
+
+```{toctree}
+:maxdepth: 1
+:caption: Core API
+
+data_structures.md
+core_api.md
+```
+
+```{toctree}
+:maxdepth: 1
+:caption: Providers API
+
+providers_interface.md
+providers.md
+```
