@@ -11,8 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Quantized jax.lax.ragged_dot and jax.lax.ragged_dot_general."""
+# pylint: disable=line-too-long
 
 from collections.abc import Collection, Sequence
 import jax
@@ -250,7 +250,30 @@ def ragged_dot_general(
     preferred_element_type: jax.typing.DTypeLike | None = None,
     group_offset: jax.Array | None = None,
 ) -> jax.Array:
-  """Quantized jax.lax.ragged_dot_general."""
+  """Computes a general ragged dot product with support for ``QArray`` inputs.
+
+  This function serves as a drop-in replacement for
+  `jax.lax.ragged_dot_general <https://docs.jax.dev/en/latest/_autosummary/jax.lax.ragged_dot_general.html>`_.
+
+  It automatically dispatches to a quantized implementation if inputs are
+  compatible ``QArray``s. Otherwise, it dequantizes inputs and falls back to the
+  standard floating-point JAX implementation.
+
+  Args:
+    lhs: The left-hand side, either a jax.Array or QArray.
+    rhs: The right-hand side, either a jax.Array or QArray.
+    group_sizes: An array of integers specifying the size of each group in the
+      ragged dimension.
+    dimension_numbers: A ``jax.lax.RaggedDotDimensionNumbers`` struct specifying
+      the contracting, batch, and ragged dimensions.
+    precision: The numerical precision configuration for the computation.
+    preferred_element_type: The target data type for accumulation.
+    group_offset: Optional starting offset for the groups.
+
+  Returns:
+    An Array containing the result of the ragged dot product.
+  """
+
   use_fast_path = True
   for operand in (lhs, rhs):
     if isinstance(operand, qarray.QArray):
@@ -297,7 +320,26 @@ def ragged_dot(
     preferred_element_type: jax.typing.DTypeLike | None = None,
     group_offset: jax.Array | None = None,
 ) -> jax.Array:
-  """Quantized jax.lax.ragged_dot."""
+  """Computes a ragged dot product with support for ``QArray`` inputs.
+
+  This function serves as a drop-in replacement for
+  `jax.lax.ragged_dot <https://docs.jax.dev/en/latest/_autosummary/jax.lax.ragged_dot.html>`_.
+
+  It is a convenience wrapper around ``ragged_dot_general`` with standard
+  matrix multiplication dimension numbers.
+
+  Args:
+    lhs: The left-hand side, either a jax.Array or QArray.
+    rhs: The right-hand side, either a jax.Array or QArray.
+    group_sizes: An array of integers specifying the size of each group in the
+      ragged dimension.
+    precision: The numerical precision configuration for the computation.
+    preferred_element_type: The target data type for accumulation.
+    group_offset: Optional starting offset for the groups.
+
+  Returns:
+    An Array containing the result of the ragged dot product.
+  """
   return ragged_dot_general(
       lhs,
       rhs,

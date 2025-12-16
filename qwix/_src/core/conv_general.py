@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Quantized jax.lax.conv_general_dilated."""
+# pylint: disable=line-too-long
 
 from collections.abc import Sequence
 from typing import Any
@@ -200,7 +201,35 @@ def conv_general_dilated(
     preferred_element_type: jax.typing.DTypeLike | None = None,
     out_sharding=None,
 ) -> jax.Array:
-  """Dispatches to fast or slow conv_general_dilated depending on the inputs."""
+  """Computes a general dilated convolution with support for ``QArray`` inputs.
+
+  This function serves as a drop-in replacement for
+  `jax.lax.conv_general_dilated <https://docs.jax.dev/en/latest/_autosummary/jax.lax.conv_general_dilated.html>`_.
+
+  It automatically dispatches to a quantized implementation if inputs are
+  compatible ``QArray``s. Otherwise, it dequantizes inputs and falls back to the
+  standard floating-point JAX implementation.
+
+  Args:
+    lhs: The left-hand side, either a jax.Array or QArray.
+    rhs: The right-hand side, either a jax.Array or QArray.
+    window_strides: A sequence of integers specifying the stride of the
+      convolution window.
+    padding: The padding algorithm (e.g., 'SAME', 'VALID') or explicit padding
+      amounts.
+    lhs_dilation: Dilation factors for the input (lhs) spatial dimensions.
+    rhs_dilation: Dilation factors for the kernel (rhs) spatial dimensions.
+    dimension_numbers: A structure specifying the dimension layout for lhs, rhs,
+      and the output.
+    feature_group_count: The number of feature groups for grouped convolution.
+    batch_group_count: The number of batch groups.
+    precision: The numerical precision configuration for the computation.
+    preferred_element_type: The target data type for accumulation.
+    out_sharding: Optional sharding spec for the output array.
+
+  Returns:
+    An Array containing the convolution result.
+  """
   use_fast_path = True
 
   for x in (lhs, rhs):

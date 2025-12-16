@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Quantized jax.lax.dot_general with subchannel support."""
+# pylint: disable=line-too-long
 
 from collections.abc import Collection, Sequence
 import itertools
@@ -400,7 +401,10 @@ def dot_general(
     preferred_element_type: jax.typing.DTypeLike | None = None,
     **kwargs,
 ) -> jax.Array:
-  """Quantized jax.lax.dot_general.
+  """Computes a general dot product with support for ``QArray`` inputs.
+
+  This function serves as a drop-in replacement for
+  `jax.lax.dot_general <https://docs.jax.dev/en/latest/_autosummary/jax.lax.dot_general.html>`_.
 
   Args:
     lhs: The left-hand side, either a jax.Array or QArray.
