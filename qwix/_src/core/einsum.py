@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Quantized einsum with subchannel support."""
+# pylint: disable=line-too-long
 
 import dataclasses
 from typing import Any, Collection
@@ -94,7 +95,11 @@ def einsum(
     preferred_element_type: jax.typing.DTypeLike | None = None,
     **kwargs,
 ) -> jax.Array:
-  """Quantized einsum that can take QArrays and returns floating-point jax.Array.
+  """Computes Einstein summation convention with support for ``QArray`` inputs.
+
+  This function serves as a drop-in replacement for
+  `jax.numpy.einsum
+  <https://docs.jax.dev/en/latest/_autosummary/jax.numpy.einsum.html>`_.
 
   Args:
     *args: Arguments to einsum.
