@@ -77,6 +77,7 @@ def get_all_ops():
       'flax.linen.LayerNorm.__call__': quantize(1, op_name='norm_op'),
       'flax.linen.avg_pool': OnlyInputOp,
       'flax.linen.max_pool': OnlyInputOp,
+      'flax.nnx.BatchNorm.__call__': BatchNorm,
       'jax._src.numpy.indexing.rewriting_take': Take,  # a.__getitem__
       'jax.custom_jvp.__call__': CustomJvpCall,  # handles relu and relu6.
       'jax.image.resize': OnlyInputOp,
@@ -116,7 +117,7 @@ def get_all_ops():
   }
 
 
-NotAnActivationError = ValueError(
+NotAnActivationError = ValueError(  # pylint: disable=invalid-name
     "The array is expected to be an activation, but it's not. This is usually"
     " because your model has ops that Qwix doesn't support, or your model is"
     ' using those ops in a way Qwix failed to intercept. To disable this check,'
