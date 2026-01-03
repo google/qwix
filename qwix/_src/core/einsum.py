@@ -18,7 +18,6 @@ import dataclasses
 from typing import Any, Collection
 
 import jax
-from jax import numpy as jnp
 from qwix._src.core import dot_general
 from qwix._src.core import qarray
 
@@ -117,28 +116,49 @@ def einsum(
       preferred_element_type=preferred_element_type,
   )
 
-  # We want to use jnp.einsum with quantized dot_general to avoid duplicating
-  # the implementation. However, jnp.einsum will check the inputs to be
-  # jax Arrays. To work around this, we send the qvalue to jnp.einsum and
-  # restore the actual QArray before actually passing them to dot_general.
-  args = list(args)
-  qvalue_to_qarray = {}
-  for i, arg in enumerate(args):
-    if isinstance(arg, qarray.QArray):
-      args[i] = arg.qvalue
-      qvalue_to_qarray[id(arg.qvalue)] = arg
-
-  def _dot_general(*args, **kwargs):
-    args = [qvalue_to_qarray.pop(id(a), a) for a in args]
-    return _qwix_dot_general(*args, **kwargs)
-
-  # Disabling JIT is necessary so that args in _dot_general are not tracers.
-  with jax.disable_jit():
-    out = jnp.einsum(
-        *args,
-        _dot_general=_dot_general,
-        preferred_element_type=preferred_element_type,
-        **kwargs,
+  # Separate string and operands
+  # The `args` tuple is expected to be (einsum_str, lhs, rhs)
+  if len(args) != 3:
+    raise ValueError(
+        f'Expected 3 arguments (einsum_str, lhs, rhs), but got {len(args)}'
     )
-  assert not qvalue_to_qarray, 'All qvalues should be consumed.'
-  return out
+  einsum_str, lhs, rhs = args
+  info = get_einsum_info(einsum_str, (lhs.ndim, rhs.ndim))
+
+  batch_chars = sorted(list(set(info.lhs) & set(info.rhs) & set(info.out)))
+  contract_chars = sorted(list(set(info.lhs) & set(info.rhs) - set(info.out)))
+
+  # Construct dimension_numbers for dot_general
+  lhs_map = {c: i for i, c in enumerate(info.lhs)}
+  rhs_map = {c: i for i, c in enumerate(info.rhs)}
+  lhs_contract = [lhs_map[c] for c in contract_chars]
+  rhs_contract = [rhs_map[c] for c in contract_chars]
+  lhs_batch = [lhs_map[c] for c in batch_chars]
+  rhs_batch = [rhs_map[c] for c in batch_chars]
+  dimension_numbers = (
+      (tuple(lhs_contract), tuple(rhs_contract)),
+      (tuple(lhs_batch), tuple(rhs_batch)),
+  )
+
+  # Call dot_general
+  output = _qwix_dot_general(
+      lhs,
+      rhs,
+      dimension_numbers,
+      preferred_element_type=preferred_element_type,
+      **kwargs,
+  )
+
+  # Transpose output
+  lhs_free_chars = [
+      c for c in info.lhs if c in info.out and c not in batch_chars
+  ]
+  rhs_free_chars = [
+      c for c in info.rhs if c in info.out and c not in batch_chars
+  ]
+  current_out_chars = batch_chars + lhs_free_chars + rhs_free_chars
+  current_pos_map = {c: i for i, c in enumerate(current_out_chars)}
+  perm = [current_pos_map[c] for c in info.out]
+  output = output.transpose(perm)
+
+  return output
