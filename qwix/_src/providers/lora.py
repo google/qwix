@@ -276,6 +276,7 @@ class LoraProvider(ptq.PtqProvider):
       batch_group_count: int = 1,
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
+      out_sharding=None,
   ) -> jax.Array:
     """LoRA conv_general_dilated."""
     res = super().conv_general_dilated(
@@ -290,6 +291,7 @@ class LoraProvider(ptq.PtqProvider):
         batch_group_count=batch_group_count,
         precision=precision,
         preferred_element_type=preferred_element_type,
+        out_sharding=out_sharding,
     )
 
     rule, _ = self._get_current_rule_and_op_id(

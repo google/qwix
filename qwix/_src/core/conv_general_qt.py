@@ -148,6 +148,7 @@ def conv_general_qt_fwd(
     dimension_numbers: jax.lax.ConvDimensionNumbers | None,
     feature_group_count: int,
     batch_group_count: int,
+    out_sharding=None,
 ) -> tuple[jax.Array, tuple[qarray.MaybeQArray, qarray.MaybeQArray]]:
   """Forward pass for conv_general_qt custom VJP."""
   dnums = jax.lax.conv_dimension_numbers(
@@ -199,6 +200,7 @@ def conv_general_qt_fwd(
       dnums,
       feature_group_count,
       batch_group_count,
+      out_sharding,
   )
   residuals = (lhs, rhs)
 
@@ -214,10 +216,12 @@ def conv_general_qt_bwd(
     dimension_numbers: jax.lax.ConvDimensionNumbers | None,
     feature_group_count: int,
     batch_group_count: int,
+    out_sharding,
     res: tuple[qarray.MaybeQArray, qarray.MaybeQArray],
     g: jax.Array,
 ):
   """Backward pass for conv_general_qt custom VJP."""
+  del out_sharding  # we shouldn't use fwd pass out_sharding for bwd pass.
   lhs, rhs = res
 
   dnums = jax.lax.conv_dimension_numbers(
@@ -334,7 +338,7 @@ def conv_general_qt_bwd(
   return dlhs, drhs
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4, 5, 6, 7, 8, 9))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4, 5, 6, 7, 8, 9, 10))
 def conv_general_qt(
     lhs: jax.Array,
     rhs: jax.Array,
@@ -346,6 +350,7 @@ def conv_general_qt(
     dimension_numbers: jax.lax.ConvDimensionNumbers | None = None,
     feature_group_count: int = 1,
     batch_group_count: int = 1,
+    out_sharding=None,
 ) -> jax.Array:
   """Quantized conv_general using a simple, hashable config dataclass."""
   result, _ = conv_general_qt_fwd(
@@ -359,6 +364,7 @@ def conv_general_qt(
       dimension_numbers,
       feature_group_count,
       batch_group_count,
+      out_sharding,
   )
   return result
 

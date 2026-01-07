@@ -246,6 +246,7 @@ class PtqProvider(qconfig.QuantizationProvider):
       batch_group_count: int = 1,
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
+      out_sharding=None,
   ) -> jax.Array:
     rule, op_id = self._get_current_rule_and_op_id('conv_general_dilated')
     if rule is None or rule.weight_qtype is None:
@@ -261,6 +262,7 @@ class PtqProvider(qconfig.QuantizationProvider):
           batch_group_count=batch_group_count,
           precision=precision,
           preferred_element_type=preferred_element_type,
+          out_sharding=out_sharding,
       )
     dimension_numbers = jax.lax.conv_dimension_numbers(
         lhs.shape, rhs.shape, dimension_numbers
@@ -306,6 +308,7 @@ class PtqProvider(qconfig.QuantizationProvider):
         dimension_numbers=dimension_numbers,
         feature_group_count=feature_group_count,
         batch_group_count=batch_group_count,
+        out_sharding=out_sharding,
     )
 
   def nn_param(self, module: nn.Module, name: str, *args, **kwargs):
