@@ -178,9 +178,9 @@ class PtqTest(parameterized.TestCase):
     qw = qw.array
     self.assertEqual(qw.qvalue.dtype, jnp.int8)
     self.assertEqual(qw.qvalue.shape, (12, 6))
-    self.assertEqual(qw.qvalue.sharding_names, ("contraction", "remaining"))
+    self.assertEqual(qw.qvalue.sharding_metadata, ("contraction", "remaining"))
     self.assertEqual(qw.scale.shape, (3, 6))
-    self.assertEqual(qw.scale.sharding_names, ("contraction", "remaining"))
+    self.assertEqual(qw.scale.sharding_metadata, ("contraction", "remaining"))
 
     # Weight quantization method 2: call quantize_model in eval_shape and
     # quantize_params.
@@ -238,9 +238,9 @@ class PtqTest(parameterized.TestCase):
     sharding = nnx.get_named_sharding(unsharded_state, mesh)
     sharded_state = jax.device_put(unsharded_state, sharding)
     nnx.update(fp_einsum, sharded_state)
-    self.assertEqual(fp_einsum.kernel.sharding_names, ("fsdp", "tp", None))
+    self.assertEqual(fp_einsum.kernel.sharding_metadata, ("fsdp", "tp", None))
     self.assertEqual(fp_einsum.kernel.value.sharding.spec, ("fsdp", "tp", None))
-    self.assertEqual(fp_einsum.bias.sharding_names, ("tp", None))
+    self.assertEqual(fp_einsum.bias.sharding_metadata, ("tp", None))
     self.assertEqual(fp_einsum.bias.value.sharding.spec, ("tp", None))
 
     with jax.set_mesh(mesh):
@@ -261,10 +261,10 @@ class PtqTest(parameterized.TestCase):
     qw = qw.array
     self.assertEqual(qw.qvalue.dtype, jnp.int8)
     self.assertEqual(qw.qvalue.shape, (16, 8, 10))
-    self.assertEqual(qw.qvalue.sharding_names, ("fsdp", "tp", None))
+    self.assertEqual(qw.qvalue.sharding_metadata, ("fsdp", "tp", None))
     self.assertEqual(get_canonical_pspec(qw.qvalue.value), ("fsdp", "tp", None))
     self.assertEqual(qw.scale.shape, (4, 8, 10))
-    self.assertEqual(qw.scale.sharding_names, ("fsdp", "tp", None))
+    self.assertEqual(qw.scale.sharding_metadata, ("fsdp", "tp", None))
     self.assertEqual(get_canonical_pspec(qw.scale.value), ("fsdp", "tp", None))
 
     # PTQ method 2: call quantize_model in eval_shape and quantize_params.
