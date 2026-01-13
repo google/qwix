@@ -111,7 +111,8 @@ def convert_to(
   else:
     # dtype is a floating point type. No rounding needed, but we need to clip to
     # the range to avoid inf or nan (e.g. for e4m3fn).
-    return x.clip(float(finfo.min), float(finfo.max)).astype(qtype)
+    qmin, qmax = finfo.min.astype(x.dtype), finfo.max.astype(x.dtype)
+    return x.clip(qmin, qmax).astype(qtype)
 
   # dtype is an integer type. We need to round manually but clipping can be
   # handled by "astype".

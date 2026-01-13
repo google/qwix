@@ -38,21 +38,44 @@ class DotGeneralQtConfig:
   rhs_calibration_method: str = 'absmax'
   lhs_collect_quant_stat: Callable[[Any], Any] | None = None
   rhs_collect_quant_stat: Callable[[Any], Any] | None = None
+  lhs_disable_channelwise_axes: bool = False
+  rhs_disable_channelwise_axes: bool = False
 
   # Backward pass (dlhs).
   dlhs_grad_qtype: jax.typing.DTypeLike | None = None  # incoming gradient
   dlhs_grad_calibration_method: str = 'absmax'
   dlhs_tile_size: int | float | None = None
   dlhs_stochastic_rounding_noise_fn: numerics.NoiseFn | None = None
+  dlhs_grad_disable_channelwise_axes: bool = False
 
   # Backward pass (drhs).
   drhs_grad_qtype: jax.typing.DTypeLike | None = None  # incoming gradient
   drhs_grad_calibration_method: str = 'absmax'
   drhs_tile_size: int | float | None = None
   drhs_stochastic_rounding_noise_fn: numerics.NoiseFn | None = None
+  drhs_grad_disable_channelwise_axes: bool = False
 
-  # Misc.
-  disable_channelwise_axes: bool = False
+  # Whether not to clip the gradients to the calibration ranges of the quantized
+  # inputs. Enabling this improves the performance but may decrease the
+  # numerical stability. Note that for the default absmax calibration method,
+  # the gradient clipping is always skipped.
+  disable_gradient_clipping: bool = False
+
+  # By default, Qwix will use the quantized inputs from the fwd pass as the
+  # residuals during the bwd pass, which is generally more accurate and more
+  # efficient. Enabling this will allow separate quantization schema for the
+  # residuals.
+  use_original_residuals: bool = False
+
+  # Quantization for residuals. These only take effect when residuals are not
+  # already quantized, i.e., either use_original_residuals is True or the
+  # corresponding qtype in the fwd pass is None.
+  dlhs_residual_qtype: jax.typing.DTypeLike | None = None
+  dlhs_residual_calibration_method: str = 'absmax'
+  dlhs_residual_disable_channelwise_axes: bool = False
+  drhs_residual_qtype: jax.typing.DTypeLike | None = None
+  drhs_residual_calibration_method: str = 'absmax'
+  drhs_residual_disable_channelwise_axes: bool = False
 
 
 def _ranges_like(*xs):
@@ -164,9 +187,7 @@ def dot_general_qt_bwd(
   """Backward pass for dot_general_qt custom VJP."""
   lhs_in, rhs_in, lhs, rhs, lhs_calibration, rhs_calibration = residuals
 
-  def _compute_gradient_for_operand(
-      g: jax.Array, y: qarray.MaybeQArray, *, for_dlhs: bool
-  ):
+  def _compute_gradient_for_operand(g: jax.Array, *, for_dlhs: bool):
     """Compute dot_general for gradient and other_fwd_operand."""
     bwd_dnums, transpose_axes = _update_dimension_numbers_for_backward(
         fwd_dimension_numbers, (lhs.ndim, rhs.ndim), for_dlhs=for_dlhs
@@ -176,11 +197,21 @@ def dot_general_qt_bwd(
       g_tile_size = config.dlhs_tile_size
       g_calibration_method = config.dlhs_grad_calibration_method
       g_noise_fn = config.dlhs_stochastic_rounding_noise_fn
+      g_disable_channelwise_axes = config.dlhs_grad_disable_channelwise_axes
+      y = rhs_in if config.use_original_residuals else rhs
+      y_qtype = config.dlhs_residual_qtype
+      y_calibration_method = config.dlhs_residual_calibration_method
+      y_disable_channelwise_axes = config.dlhs_residual_disable_channelwise_axes
     else:
       g_qtype = config.drhs_grad_qtype
       g_tile_size = config.drhs_tile_size
       g_calibration_method = config.drhs_grad_calibration_method
       g_noise_fn = config.drhs_stochastic_rounding_noise_fn
+      g_disable_channelwise_axes = config.drhs_grad_disable_channelwise_axes
+      y = lhs_in if config.use_original_residuals else lhs
+      y_qtype = config.drhs_residual_qtype
+      y_calibration_method = config.drhs_residual_calibration_method
+      y_disable_channelwise_axes = config.drhs_residual_disable_channelwise_axes
 
     if g_qtype and numerics.should_quantize(g.dtype):
       if isinstance(y, qarray.QArray) and not qarray.get_tiled_axes(y):
@@ -199,25 +230,43 @@ def dot_general_qt_bwd(
           calibration_method=g_calibration_method,
           noise_fn=g_noise_fn,
       )
-      if config.disable_channelwise_axes:
+      if g_disable_channelwise_axes:
         g_how = dataclasses.replace(g_how, channelwise_axes=[])
 
       g = qarray.quantize(g, g_how)
 
+    if (
+        isinstance(y, jax.Array)
+        and y_qtype
+        and numerics.should_quantize(y.dtype)
+    ):
+      y_how = dot_general.get_how_to_quantize(
+          dimension_numbers=bwd_dnums,
+          ndims=(g.ndim, y.ndim),
+          for_lhs=False,
+          qtype=y_qtype,
+          tile_size=g_tile_size,
+          calibration_method=y_calibration_method,
+      )
+      if y_disable_channelwise_axes:
+        y_how = dataclasses.replace(y_how, channelwise_axes=[])
+      y = qarray.quantize(y, y_how)
+
     grad_res = dot_general.dot_general(g, y, bwd_dnums)
     return jax.lax.transpose(grad_res, transpose_axes)
 
-  dlhs = _compute_gradient_for_operand(g, rhs, for_dlhs=True)
-  drhs = _compute_gradient_for_operand(g, lhs, for_dlhs=False)
+  dlhs = _compute_gradient_for_operand(g, for_dlhs=True)
+  drhs = _compute_gradient_for_operand(g, for_dlhs=False)
 
-  if lhs_calibration is not None:
-    dlhs = qarray.clip_gradient_to_calibration(
-        dlhs, lhs_in, lhs_calibration, config.lhs_calibration_method
-    )
-  if rhs_calibration is not None:
-    drhs = qarray.clip_gradient_to_calibration(
-        drhs, rhs_in, rhs_calibration, config.rhs_calibration_method
-    )
+  if not config.disable_gradient_clipping:
+    if lhs_calibration is not None:
+      dlhs = qarray.clip_gradient_to_calibration(
+          dlhs, lhs_in, lhs_calibration, config.lhs_calibration_method
+      )
+    if rhs_calibration is not None:
+      drhs = qarray.clip_gradient_to_calibration(
+          drhs, rhs_in, rhs_calibration, config.rhs_calibration_method
+      )
 
   return dlhs, drhs, None, None
 
@@ -260,7 +309,7 @@ def dot_general_qt(
         tile_size=config.tile_size,
         calibration_method=config.lhs_calibration_method,
     )
-    if config.disable_channelwise_axes:
+    if config.lhs_disable_channelwise_axes:
       lhs_how = dataclasses.replace(lhs_how, channelwise_axes=[])
     lhs_calibration = qarray.calibrate(lhs, lhs_how)
     if config.lhs_collect_quant_stat:
@@ -275,7 +324,7 @@ def dot_general_qt(
         tile_size=config.tile_size,
         calibration_method=config.rhs_calibration_method,
     )
-    if config.disable_channelwise_axes:
+    if config.rhs_disable_channelwise_axes:
       rhs_how = dataclasses.replace(rhs_how, channelwise_axes=[])
     rhs_calibration = qarray.calibrate(rhs, rhs_how)
     if config.rhs_collect_quant_stat:

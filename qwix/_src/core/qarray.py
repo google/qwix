@@ -32,14 +32,14 @@ class QArray:
   """A quantized array implementation with subchannel support.
 
   The following conditions hold:
-
-  * qvalue.shape == original.shape
-  * len(scale.shape) == len(original.shape)
-  * len(scale.shape) == len(zero_point.shape)
-  * To enable subchannel quantization, scale and zero_point can be  "generic
-    broadcasted" to original.shape, which means all(o % s == 0 for o, s in
-    zip(original.shape, scale.shape))
-  * original ≈ (qvalue - zero_point) * generic_broadcast(scale, original.shape)
+    * qvalue.shape == original.shape
+    * len(scale.shape) == len(original.shape)
+    * len(scale.shape) == len(zero_point.shape)
+    * To enable subchannel quantization, scale and zero_point can be
+      "generic broadcasted" to original.shape, which means
+        all(o % s == 0 for o, s in zip(original.shape, scale.shape))
+    * original ≈ (qvalue - zero_point) * generic_broadcast(
+        scale, original.shape)
 
   Attributes:
     qvalue: The quantized value.
@@ -482,14 +482,14 @@ def compute_scale_zero_point(
   if 'min' in calibration and 'max' in calibration:
     qmin, qmax = numerics.get_asymmetric_bound(qtype)
     scale = (calibration['max'] - calibration['min']) / (qmax - qmin)
-    scale = jnp.where(scale == 0, 1, scale)  # Scale shouldn't be 0.
+    scale = jnp.where(scale == 0, jnp.ones_like(scale), scale)
     zero_point = qmin - calibration['min'] / scale
     zero_point = numerics.convert_to(zero_point, qtype)
   elif 'absmax' in calibration:
     qmax = numerics.get_symmetric_bound(qtype)
     scale = calibration['absmax'] / qmax
     # Maybe adding an epsilon (1e-7) is faster?
-    scale = jnp.where(scale == 0, 1, scale)  # Scale shouldn't be 0.
+    scale = jnp.where(scale == 0, jnp.ones_like(scale), scale)
     zero_point = None
   else:
     raise ValueError(f'Unsupported calibration: {calibration}')
@@ -594,7 +594,7 @@ def quantize_api(
 
 
 def dequantize(array: QArray) -> jax.Array:
-  """Dequantizes an array. The reverse of `quantize`.
+  """Dequantizes an array. The reverse of |quantize|.
 
   Args:
     array: The quantized array to dequantize.

@@ -38,15 +38,16 @@ class ConvGeneralQtConfig:
   rhs_calibration_method: str = 'absmax'
   lhs_collect_quant_stat: Callable[[Any], Any] | None = None
   rhs_collect_quant_stat: Callable[[Any], Any] | None = None
+  lhs_disable_channelwise_axes: bool = False
+  rhs_disable_channelwise_axes: bool = False
 
   # Backward pass.
   dlhs_grad_qtype: jax.typing.DTypeLike | None = None
-  dlhs_grad_calibration_method: str = 'absmax'
   drhs_grad_qtype: jax.typing.DTypeLike | None = None
+  dlhs_grad_calibration_method: str = 'absmax'
   drhs_grad_calibration_method: str = 'absmax'
-
-  # Misc.
-  disable_channelwise_axes: bool = False
+  dlhs_grad_disable_channelwise_axes: bool = False
+  drhs_grad_disable_channelwise_axes: bool = False
 
 
 # Swaps the first two dimension indices of a specification.
@@ -166,9 +167,11 @@ def conv_general_qt_fwd(
     if for_lhs:
       calibration_method = config.lhs_calibration_method
       collect_quant_stat = config.lhs_collect_quant_stat
+      disable_channelwise_axes = config.lhs_disable_channelwise_axes
     else:
       calibration_method = config.rhs_calibration_method
       collect_quant_stat = config.rhs_collect_quant_stat
+      disable_channelwise_axes = config.rhs_disable_channelwise_axes
 
     how = conv_general.get_how_to_quantize(
         dimension_numbers=dnums,
@@ -176,7 +179,7 @@ def conv_general_qt_fwd(
         qtype=qtype,
         calibration_method=calibration_method,
     )
-    if config.disable_channelwise_axes:
+    if disable_channelwise_axes:
       how = dataclasses.replace(how, channelwise_axes=[])
 
     calibration = qarray.calibrate(operand, how)
@@ -273,7 +276,7 @@ def conv_general_qt_bwd(
         qtype=config.dlhs_grad_qtype,
         calibration_method=config.dlhs_grad_calibration_method,
     )
-    if config.disable_channelwise_axes:
+    if config.dlhs_grad_disable_channelwise_axes:
       how = dataclasses.replace(how, channelwise_axes=[])
     dlhs_g = qarray.quantize(dlhs_g, how)
 
@@ -319,7 +322,7 @@ def conv_general_qt_bwd(
         qtype=config.drhs_grad_qtype,
         calibration_method=config.drhs_grad_calibration_method,
     )
-    if config.disable_channelwise_axes:
+    if config.drhs_grad_disable_channelwise_axes:
       how = dataclasses.replace(how, channelwise_axes=[])
     drhs_g = qarray.quantize(drhs_g, how)
 
