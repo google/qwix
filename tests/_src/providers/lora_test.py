@@ -238,9 +238,9 @@ class LoraTest(parameterized.TestCase):
     if apply_sharding_to_base_model:
       # Apply sharding on the base model.
       self._shard_nnx_model(einsum, mesh)
-      self.assertEqual(einsum.kernel.sharding_names, ("fsdp", "tp", None))
+      self.assertEqual(einsum.kernel.sharding_metadata, ("fsdp", "tp", None))
       self.assertEqual(einsum.kernel.value.sharding.spec, ("fsdp", "tp", None))
-      self.assertEqual(einsum.bias.sharding_names, ("tp", None))
+      self.assertEqual(einsum.bias.sharding_metadata, ("tp", None))
       self.assertEqual(einsum.bias.value.sharding.spec, ("tp", None))
 
     lora_provider = lora.LoraProvider([
@@ -266,24 +266,26 @@ class LoraTest(parameterized.TestCase):
     lora_state, base_state = nnx.state(lora_einsum, nnx.LoRAParam, nnx.Param)
 
     self.assertEqual(lora_state.kernel_lora_a.value.shape, (16, 3))
-    self.assertEqual(lora_state.kernel_lora_a.sharding_names, ("fsdp", None))
+    self.assertEqual(lora_state.kernel_lora_a.sharding_metadata, ("fsdp", None))
     self.assertEqual(lora_state.kernel_lora_b.value.shape, (3, 8, 10))
     self.assertEqual(
-        lora_state.kernel_lora_b.sharding_names, (None, "tp", None)
+        lora_state.kernel_lora_b.sharding_metadata, (None, "tp", None)
     )
     if weight_qtype is None:  # unquantized
-      self.assertEqual(base_state.kernel.sharding_names, ("fsdp", "tp", None))
+      self.assertEqual(
+          base_state.kernel.sharding_metadata, ("fsdp", "tp", None)
+      )
       self.assertEqual(
           base_state.kernel.value.sharding.spec, ("fsdp", "tp", None)
       )
     else:  # quantized weights
       self.assertEqual(base_state.kernel.array.qvalue.value.shape, (16, 8, 10))
       self.assertEqual(
-          base_state.kernel.array.qvalue.sharding_names, ("fsdp", "tp", None)
+          base_state.kernel.array.qvalue.sharding_metadata, ("fsdp", "tp", None)
       )
       self.assertEqual(base_state.kernel.array.scale.value.shape, (4, 8, 10))
       self.assertEqual(
-          base_state.kernel.array.scale.sharding_names, ("fsdp", "tp", None)
+          base_state.kernel.array.scale.sharding_metadata, ("fsdp", "tp", None)
       )
 
     # Check that the actual sharding matches the sharding on the metadata,
@@ -400,7 +402,7 @@ class LoraTest(parameterized.TestCase):
           ),
       )
     # Check the sharding of both the metadata and the actual jax.Array.
-    self.assertEqual(conv.kernel.sharding_names, (None, None, "in", "out"))
+    self.assertEqual(conv.kernel.sharding_metadata, (None, None, "in", "out"))
     self.assertEqual(conv.kernel.value.sharding.spec, (None, None, "in", "out"))
 
     lora_provider = lora.LoraProvider(
@@ -416,11 +418,11 @@ class LoraTest(parameterized.TestCase):
     lora_b = lora_conv.kernel_lora_b
     self.assertIsInstance(lora_a, nnx.LoRAParam)
     self.assertEqual(lora_a.shape, (3, 3, 16, 3))
-    self.assertEqual(lora_a.sharding_names, (None, None, "in", None))
+    self.assertEqual(lora_a.sharding_metadata, (None, None, "in", None))
     self.assertEqual(lora_a.value.sharding.spec, (None, None, "in", None))
     self.assertIsInstance(lora_b, nnx.LoRAParam)
     self.assertEqual(lora_b.shape, (3, 32))
-    self.assertEqual(lora_b.sharding_names, (None, "out"))
+    self.assertEqual(lora_b.sharding_metadata, (None, "out"))
     self.assertEqual(lora_b.value.sharding.spec, (None, "out"))
 
   def _shard_nnx_model(self, model: nnx.Module, mesh: jax.sharding.Mesh):
