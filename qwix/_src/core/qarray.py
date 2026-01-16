@@ -499,6 +499,13 @@ def compute_scale_zero_point(
   return scale, zero_point
 
 
+# Whether to multiply by the reciprocal of the scale instead of division during
+# quantization. This matches the behavior of AQT and can be more efficient in
+# some cases (e.g., under certain fusion patterns), but could be less accurate
+# due to potential precision loss in the reciprocal.
+USE_RECIPROCAL_FOR_QUANTIZATION = False
+
+
 def quantize_with_scale_zero_point(
     array: jax.Array,
     qtype: jax.typing.DTypeLike,
@@ -530,7 +537,11 @@ def quantize_with_scale_zero_point(
   # dequantize() uses the scale dtype to reconstruct the original array.
   scale = scale.astype(array.dtype)
 
-  qvalue = call_with_generic_broadcast(jnp.divide, array, scale)
+  if USE_RECIPROCAL_FOR_QUANTIZATION:
+    inv_scale = jnp.reciprocal(scale)
+    qvalue = call_with_generic_broadcast(jnp.multiply, array, inv_scale)
+  else:
+    qvalue = call_with_generic_broadcast(jnp.divide, array, scale)
   if zero_point is not None:
     qvalue = call_with_generic_broadcast(
         jnp.add, qvalue, zero_point.astype(qvalue.dtype)
