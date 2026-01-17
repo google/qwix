@@ -229,7 +229,7 @@ def find_param(x: Any, ptq_array_type=None) -> str | None:
     array_types = jax.Array | ptq_array_type if ptq_array_type else jax.Array
     assert module.scope is not None
     for name, value in module.scope._collection('params').items():  # pylint: disable=protected-access
-      value = nn.unbox(value)
+      value = unbox(value)
       if isinstance(value, array_types):
         candidates[name] = value
   elif isinstance(module, nnx.Module):
@@ -276,13 +276,13 @@ def unbox(maybe_boxed: Any) -> Any:
 
   def fn(x):
     if isinstance(x, nnx.Variable):
-      return x.value
+      return unbox(x.value)
     elif isinstance(x, nnx.VariableState):
-      return x.value
+      return unbox(x.value)
     elif isinstance(x, nnx.VariableMetadata):
-      return x.raw_value
+      return unbox(x.raw_value)
     elif isinstance(x, nn.meta.AxisMetadata):
-      return x.unbox()
+      return unbox(getattr(x, 'value', x.unbox()))
     else:
       return x
 
