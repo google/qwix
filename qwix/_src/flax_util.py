@@ -229,7 +229,7 @@ def find_param(x: Any, ptq_array_type=None) -> str | None:
     array_types = jax.Array | ptq_array_type if ptq_array_type else jax.Array
     assert module.scope is not None
     for name, value in module.scope._collection('params').items():  # pylint: disable=protected-access
-      value = nn.unbox(value)
+      value = unbox(value)
       if isinstance(value, array_types):
         candidates[name] = value
   elif isinstance(module, nnx.Module):
@@ -272,17 +272,31 @@ def find_param(x: Any, ptq_array_type=None) -> str | None:
 
 
 def unbox(maybe_boxed: Any) -> Any:
-  """Similar to nn.unbox but also works for nnx.Variable/VariableState/VariableMetadata."""
+  """Returns the raw array without applying hooks or sharding constraints.
+
+  Similar to nn.unbox but also works for
+  nnx.Variable/VariableState/VariableMetadata.
+  This function is designed to be passive, making it safe for parameter
+  identification in environments with Manual mesh axes.
+
+  Args:
+    maybe_boxed: The value to unbox, which can be a jax.Array,
+      nn.meta.AxisMetadata, nnx.Variable, or other types containing these.
+  """
 
   def fn(x):
-    if isinstance(x, nnx.Variable):
-      return x.value
-    elif isinstance(x, nnx.VariableState):
-      return x.value
+    # Recursion is necessary for nested metadata, such as the NNX Bridge where
+    # NNXMeta (an AxisMetadata subclass) wraps an nnx.Variable.
+    # Without recursion, unboxing would stop at the Variable layer,
+    # failing to reach the raw jax.Array.
+    if isinstance(x, nnx.Variable | nnx.VariableState):
+      return unbox(x.get_raw_value())
     elif isinstance(x, nnx.VariableMetadata):
-      return x.raw_value
+      return unbox(x.raw_value)
     elif isinstance(x, nn.meta.AxisMetadata):
-      return x.unbox()
+      if isinstance(x, nn.Partitioned):
+        return unbox(x.unbox(apply_constraint=False))
+      return unbox(x.unbox())
     else:
       return x
 
