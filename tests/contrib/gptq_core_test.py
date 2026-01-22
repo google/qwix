@@ -92,6 +92,31 @@ class GptqCoreTest(parameterized.TestCase):
     self.assertEqual(w3.shape, (2, 3, 4))
     self.assertTrue(jnp.all(w == w3))
 
+  def test_quantize_weight_defaults_to_per_channel(self):
+    """Test GPTQ produces valid QArray when columns isn't divisible by rows."""
+    # Shape where columns (3525) is not divisible by rows (256), ensures
+    # the group size defaults to the number of columns (3525) and all columns
+    # are quantized in a single group; per-channel quantization.
+    w = jax.nn.initializers.lecun_normal()(
+        jax.random.key(0), (256, 3525), jnp.float32
+    )
+    x = jax.random.t(jax.random.key(1), 5, (3525, 1024), jnp.float32)
+
+    # No subchannel quantization specified (no tiled_axes)
+    how = qarray.HowToQuantize(
+        qtype=jnp.int8,
+        channelwise_axes=[0],
+    )
+
+    h = gptq_core.compute_hessian(x)
+    w_gptq, _ = gptq_core.quantize_weight(w, h, how)
+
+    # Verify the QArray is valid:
+    # - qvalue.shape should match original weight shape
+    # - scale.shape should be (rows, 1) for per-channel quantization
+    self.assertEqual(w_gptq.qvalue.shape, (256, 3525))
+    self.assertEqual(w_gptq.scale.shape, (256, 1))
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -99,10 +99,11 @@ def quantize_weight(
     a tuple of (W_q, Losses), where W_q is the quantized weight matrix as a
     QArray and Losses is the overall quantization losses.
   """
-  rows, columns = W.shape
+  _, columns = W.shape
   assert H.shape == (columns, columns)
 
-  groupsize = how.tiled_axes.get(1, rows)
+  # Defaults to quantizing all columns in one group; per-channel.
+  groupsize = how.tiled_axes.get(1, columns)
 
   H_diag = jnp.diag(H)
   dead = H_diag == 0
