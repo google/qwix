@@ -19,6 +19,7 @@ import re
 from typing import Any
 
 from absl import logging
+from flax import linen as nn
 from flax import nnx
 import jax
 from jax.experimental import pallas as pl
@@ -189,11 +190,12 @@ class QuantizationProvider:
 
     # Always generate op_id regardless of whether a rule is found.
     module = flax_util.get_current_module()
-    count = aux_data.get(module, op_name + '_count', 0)
+    tracking_key = module.scope if isinstance(module, nn.Module) else module
+    count = aux_data.get(tracking_key, op_name + '_count', 0)
     if repeated_call:
       count -= 1
     else:
-      aux_data.set(module, op_name + '_count', count + 1)
+      aux_data.set(tracking_key, op_name + '_count', count + 1)
     op_id = op_name + str(count)
 
     if (module_path, op_id) not in self._logged_ops:

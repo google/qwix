@@ -27,6 +27,18 @@ from qwix._src import qconfig
 from qwix._src.providers import odml
 
 
+class NamedParamModule(nn.Module):
+  features: int
+  param_name: str
+
+  @nn.compact
+  def __call__(self, x):
+    w = self.param(
+        self.param_name, nn.initializers.normal(), (x.shape[-1], self.features)
+    )
+    return jnp.dot(x, w)
+
+
 class OdmlTest(parameterized.TestCase):
 
   def test_linen(self):
@@ -74,6 +86,72 @@ class OdmlTest(parameterized.TestCase):
     conversion_model = qwix_model.quantize_model(model, conversion_provider)
     conversion_res = conversion_model.apply(qat_vars, model_input)
     self.assertTrue(jnp.allclose(qat_res, conversion_res))
+
+  def test_linen_shared_scope(self):
+    """Test that shared scopes do not cause naming collisions."""
+
+    class SharedScopeModel(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        m1 = NamedParamModule(features=8, param_name='weight1')
+        m2 = NamedParamModule(features=8, param_name='weight2')
+
+        # Reproduce Gemma3 pattern: multiple objects sharing one registry
+        nn.share_scope(self, m1)
+        nn.share_scope(self, m2)
+
+        x = m1(x)
+        x = m2(x)
+        return x
+
+    model = SharedScopeModel()
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*', weight_qtype=jnp.int8, act_qtype=jnp.int8
+        )
+    ]
+    qat_provider = odml.OdmlQatProvider(rules)
+    qat_model = qwix_model.quantize_model(model, qat_provider)
+    qat_vars = qat_model.init(jax.random.key(0), jnp.ones((1, 16)))
+
+    quant_stats = qat_vars['quant_stats']
+    self.assertIn('dot0_lhs', quant_stats)
+    self.assertIn('dot1_lhs', quant_stats)
+
+  def test_linen_no_shared_scope(self):
+    """Test that standard submodules have separate counters and paths."""
+
+    class NoSharedScopeModel(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        # Standard Flax behavior: each module gets its own namespace
+        x = NamedParamModule(features=8, param_name='weight', name='m1')(x)
+        x = NamedParamModule(features=8, param_name='weight', name='m2')(x)
+        return x
+
+    model = NoSharedScopeModel()
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*', weight_qtype=jnp.int8, act_qtype=jnp.int8
+        )
+    ]
+    qat_provider = odml.OdmlQatProvider(rules)
+    qat_model = qwix_model.quantize_model(model, qat_provider)
+    qat_vars = qat_model.init(jax.random.key(0), jnp.ones((1, 16)))
+
+    self.assertEqual(
+        {
+            '/'.join(k[:-1])
+            for k in flax.traverse_util.flatten_dict(qat_vars['quant_stats'])
+        },
+        {
+            'm1/dot0_lhs',
+            'm2/dot0_lhs',
+            'final_output0',
+        },
+    )
 
   def test_nnx(self):
     class NnxModel(nnx.Module):
