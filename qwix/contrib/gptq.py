@@ -54,19 +54,22 @@ class GptqCalibrationProvider(qconfig.QuantizationProvider):
       rhs: jax.Array,
       dimension_numbers: jax.lax.DotDimensionNumbers,
       *args,
+      rule: GptqRule | None = None,
       **kwargs,
   ) -> jax.Array:
     res = jax.lax.dot_general(lhs, rhs, dimension_numbers, *args, **kwargs)
-    rule, _ = self._get_current_rule_and_op_id('dot_general')
+    if rule is None:
+      rule, _ = self._get_current_rule_and_op_id('dot_general')
     if not isinstance(rule, GptqRule):
       return res
 
     (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dimension_numbers
     if lhs_ba or rhs_ba or len(lhs_ca) != 1 or len(rhs_ca) != 1:
-      raise NotImplementedError(f'Unsupported: {dimension_numbers}')
+      return res
 
     weight_name = flax_util.find_param(rhs)
-    assert weight_name is not None
+    if weight_name is None:
+      return res
 
     # Reorder lhs to (ca, rest).
     lhs = jnp.moveaxis(lhs, lhs_ca[0], 0)
@@ -84,9 +87,31 @@ class GptqCalibrationProvider(qconfig.QuantizationProvider):
 
     return res
 
+  def einsum(self, einsum_str, *operands, **kwargs):
+    rule, _ = self._get_current_rule_and_op_id('einsum')
+    if not isinstance(rule, GptqRule):
+      return jnp.einsum(einsum_str, *operands, **kwargs)
+
+    if not isinstance(einsum_str, str) or len(operands) != 2:
+      return jnp.einsum(einsum_str, *operands, **kwargs)
+
+    def gptq_dot_general(lhs, rhs, dimension_numbers, *args, **kwargs):
+      return self.dot_general(
+          lhs, rhs, dimension_numbers, *args, rule=rule, **kwargs
+      )
+
+    with jax.disable_jit():
+      return jnp.einsum(
+          einsum_str,
+          *operands,
+          _dot_general=gptq_dot_general,
+          **kwargs,
+      )
+
   def get_intercept_map(self) -> dict[str, Callable[..., Any]]:
     return super().get_intercept_map() | {
-        'jax.lax.dot_general': self.dot_general
+        'jax.lax.dot_general': self.dot_general,
+        'jax.numpy.einsum': self.einsum,
     }
 
 
