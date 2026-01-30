@@ -116,7 +116,8 @@ def get_or_create_variable(
       _check_shape(variable.value, init_fn)
     else:
       variable = var_type(init_fn())
-      setattr(module, name, variable)
+      # setattr(module, name, variable)
+      module.set_attributes(name, variable)
     return variable
 
 
@@ -190,7 +191,8 @@ def get_or_create_param(
       else:
         init_value = init_fn()
       param = jax.tree.map(nnx_param_type, init_value)
-      setattr(module, name, param)
+      # setattr(module, name, param)
+      module.set_attributes(name, param)
     return unbox(param)
 
 
