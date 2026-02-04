@@ -144,10 +144,10 @@ class LoraProvider(ptq.PtqProvider):
     """Initializes the LoraProvider.
 
     Usage:
-      LoraProvider(module_path='module_path', rank=4, alpha=0.5)
+      LoraProvider(module_path='module_path', rank=4, alpha=8.0)
     or
       LoraProvider([
-          LoraRule(module_path='module_path', rank=4, alpha=0.5)
+          LoraRule(module_path='module_path', rank=4, alpha=8.0)
       ])
 
     Args:
@@ -155,6 +155,7 @@ class LoraProvider(ptq.PtqProvider):
       **kwargs: The keyword arguments to create a rule. Only one of rules and
         kwargs should be provided.
     """
+
     if rules is None:
       rules = [LoraRule(**kwargs)]
     elif kwargs:
