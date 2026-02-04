@@ -23,15 +23,14 @@ Please check the test for an example usage.
 """
 
 import dataclasses
-from typing import Any, Callable
+from typing import Any
 
 import flax
 import jax
-from jax import numpy as jnp
 from qwix._src import averaging
-from qwix._src import flax_util
 from qwix._src import qconfig
 from qwix._src.providers import ptq
+from qwix.contrib import calibration
 from qwix.contrib import gptq_core
 
 
@@ -40,79 +39,24 @@ class GptqRule(qconfig.QuantizationRule):
   """Use this rule to enable GPTQ."""
 
 
-class GptqCalibrationProvider(qconfig.QuantizationProvider):
-  """Calibration for GPTQ.
+class GptqCalibrationProvider(calibration.StatsCalibrationProvider):
+  """Calibration provider for GPTQ.
 
-  This provider is used to collect gptq_quant_stats, which will be used by the
-  quantize_params function below. It does not perform the actual quantization of
-  the model parameters, nor use any quantized ops.
+  This provider collects `gptq_quant_stats` (Hessian information) by
+  using `StatsCalibrationProvider` to intercept compatible operations. These
+  statistics are used by `quantize_params` to compute GPTQ updates. This
+  provider does not perform actual quantization or use quantized operations.
   """
 
-  def dot_general(
-      self,
-      lhs: jax.Array,
-      rhs: jax.Array,
-      dimension_numbers: jax.lax.DotDimensionNumbers,
-      *args,
-      rule: GptqRule | None = None,
-      **kwargs,
-  ) -> jax.Array:
-    res = jax.lax.dot_general(lhs, rhs, dimension_numbers, *args, **kwargs)
-    if rule is None:
-      rule, _ = self._get_current_rule_and_op_id('dot_general')
-    if not isinstance(rule, GptqRule):
-      return res
+  def get_rule_type(self) -> type[qconfig.QuantizationRule]:
+    return GptqRule
 
-    (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dimension_numbers
-    if lhs_ba or rhs_ba or len(lhs_ca) != 1 or len(rhs_ca) != 1:
-      return res
-
-    weight_name = flax_util.find_param(rhs)
-    if weight_name is None:
-      return res
-
-    # Reorder lhs to (ca, rest).
-    lhs = jnp.moveaxis(lhs, lhs_ca[0], 0)
-    lhs = lhs.reshape(lhs.shape[0], -1)
+  def compute_stats(self, lhs: jax.Array) -> dict[str, Any]:
     hessian = gptq_core.compute_hessian(lhs)
+    return {'hessian': hessian}
 
-    # Collect the hessian.
-    hessian = {'hessian': hessian}
-    aggregator = averaging.SimpleMovingAverage()
-    quant_stat = flax_util.get_or_create_variable(
-        'quant_stats', weight_name + '_gptq', lambda: aggregator.init(hessian)
-    )
-    if flax_util.should_update_quant_stats():
-      quant_stat.value = aggregator.update(quant_stat.value, hessian)
-
-    return res
-
-  def einsum(self, einsum_str, *operands, **kwargs):
-    rule, _ = self._get_current_rule_and_op_id('einsum')
-    if not isinstance(rule, GptqRule):
-      return jnp.einsum(einsum_str, *operands, **kwargs)
-
-    if not isinstance(einsum_str, str) or len(operands) != 2:
-      return jnp.einsum(einsum_str, *operands, **kwargs)
-
-    def gptq_dot_general(lhs, rhs, dimension_numbers, *args, **kwargs):
-      return self.dot_general(
-          lhs, rhs, dimension_numbers, *args, rule=rule, **kwargs
-      )
-
-    with jax.disable_jit():
-      return jnp.einsum(
-          einsum_str,
-          *operands,
-          _dot_general=gptq_dot_general,
-          **kwargs,
-      )
-
-  def get_intercept_map(self) -> dict[str, Callable[..., Any]]:
-    return super().get_intercept_map() | {
-        'jax.lax.dot_general': self.dot_general,
-        'jax.numpy.einsum': self.einsum,
-    }
+  def get_stats_suffix(self) -> str:
+    return '_gptq'
 
 
 def quantize_params(
@@ -166,8 +110,10 @@ def quantize_params(
       )
 
     # Get the hessian, which should be (ca, ca).
-    calibration = averaging.SimpleMovingAverage().get_calibration(gptq_stats)
-    hessian = calibration['hessian']
+    calibration_stats = averaging.SimpleMovingAverage().get_calibration(
+        gptq_stats
+    )
+    hessian = calibration_stats['hessian']
     assert hessian.shape[0] == w.shape[1] and hessian.shape[1] == w.shape[1]
 
     # Quantize the weight with GPTQ.
