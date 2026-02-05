@@ -14,37 +14,14 @@
 """Quantized einsum with subchannel support."""
 # pylint: disable=line-too-long
 
-import dataclasses
-from typing import Any, Collection
+from typing import Any, Callable
 
 import jax
 from jax import numpy as jnp
+import opt_einsum
 from qwix._src.core import dot_general
+from qwix._src.core import einsum_info
 from qwix._src.core import qarray
-
-
-@dataclasses.dataclass(slots=True)
-class EinsumInfo:
-  lhs: str
-  rhs: str
-  out: str
-  contractions: Collection[str]
-
-
-def get_einsum_info(einsum_str: str, ndims: tuple[int, int]) -> EinsumInfo:
-  """Gets einsum info from an einsum string."""
-  einsum_str = einsum_str.replace(' ', '')
-  inputs, out = einsum_str.split('->')
-  lhs, rhs = inputs.split(',')
-  if '...' in lhs or '...' in rhs:
-    ndim = ndims[0] - len(lhs) + 3 if '...' in lhs else ndims[1] - len(rhs) + 3
-    assert ndim <= 10, f'{ndim=} {einsum_str=}'
-    digits = ''.join(map(str, range(ndim)))
-    assert not set(digits) & set(einsum_str), f'{digits=} {einsum_str=}'
-    lhs = lhs.replace('...', digits)
-    rhs = rhs.replace('...', digits)
-    out = out.replace('...', digits)
-  return EinsumInfo(lhs, rhs, out, set(lhs) & set(rhs) - set(out))
 
 
 def get_how_to_quantize(
@@ -72,12 +49,13 @@ def get_how_to_quantize(
   Returns:
     How to quantize the lhs or rhs.
   """
-  info = get_einsum_info(einsum_str, ndims)
-  subs = info.lhs if for_lhs else info.rhs
+  info = einsum_info.EinsumInfo.parse(einsum_str, ndims=ndims)
+  operand_subs = info.lhs if for_lhs else info.rhs
+
   channelwise_axes = []
   tiled_axes = {}
-  for axis, name in enumerate(subs):
-    if name not in info.contractions:
+  for axis, char in enumerate(operand_subs):
+    if char not in info.contract_chars:
       channelwise_axes.append(axis)
     elif tile_size and not tiled_axes:  # Only tile the first contraction axis.
       tiled_axes[axis] = tile_size
@@ -87,6 +65,28 @@ def get_how_to_quantize(
       tiled_axes=tiled_axes,
       **kwargs,
   )
+
+
+def _perform_binary_einsum(
+    lhs: qarray.MaybeQArray,
+    rhs: qarray.MaybeQArray,
+    einsum_str: str,
+    dot_general_func: Callable[..., jax.Array],
+    preferred_element_type: jax.typing.DTypeLike | None,
+    **kwargs: Any,
+) -> jax.Array:
+  """Performs a binary einsum using the given dot_general function."""
+  info = einsum_info.EinsumInfo.parse(einsum_str)
+  output = dot_general_func(
+      lhs,
+      rhs,
+      info.dimension_numbers,
+      preferred_element_type=preferred_element_type,
+      **kwargs,
+  )
+  if info.output_perm is not None:
+    output = output.transpose(info.output_perm)
+  return output
 
 
 def einsum(
@@ -117,28 +117,50 @@ def einsum(
       preferred_element_type=preferred_element_type,
   )
 
-  # We want to use jnp.einsum with quantized dot_general to avoid duplicating
-  # the implementation. However, jnp.einsum will check the inputs to be
-  # jax Arrays. To work around this, we send the qvalue to jnp.einsum and
-  # restore the actual QArray before actually passing them to dot_general.
-  args = list(args)
-  qvalue_to_qarray = {}
-  for i, arg in enumerate(args):
-    if isinstance(arg, qarray.QArray):
-      args[i] = arg.qvalue
-      qvalue_to_qarray[id(arg.qvalue)] = arg
+  # Prepare inputs using opt_einsum and broadcast_operands.
+  # args: ("ij,jk->ik", qarray, qarray)
+  # input_subs: "ij,jk",  output_subs: "ik", operands: [qarray, qarray]
+  input_subs, output_subs, operands = opt_einsum.parser.parse_einsum_input(args)
+  input_subs_list = input_subs.split(',')
+  assert len(input_subs_list) == len(operands)
+  operands = einsum_info.broadcast_operands(operands, input_subs_list)
 
-  def _dot_general(*args, **kwargs):
-    args = [qvalue_to_qarray.pop(id(a), a) for a in args]
-    return _qwix_dot_general(*args, **kwargs)
+  # Execution using opt_einsum path
+  _, contractions = opt_einsum.contract_path(
+      f'{input_subs}->{output_subs}',
+      *operands,
+      einsum_call=True,  # This is necessary for opt_einsum to return the contraction list.
+  )
+  for contraction in contractions:  # pytype: disable=attribute-error
+    # operand_indices: (0, 1), einsum_str: "ij,jk->ik"
+    operand_indices, _, einsum_str = contraction[:3]
+    if len(operand_indices) == 1:
+      # Fallback to dequantization for unary ops.
+      op0 = operands.pop(operand_indices[0])
+      op0 = qarray.dequantize(op0)
+      res = jnp.einsum(einsum_str, op0)
+      operands.append(res)
+    elif len(operand_indices) == 2:
+      idx0, idx1 = operand_indices
+      op0 = operands[idx0]
+      op1 = operands[idx1]
+      for idx in sorted(operand_indices, reverse=True):
+        # Ensure we pop in correct order to avoid index shift issues
+        operands.pop(idx)
+      res = _perform_binary_einsum(
+          op0,
+          op1,
+          einsum_str,
+          _qwix_dot_general,
+          preferred_element_type=preferred_element_type,
+          **kwargs,
+      )
+      operands.append(res)
+    else:
+      raise NotImplementedError(
+          'A single opt_einsum contract path should contain at most 2'
+          f' operands. Got {len(operand_indices)} operands: {operand_indices}'
+      )
 
-  # Disabling JIT is necessary so that args in _dot_general are not tracers.
-  with jax.disable_jit():
-    out = jnp.einsum(
-        *args,
-        _dot_general=_dot_general,
-        preferred_element_type=preferred_element_type,
-        **kwargs,
-    )
-  assert not qvalue_to_qarray, 'All qvalues should be consumed.'
-  return out
+  assert isinstance(operands[0], jax.Array)
+  return operands[0]

@@ -115,7 +115,8 @@ class QtProvider(qconfig.QuantizationProvider):
           _dot_general=_dot_general,
           out_sharding=out_sharding,
       )
-    if not isinstance(einsum_str, str) or len(operands) != 2:
+    if len(operands) != 2:
+      # TODO(jiwonshin): Support N-ary einsum if there is a need in the future.
       raise ValueError(f'Unsupported einsum format: {einsum_str=} {operands=}')
 
     def custom_dot_general(

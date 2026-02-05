@@ -30,6 +30,7 @@ import jax
 import jax.numpy as jnp
 from qwix._src.core import dot_general as core_dot_general
 from qwix._src.core import einsum as core_einsum
+from qwix._src.core import einsum_info as core_einsum_info
 from qwix._src.core import qarray
 from qwix._src.providers import ptq as _ptq
 
@@ -237,11 +238,13 @@ def einsum(
 
   # If only one operand is PaddedQArray, pad the other to match along
   # contraction dims
-  info = core_einsum.get_einsum_info(einsum_str, (lhs.ndim, rhs.ndim))
+  info = core_einsum_info.EinsumInfo.parse(
+      einsum_str, ndims=(lhs.ndim, rhs.ndim)
+  )
   if not isinstance(rhs, PaddedQArray):
     target_shape = list(rhs.shape)
     for axis, name in enumerate(info.rhs):
-      if name in info.contractions:
+      if name in info.contract_chars:
         lhs_axis = info.lhs.index(name)
         target_shape[axis] = lhs.shape[lhs_axis]
     rhs = pad_to_shape(rhs, tuple(target_shape))
@@ -249,7 +252,7 @@ def einsum(
   if not isinstance(lhs, PaddedQArray):
     target_shape = list(lhs.shape)
     for axis, name in enumerate(info.lhs):
-      if name in info.contractions:
+      if name in info.contract_chars:
         rhs_axis = info.rhs.index(name)
         target_shape[axis] = rhs.shape[rhs_axis]
     lhs = pad_to_shape(lhs, tuple(target_shape))

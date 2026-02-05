@@ -25,7 +25,7 @@ from jax.nn import initializers
 from qwix._src import flax_util
 from qwix._src import model as qwix_model
 from qwix._src import qconfig
-from qwix._src.core import einsum
+from qwix._src.core import einsum_info
 from qwix._src.core import qarray
 from qwix._src.providers import ptq
 
@@ -100,19 +100,17 @@ def _parse_einsum_str_for_lora(
     Sequence[int | None],  # b_sharding_transpose
 ]:
   """Returns lora param shapes and einsum string for LoRA."""
-  einsum_info = einsum.get_einsum_info(
-      einsum_str, (len(lhs_shape), len(rhs_shape))
+  info = einsum_info.EinsumInfo.parse(
+      einsum_str, ndims=(len(lhs_shape), len(rhs_shape))
   )
-  lora_dim_char = _find_lora_dim_char(
-      set(einsum_info.lhs) | set(einsum_info.rhs)
-  )
+  lora_dim_char = _find_lora_dim_char(set(info.lhs) | set(info.rhs))
 
   a_shape, b_shape = (), (lora_rank,)
   a_str, b_str = '', lora_dim_char
   a_sharding_transpose, b_sharding_transpose = (), (None,)
-  assert len(einsum_info.rhs) == len(rhs_shape)
-  for i, (c, dim) in enumerate(zip(einsum_info.rhs, rhs_shape)):
-    if c in set(einsum_info.lhs) & set(einsum_info.rhs):  # batch or contracting
+  assert len(info.rhs) == len(rhs_shape)
+  for i, (c, dim) in enumerate(zip(info.rhs, rhs_shape)):
+    if c in set(info.lhs) & set(info.rhs):  # batch or contracting
       a_str += c
       a_shape += (dim,)
       a_sharding_transpose += (i,)
@@ -127,7 +125,7 @@ def _parse_einsum_str_for_lora(
   return (
       a_shape,
       b_shape,
-      ','.join([einsum_info.lhs, a_str, b_str]) + '->' + einsum_info.out,
+      ','.join([info.lhs, a_str, b_str]) + '->' + info.out,
       a_sharding_transpose,
       b_sharding_transpose,
   )
@@ -226,7 +224,8 @@ class LoraProvider(ptq.PtqProvider):
     if not isinstance(rule, LoraRule):
       return res
 
-    if not isinstance(einsum_str, str) or len(operands) != 2:
+    if len(operands) != 2:
+      # TODO(jiwonshin): Support N-ary einsum if there is a need in the future.
       raise ValueError(f'Unsupported einsum format: {einsum_str=} {operands=}')
     lhs, rhs = operands
 

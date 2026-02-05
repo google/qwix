@@ -326,6 +326,124 @@ class EinsumTest(parameterized.TestCase):
     self.assertEqual(out.shape, (16, 16))
     self.assertEqual(out.dtype, jnp.bfloat16)
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='broadcasting_issue',
+          einsum_str='BTNH,BSNH->BTNS',
+          lhs_shape=(1, 2, 4, 8),
+          rhs_shape=(1, 3, 1, 8),
+          expected_shape=(1, 2, 4, 3),
+      ),
+      dict(
+          testcase_name='generic_broadcasting_4_vs_8',
+          einsum_str='BTNH,BSNH->BTNS',
+          lhs_shape=(1, 2, 4, 8),
+          rhs_shape=(1, 3, 8, 8),
+          expected_shape=(1, 2, 8, 3),
+          skip_reference_check=True,
+      ),
+      dict(
+          testcase_name='generic_broadcasting_8_vs_4',
+          einsum_str='BTNH,BSNH->BTNS',
+          lhs_shape=(1, 2, 8, 8),
+          rhs_shape=(1, 3, 4, 8),
+          expected_shape=(1, 2, 8, 3),
+          skip_reference_check=True,
+      ),
+      dict(
+          testcase_name='new_batch_broadcasting_bth_thk',
+          einsum_str='bth,thk->btk',
+          lhs_shape=(2, 3, 4),
+          rhs_shape=(3, 4, 5),
+          expected_shape=(2, 3, 5),
+      ),
+      dict(
+          testcase_name='mixed_type_inputs_lhs_quantized',
+          einsum_str='ij,jk->ik',
+          lhs_shape=(128, 128),
+          rhs_shape=(128, 32),
+          expected_shape=(128, 32),
+          lhs_qtype=jnp.int8,
+          expected_rel_error=0.02,
+      ),
+      dict(
+          testcase_name='scalar_broadcasting',
+          einsum_str='ij,->ij',
+          lhs_shape=(128, 128),
+          rhs_shape=(),
+          expected_shape=(128, 128),
+          lhs_qtype=jnp.int8,
+          rhs_is_scalar=True,
+          expected_rel_error=0.02,
+      ),
+  )
+  def test_broadcasting_and_mixed_types(
+      self,
+      einsum_str,
+      lhs_shape,
+      rhs_shape,
+      expected_shape,
+      lhs_qtype=None,
+      rhs_qtype=None,
+      rhs_is_scalar=False,
+      expected_rel_error=None,
+      skip_reference_check=False,
+  ):
+    if rhs_is_scalar:
+      lhs = self._make_array(lhs_shape, jnp.float32)
+      rhs = jnp.array(2.0, dtype=jnp.float32)
+      fp_res = lhs * 2.0
+    elif not skip_reference_check:
+      lhs = (
+          self._make_array(lhs_shape, jnp.float32)
+          if lhs_shape
+          else jnp.array(2.0, dtype=jnp.float32)
+      )
+      rhs = (
+          self._make_array(rhs_shape, jnp.float32)
+          if rhs_shape
+          else jnp.array(2.0, dtype=jnp.float32)
+      )
+      fp_res = jnp.einsum(einsum_str, lhs, rhs)
+    else:
+      # Create inputs for qarray execution even if we skip reference check
+      lhs = (
+          self._make_array(lhs_shape, jnp.float32)
+          if lhs_shape
+          else jnp.array(2.0, dtype=jnp.float32)
+      )
+      rhs = (
+          self._make_array(rhs_shape, jnp.float32)
+          if rhs_shape
+          else jnp.array(2.0, dtype=jnp.float32)
+      )
+      fp_res = None
+
+    q_lhs = lhs
+    if lhs_qtype is not None:
+      q_lhs = qarray.quantize(lhs, qarray.HowToQuantize(qtype=lhs_qtype))
+
+    q_rhs = rhs
+    if rhs_qtype is not None:
+      q_rhs = qarray.quantize(rhs, qarray.HowToQuantize(qtype=rhs_qtype))
+
+    q_res = einsum.einsum(einsum_str, q_lhs, q_rhs)
+
+    self.assertEqual(q_res.shape, expected_shape)
+
+    _ = q_res.block_until_ready()
+    # Basic check ensuring it runs. Correctness check below.
+
+    if expected_rel_error is not None and not skip_reference_check:
+      rel_error = jnp.abs(q_res - fp_res).mean() / jnp.abs(fp_res).mean()
+      self.assertLess(rel_error, expected_rel_error)
+
+  def test_generic_broadcasting_incompatible(self):
+    lhs = jnp.ones((1, 2, 3, 8))
+    rhs = jnp.ones((1, 3, 4, 8))
+    with self.assertRaisesRegex(ValueError, 'Cannot broadcast'):
+      einsum.einsum('BTNH,BSNH->BTNS', lhs, rhs)
+
 
 if __name__ == '__main__':
   absltest.main()
