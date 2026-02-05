@@ -167,3 +167,17 @@ the differences.
     to integrate with a whole model implicitly.
 *   Applying static-range quantization is easier in Qwix as it has more in-depth
     support with Flax.
+
+## Citing Qwix
+
+To cite Qwix please use the citation:
+
+<!-- disableFinding(SNIPPET_INVALID_LANGUAGE) -->
+```bibtex
+@software{Qwix,
+  title = {Qwix: A Quantization Library for Jax},
+  author={Dangyi Liu, Jiwon Shin, et al.},
+  year = {2024},
+  howpublished = {\url{https://github.com/google/qwix}},
+}
+```
