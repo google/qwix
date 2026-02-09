@@ -280,7 +280,7 @@ class _InterceptionManager:
     # It's unclear but we cannot return a functools.partial object here,
     # otherwise the test_intercept_class_method will fail.
     replacing_fn = lambda *args, **kwargs: self._on_intercepted_called(
-        name, *args, **kwargs
+        name, args, kwargs
     )
     if attr == "__code__":  # special handling for code objects.
       # Check if we accidentally register different aliases for the same object.
@@ -319,7 +319,7 @@ class _InterceptionManager:
     else:
       setattr(obj, attr, self._original_fns.pop(name))
 
-  def _on_intercepted_called(self, name: str, *args, **kwargs):
+  def _on_intercepted_called(self, name: str, args, kwargs):
     """Called when an intercepted function is called."""
     # Locate the interceptor to disable and the handler to call.
     this_thread = threading.get_ident()
