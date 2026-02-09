@@ -22,6 +22,7 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 from qwix._src import flax_util
+from qwix._src import interception
 from qwix._src import model as qwix_model
 from qwix._src import qconfig
 from qwix._src.providers import odml
@@ -202,6 +203,28 @@ class OdmlTest(parameterized.TestCase):
     )
     conversion_res = conversion_model(model_input)
     self.assertTrue(jnp.allclose(qat_res, conversion_res))
+
+  def test_odml_interception_stack(self):
+    """Verifies that ODML providers return interceptors in the correct order."""
+    rules = [qconfig.QuantizationRule(module_path='.*')]
+    provider = odml.OdmlQatProvider(rules)
+
+    factories = provider.get_interceptors()
+    self.assertLen(factories, 2)
+
+    # 1. Structural Layer (Primitives)
+    structural_map = factories[0]()
+    self.assertIn(interception.PRIMITIVE_BIND_KEY, structural_map)
+    self.assertIsInstance(
+        structural_map[interception.PRIMITIVE_BIND_KEY],
+        odml.odml_ops.PrimitiveBindOp,
+    )
+
+    # 2. Numerical Layer (High-level Ops)
+    numerical_map = factories[1]()
+    self.assertIn('jax.lax.dot_general', numerical_map)
+    # Ensure no primitive bind in numerical layer to avoid double wrapping
+    self.assertNotIn(interception.PRIMITIVE_BIND_KEY, numerical_map)
 
 
 if __name__ == '__main__':

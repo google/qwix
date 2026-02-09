@@ -94,6 +94,31 @@ class CNN(nn.Module):
 
 
 @srq_test_case
+class DropoutModel(nn.Module):
+  """A model with Dropout to verify metadata propagation."""
+
+  skip_export = True
+
+  @nn.compact
+  def __call__(self, x):
+    x = nn.Conv(features=32, kernel_size=(3, 3))(x)
+    x = nn.relu(x)
+    # Use deterministic=False to trigger 'mul' primitive.
+    x = nn.Dropout(rate=0.5, deterministic=False)(x)
+    x = nn.Conv(features=32, kernel_size=(3, 3))(x)
+    return x
+
+  def create_input(self):
+    return jax.random.uniform(jax.random.key(0), (1, 28, 28, 1), jnp.float32)
+
+  expected_quant_stats_keys = {
+      'Conv_0/conv_general_dilated0_lhs',
+      'Conv_1/conv_general_dilated0_lhs',
+      'final_output0',
+  }
+
+
+@srq_test_case
 @drq_test_case
 class Transformer(nn.Module):
   """A simple Transformer model."""
@@ -375,6 +400,46 @@ class RepeatNegative(nn.Module):
     return jax.random.uniform(jax.random.key(0), (16, 10), jnp.float32, -1)
 
 
+@srq_test_case
+class ValuePreservingPrimitivesModel(nn.Module):
+  """A model with value-preserving primitives to verify metadata propagation."""
+
+  @nn.compact
+  def __call__(self, x):
+    # Test convert_element_type (implicit in cast)
+    x = x.astype(jnp.float16)
+    x = x.astype(jnp.float32)
+
+    # Test stop_gradient
+    x = jax.lax.stop_gradient(x)
+
+    # Test dynamic_slice
+    start_indices = (0, 0)
+    slice_sizes = (1, 5)
+    x = jax.lax.dynamic_slice(x, start_indices, slice_sizes)
+
+    # Quantization should be able to propagate through these.
+    # We use a valid quantizable op at the end to verify checks are passed.
+    x = nn.Dense(features=5)(x)
+    return x
+
+  def create_input(self):
+    return jax.random.uniform(jax.random.key(0), (1, 10), jnp.float32)
+
+  expected_quant_stats_keys = {
+      'Dense_0/dot_general0_lhs',
+      'final_output0',
+  }
+
+  expected_ops_summary = {
+      'quantize_op_count': 1,
+      'dequantize_op_count': 1,
+      'fp_op_count': 3,
+      # cast(f32->f16), cast(f16->f32), slice are FP. Dense is Int.
+      'int_op_count': 1,
+  }
+
+
 class VAE(nn.Module):
 
   def setup(self):
@@ -409,7 +474,9 @@ class OdmlTest(parameterized.TestCase):
     qat_provider = odml.OdmlQatProvider(rules, **additional_provider_args)
     model_input = model.create_input()
     qat_model = qwix_model.quantize_model(model, qat_provider)
-    qat_variables = qat_model.init(jax.random.key(0), model_input)
+    qat_variables = qat_model.init(
+        {'params': jax.random.key(0), 'dropout': jax.random.key(1)}, model_input
+    )
 
     # Make biases non-zero.
     qat_variables['params'] = jax.tree.map(
@@ -418,7 +485,10 @@ class OdmlTest(parameterized.TestCase):
     )
     # Run the forward pass once to get the quant_stats and batch stats.
     _, new_vars = qat_model.apply(
-        qat_variables, model_input, mutable=['quant_stats', 'batch_stats']
+        qat_variables,
+        model_input,
+        mutable=['quant_stats', 'batch_stats'],
+        rngs={'dropout': jax.random.key(2)},
     )
     qat_variables.update(new_vars)
     logging.info('quant_stats: %s', qat_variables['quant_stats'])
@@ -454,13 +524,25 @@ class OdmlTest(parameterized.TestCase):
     odml_model = qwix_model.quantize_model(model, conversion_provider)
 
     # Compare the results between ODML and QAT.
-    qat_result = jax.jit(qat_model.apply)(qat_variables, model_input)
-    odml_result = jax.jit(odml_model.apply)(qat_variables, model_input)
+    qat_result = jax.jit(qat_model.apply)(
+        qat_variables, model_input, rngs={'dropout': jax.random.key(2)}
+    )
+    odml_result = jax.jit(odml_model.apply)(
+        qat_variables, model_input, rngs={'dropout': jax.random.key(2)}
+    )
     print_diff('qat vs odml', qat_result, odml_result)
 
+    if getattr(model, 'skip_export', False):
+      return
+
     # Convert, compare and export the ODML model.
+    def apply_with_rng(params, inputs):
+      return odml_model.apply(
+          params, inputs, rngs={'dropout': jax.random.key(2)}
+      )
+
     edge_model = ai_edge_jax.convert(
-        odml_model.apply,
+        apply_with_rng,
         qat_variables,
         (model_input,),
         _litert_converter_flags={
