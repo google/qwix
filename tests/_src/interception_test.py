@@ -67,13 +67,14 @@ class InterceptionTest(absltest.TestCase):
       )
       # The output of func2 should be
       #    jnp.sin(0) = 0 => the original sin() is called
-      #   * 2 + 0.1 = 0.1 => replaced_sin2 because interceptor2 is applied first
-      #       + 10 = 10.1 => replaced_sin
+      #         + 10 = 10 => replaced_sin is called first because it's installed
+      #                      later. See _on_intercepted_called for details.
+      #  * 2 + 0.1 = 20.1 => replaced_sin2 is called second.
       #                   => interceptor on func1 is ignored.
-      #        + 1 = 11.1 => func2
-      #   + 1000 = 1011.1 => output_transform of interceptor on func2
-      # + 10000 = 11011.1 => output_transform of interceptor2 on func2
-      self.assertEqual(func2(0), 11011.1)
+      #        + 1 = 21.1 => func2
+      #   + 1000 = 1021.1 => output_transform of interceptor on func2
+      # + 10000 = 11021.1 => output_transform of interceptor2 on func2
+      self.assertEqual(func2(0), 11021.1)
 
   def test_interception_thread_local(self):
     # Interception is thread-local.
@@ -82,32 +83,39 @@ class InterceptionTest(absltest.TestCase):
     lock1.acquire()
     lock2.acquire()
 
-    def sin3(x):
-      return jax.lax.sin(x) + 3  # jax.lax.sin is restored.
+    def func(x, in_thread2=False):
+      if in_thread2:
+        lock1.release()  # Order: 1
+        lock2.acquire()  # Order: 4
+      return jnp.sin(x)
 
-    def func(x):
-      lock1.release()  # Order: 1
-      lock2.acquire()  # Order: 4
-      return jnp.astype(jnp.sin(x), jnp.int8, copy=True)
-
-    func3 = interception.wrap_func_intercepted(
+    func = interception.wrap_func_intercepted(
         func,
         lambda: {
-            "jax.numpy.sin": sin3,
-            "jax.lax.sin": lambda: 42,
-            "jax.numpy.astype": lambda x, dtype, *, copy: x,
+            "jax.numpy.sin": lambda x: jax.lax.sin(x) + 42.0,
+            "jax.lax.sin": lambda x: x / 0,  # This should not be called.
         },
     )
+
+    # Run func in a separate thread and save the result in res.
     res = []
-    th = threading.Thread(target=lambda: res.append(func3(0.0)), daemon=True)
+    th = threading.Thread(
+        target=lambda: res.append(func(0.0, in_thread2=True)), daemon=True
+    )
     th.start()
+
     lock1.acquire()  # Order: 2
-    self.assertEqual(jnp.sin(0.0), 0)
-    self.assertEqual(jax.lax.sin(0.0), 0)
-    self.assertEqual(jnp.astype(0.0, jnp.int8, copy=True), 0)
+
+    # Now |func| in the second thread is ongoing, but the interception should
+    # be disabled for the main thread.
+    self.assertEqual(jnp.sin(0.0), 0.0)
+    self.assertEqual(jax.lax.sin(0.0), 0.0)
+
+    # However, calling the same |func| in the main thread should be intercepted.
+    self.assertEqual(func(0.0), 42.0)
     lock2.release()  # Order: 3
     th.join()  # Order: 5
-    self.assertEqual(res[0], 3)
+    self.assertEqual(res[0], 42.0)
 
   def test_interception_of_code_object(self):
     def replaced_sin(x):
@@ -145,16 +153,15 @@ class InterceptionTest(absltest.TestCase):
     self.assertEqual(func(0.0, 1.0), 1.0)
 
   def test_double_interception(self):
-    def func(x):
-      return x
-
-    func = interception.wrap_func_intercepted(
-        func,
-        # swish is an alias of silu.
-        lambda: {"jax.nn.swish": lambda x: 42, "jax.nn.silu": lambda x: 43},
-    )
     with self.assertRaises(ValueError):
-      func(1.0)
+      interception.interception_manager.activate_interceptor(
+          # swish is an alias of silu.
+          1,
+          {
+              "jax.nn.swish._fun.__code__": lambda x: 42,
+              "jax.nn.silu._fun.__code__": lambda x: 43,
+          },
+      )
 
   def test_intercept_class_method(self):
     def func(x):
@@ -214,6 +221,66 @@ class InterceptionTest(absltest.TestCase):
     self.assertTrue(interception.has_attribute("jax.numpy.sin"))
     self.assertFalse(interception.has_attribute("jax.xxx.sin"))
     self.assertFalse(interception.has_attribute("xxx.sin"))
+
+  def test_multiple_interceptions(self):
+    def replaced_sin(x):
+      return jax.lax.sin(x) + 10
+
+    def replaced_cos(x):
+      return jax.lax.cos(x) + 100
+
+    interceptor1 = lambda: {
+        "jax.lax.sin": replaced_sin,
+        "jax.lax.cos": replaced_cos,
+    }
+    interceptor2 = lambda: {
+        "jax.lax.sin": replaced_sin,
+        "jax.lax.cos": replaced_cos,
+    }
+
+    def func(x):
+      return jax.lax.sin(x) + jax.lax.cos(x)
+
+    func = interception.wrap_func_intercepted(func, interceptor1)
+    func = interception.wrap_func_intercepted(func, interceptor2)
+    self.assertEqual(func(0.0), 221.0)
+
+  def test_interception_manager_multiple_interceptions(self):
+    interception.interception_manager.activate_interceptor(
+        1, {"jax.lax.sin": lambda x: jax.lax.sin(x) + 1}
+    )
+    self.assertEqual(jax.lax.sin(0.0), 1.0)
+    # Installing the same interceptor again will raise an error.
+    with self.assertRaises(ValueError):
+      interception.interception_manager.activate_interceptor(
+          1, {"jax.lax.sin": lambda x: jax.lax.sin(x) + 2}
+      )
+    self.assertEqual(jax.lax.sin(0.0), 1.0)
+    # Installing a different interceptor should apply both. And the first
+    # interceptor is applied first.
+    interception.interception_manager.activate_interceptor(
+        2, {"jax.lax.sin": lambda x: jax.lax.sin(x) * 2 + 10}
+    )
+    self.assertEqual(jax.lax.sin(0.0), 11.0)
+    interception.interception_manager.deactivate_interceptor(2)
+    self.assertEqual(jax.lax.sin(0.0), 1.0)
+    interception.interception_manager.deactivate_interceptor(1)
+    self.assertEqual(jax.lax.sin(0.0), 0.0)
+
+    # Reinstalling.
+    interception.interception_manager.activate_interceptor(
+        1, {"jax.lax.sin": lambda x: jax.lax.sin(x) + 2}
+    )
+    self.assertEqual(jax.lax.sin(0.0), 2.0)
+    interception.interception_manager.deactivate_interceptor(1)
+
+  def test_interception_manager_code_object(self):
+    interception.interception_manager.activate_interceptor(
+        1, {"jax.lax.sin.__code__": lambda x: jax.lax.sin(x) + 1}
+    )
+    self.assertEqual(jax.lax.sin(0.0), 1.0)
+    interception.interception_manager.deactivate_interceptor(1)
+    self.assertEqual(jax.lax.sin(0.0), 0.0)
 
 
 if __name__ == "__main__":
