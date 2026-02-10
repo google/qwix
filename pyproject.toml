@@ -22,6 +22,22 @@ dependencies = [
   "jax",
   "jaxlib",
   "flax>=0.12.0",
+  "numpy",
+  "opt_einsum",
+  "absl-py",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+]
+docs = [
+  "myst-nb",
+  "sphinx",
+  "sphinx-book-theme",
+  "sphinx-tabs",
+  "jax",
+  "flax",
 ]
 
 [project.urls]

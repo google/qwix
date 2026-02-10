@@ -168,6 +168,10 @@ the differences.
 *   Applying static-range quantization is easier in Qwix as it has more in-depth
     support with Flax.
 
+## Contributing
+
+Please refer to [CONTRIBUTING.md](CONTRIBUTING.md) for more information.
+
 ## Citing Qwix
 
 To cite Qwix please use the citation:
