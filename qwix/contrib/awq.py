@@ -71,11 +71,12 @@ class WithAwqScale(ptq.WithAux[qarray.QArray]):
   contracting_axis: int = flax.struct.field(pytree_node=False)
 
 
-class AwqCalibrationProvider(calibration.StatsCalibrationProvider):
+class AwqCalibrationProvider(calibration.SinglePassCalibrationProvider):
   """Calibration provider for AWQ.
 
   This provider collects `awq_quant_stats` (per-channel activation scales) by
-  using `StatsCalibrationProvider` to intercept compatible operations. These
+  using `SinglePassCalibrationProvider` to intercept compatible operations.
+  These
   statistics are used by `quantize_params` to compute AWQ scales. This provider
   does not perform actual quantization or use quantized operations.
   """

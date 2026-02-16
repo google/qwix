@@ -39,11 +39,12 @@ class GptqRule(qconfig.QuantizationRule):
   """Use this rule to enable GPTQ."""
 
 
-class GptqCalibrationProvider(calibration.StatsCalibrationProvider):
+class GptqCalibrationProvider(calibration.SinglePassCalibrationProvider):
   """Calibration provider for GPTQ.
 
   This provider collects `gptq_quant_stats` (Hessian information) by
-  using `StatsCalibrationProvider` to intercept compatible operations. These
+  using `SinglePassCalibrationProvider` to intercept compatible operations.
+  These
   statistics are used by `quantize_params` to compute GPTQ updates. This
   provider does not perform actual quantization or use quantized operations.
   """

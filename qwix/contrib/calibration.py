@@ -23,14 +23,13 @@ from qwix._src import flax_util
 from qwix._src import qconfig
 
 
-class StatsCalibrationProvider(
-    qconfig.QuantizationProvider, metaclass=abc.ABCMeta
-):
-  """Base class for calibration providers that collect statistics.
+class CalibrationProvider(qconfig.QuantizationProvider, metaclass=abc.ABCMeta):
+  """Base class for calibration providers that intercept dot_general/einsum.
 
-  This provider intercepts `dot_general` and `einsum` operations to compute and
-  collect statistics on the input activations or gradients. The statistics are
-  stored in a `quant_stats` collection using `SimpleMovingAverage`.
+  This provider handles the common boilerplate for all calibration providers:
+  rule type checking, dimension validation, weight name lookup, and LHS
+  reshaping. Subclasses implement ``_collect_stats`` to define what happens
+  with the validated, reshaped activations.
   """
 
   @abc.abstractmethod
@@ -38,12 +37,16 @@ class StatsCalibrationProvider(
     """Returns the rule type that this provider handles."""
 
   @abc.abstractmethod
-  def compute_stats(self, lhs: jax.Array) -> dict[str, Any]:
-    """Computes statistics from the input array."""
+  def _collect_stats(self, lhs: jax.Array, weight_name: str) -> None:
+    """Collects statistics from the reshaped input activations.
 
-  @abc.abstractmethod
-  def get_stats_suffix(self) -> str:
-    """Returns the suffix for the stats variable name."""
+    Called after all validation passes. The LHS has already been reshaped
+    to (contracting_dim, rest) format.
+
+    Args:
+      lhs: Input activations reshaped to (ca, rest) format.
+      weight_name: The name of the weight parameter for this operation.
+    """
 
   def dot_general(
       self,
@@ -73,19 +76,11 @@ class StatsCalibrationProvider(
       # If we cannot identify the weight parameter, we skip calibration.
       return res
 
-    # Reorder lhs to (ca, rest) and compute stats.
+    # Reorder lhs to (ca, rest) format.
     lhs = jnp.moveaxis(lhs, lhs_ca[0], 0)
     lhs = lhs.reshape(lhs.shape[0], -1)
 
-    # Collect the stats.
-    stats = self.compute_stats(lhs)
-    aggregator = averaging.SimpleMovingAverage()
-    var_name = weight_name + self.get_stats_suffix()
-    quant_stat = flax_util.get_or_create_variable(
-        'quant_stats', var_name, lambda: aggregator.init(stats)
-    )
-    if flax_util.should_update_quant_stats():
-      quant_stat.value = aggregator.update(quant_stat.value, stats)
+    self._collect_stats(lhs, weight_name)
 
     return res
 
@@ -116,3 +111,30 @@ class StatsCalibrationProvider(
         'jax.lax.dot_general': self.dot_general,
         'jax.numpy.einsum': self.einsum,
     }
+
+
+class SinglePassCalibrationProvider(CalibrationProvider, metaclass=abc.ABCMeta):
+  """Calibration provider that collects single-pass statistics.
+
+  This provider implements the simple stats template: ``compute_stats``
+  produces a dict of arrays, which are accumulated into the ``quant_stats``
+  collection using ``SimpleMovingAverage``.
+  """
+
+  @abc.abstractmethod
+  def compute_stats(self, lhs: jax.Array) -> dict[str, Any]:
+    """Computes statistics from the input array."""
+
+  @abc.abstractmethod
+  def get_stats_suffix(self) -> str:
+    """Returns the suffix for the stats variable name."""
+
+  def _collect_stats(self, lhs: jax.Array, weight_name: str) -> None:
+    stats = self.compute_stats(lhs)
+    aggregator = averaging.SimpleMovingAverage()
+    var_name = weight_name + self.get_stats_suffix()
+    quant_stat = flax_util.get_or_create_variable(
+        'quant_stats', var_name, lambda: aggregator.init(stats)
+    )
+    if flax_util.should_update_quant_stats():
+      quant_stat.value = aggregator.update(quant_stat.value, stats)
