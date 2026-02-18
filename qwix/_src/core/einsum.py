@@ -125,10 +125,15 @@ def einsum(
   assert len(input_subs_list) == len(operands)
   operands = einsum_info.broadcast_operands(operands, input_subs_list)
 
-  # Execution using opt_einsum path
+  # Execution using opt_einsum path.
+  # opt_einsum.contract_path casts dimension size to int effectively
+  # immediately, which fails for jax symbolic dimensions that raise error on
+  # __int__. We pass sanitized integer shapes instead.
+  sanitized_shapes = [einsum_info.sanitize_shape(op.shape) for op in operands]
   _, contractions = opt_einsum.contract_path(
       f'{input_subs}->{output_subs}',
-      *operands,
+      *sanitized_shapes,
+      shapes=True,
       einsum_call=True,  # This is necessary for opt_einsum to return the contraction list.
   )
   for contraction in contractions:  # pytype: disable=attribute-error

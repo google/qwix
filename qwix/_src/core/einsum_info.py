@@ -15,7 +15,7 @@
 
 import dataclasses
 import re
-from typing import Sequence
+from typing import Any, Sequence
 
 import jax
 from jax import numpy as jnp
@@ -174,6 +174,26 @@ class EinsumInfo:
     return perm
 
 
+def sanitize_shape(shape: Sequence[int | Any]) -> tuple[int, ...]:
+  """Replaces non-concrete integer dimensions with 1.
+
+  This is valid because `opt_einsum` uses dimension sizes primarily for cost
+  estimation (FLOPs/memory) to find the optimal path. The correctness of the
+  contraction sequence depends on the einsum string indices, not the dimension
+  sizes. Using 1 as a placeholder allows `opt_einsum` to proceed with a
+  potentially sub-optimal but valid path. Note that `jnp.einsum` performs
+  similar sanitization by calling `opt_einsum.contract_path` with placeholder
+  values (e.g. 8) for non-constant dimensions.
+
+  Args:
+    shape: The shape to sanitize.
+
+  Returns:
+    The sanitized shape.
+  """
+  return tuple(s if isinstance(s, int) else 1 for s in shape)
+
+
 def broadcast_operands(
     operands: Sequence[qarray.MaybeQArray], operand_subs_list: Sequence[str]
 ) -> list[qarray.MaybeQArray]:
@@ -195,33 +215,27 @@ def broadcast_operands(
     for i, char in enumerate(subs):
       size = operand.shape[i]
       if char not in char_to_size:
+        # First time we see this character, just record the size.
         char_to_size[char] = size
       else:
         current_max = char_to_size[char]
-        if size > current_max and size % current_max == 0:
+        if (
+            isinstance(size, int)
+            and isinstance(current_max, int)
+            and size > current_max
+            and size % current_max == 0
+        ):
+          # If both are concrete integers, we can broadcast to the new size,
+          # provided that the new size is a multiple of the current size.
           char_to_size[char] = size
-
-  def _broadcast_component(x, target_shape):
-    """Broadcasts a single array component to the target shape."""
-    if x is None:
-      return None
-    return qarray.call_with_generic_broadcast(  # pylint: disable=g-long-lambda
-        lambda a, b: jnp.broadcast_to(a, b.shape),
-        x,
-        jnp.zeros(target_shape, dtype=jnp.bool_),
-    )
-
-  def _broadcast_qarray_to_shape(operand, target_shape):
-    """Broadcasts a QArray or Array to the target shape recursively."""
-    return jax.tree.map(
-        lambda x: _broadcast_component(x, target_shape),
-        operand,
-    )
+        elif isinstance(current_max, int) and current_max == 1:
+          # If current max is 1, we can always broadcast to the new size,
+          # even if it is symbolic.
+          char_to_size[char] = size
 
   broadcasted_operands = []
   for operand, subs in zip(operands, operand_subs_list):
     target_shape = tuple(char_to_size[c] for c in subs)
-    if operand.shape != target_shape:
-      operand = _broadcast_qarray_to_shape(operand, target_shape)
+    operand = qarray.broadcast_to(operand, target_shape)
     broadcasted_operands.append(operand)
   return broadcasted_operands

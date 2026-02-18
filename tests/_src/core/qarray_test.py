@@ -328,6 +328,49 @@ class QArrayTest(parameterized.TestCase):
       expected = jnp.array([0.0, 1.0, 0.0])
       self.assertTrue(jnp.array_equal(out_g, expected))
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='qarray',
+          input_shape=(2, 1, 4),
+          target_shape=(2, 3, 4),
+          is_qarray=True,
+      ),
+      dict(
+          testcase_name='standard_array',
+          input_shape=(1, 4),
+          target_shape=(2, 4),
+          is_qarray=False,
+      ),
+      dict(
+          testcase_name='tiling',
+          input_shape=(8,),
+          target_shape=(64,),
+          is_qarray=True,
+      ),
+  )
+  def test_broadcast_to_with(self, input_shape, target_shape, is_qarray):
+    if is_qarray:
+      operand = qarray.quantize_api(
+          self._make_array(input_shape),
+          jnp.int8,
+          channelwise_axes=[0] if input_shape else [],
+          tiled_axes={2: 2} if len(input_shape) > 2 else None,
+      )
+    else:
+      operand = jnp.zeros(input_shape)
+
+    res = qarray.broadcast_to(operand, target_shape)
+    self.assertEqual(res.shape, target_shape)
+
+    actual = qarray.dequantize(res) if is_qarray else res
+    dequant_operand = qarray.dequantize(operand) if is_qarray else operand
+    expected = qarray.call_with_generic_broadcast(
+        lambda a, b: jnp.broadcast_to(a, b.shape),
+        dequant_operand,
+        jnp.zeros(target_shape),
+    )
+    self.assertTrue(jnp.allclose(actual, expected, atol=1e-6))
+
 
 if __name__ == '__main__':
   absltest.main()

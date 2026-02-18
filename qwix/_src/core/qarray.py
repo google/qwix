@@ -328,9 +328,10 @@ def transpose_array(
   # avoid complex transposes here by calling squeeze first. For example, for
   # transpose [1, 2, None], instead of just calling transpose(1, 2, 0), we call
   # squeeze(0).expand(2).
+  new_axes = [sum(i < ax for i in used_axes) for ax in used_axes]
   return (
       array.squeeze([a for a in range(array.ndim) if a not in used_axes])
-      .transpose([sum(i < a for i in used_axes) for a in used_axes])
+      .transpose(new_axes)
       .reshape([1 if a is None else array.shape[a] for a in transpose])
   )
 
@@ -390,6 +391,29 @@ def call_with_generic_broadcast(
     else:
       raise ValueError(f'Cannot broadcast between {x.shape} {y.shape}')
   return op(x.reshape(x_shape), y.reshape(y_shape)).reshape(o_shape)
+
+
+def broadcast_to(
+    operand: MaybeQArray, target_shape: tuple[int, ...]
+) -> MaybeQArray:
+  """Broadcasts a QArray or Array to the target shape recursively."""
+  if operand.shape == target_shape:
+    return operand
+
+  def _broadcast_component(x: jax.Array | None):
+    """Broadcasts a single array component to the target shape."""
+    if x is None:
+      return None
+    # Ensure same rank for call_with_generic_broadcast
+    if x.ndim < len(target_shape):
+      x = x.reshape((1,) * (len(target_shape) - x.ndim) + x.shape)
+    return call_with_generic_broadcast(  # pylint: disable=g-long-lambda
+        lambda a, b: jnp.broadcast_to(a, b.shape),
+        x,
+        jnp.zeros(target_shape, dtype=jnp.bool_),
+    )
+
+  return jax.tree.map(_broadcast_component, operand)
 
 
 def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
