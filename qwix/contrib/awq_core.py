@@ -26,8 +26,6 @@ groupwise quantization, the per-channel scales help protect salient channels
 within each group, while the quantization uses per-group scales.
 """
 
-from collections.abc import Callable
-
 import jax
 import jax.numpy as jnp
 from qwix._src.core import qarray
@@ -163,34 +161,3 @@ def quantize_weight(
   w_q = qarray.quantize(w_scaled, how)
 
   return w_q, optimal_scales
-
-
-def normalize_weight(
-    x: jax.Array, contraction_axis: int
-) -> tuple[jax.Array, Callable[..., qarray.MaybeQArray]]:
-  """Normalizes the weight into (ra, ca) format for AWQ.
-
-  This function reshapes a weight tensor of arbitrary rank into a 2D matrix
-  where the contraction axis becomes the last dimension. This is needed because
-  AWQ operates on (out_features, in_features) matrices.
-
-  Args:
-    x: Weight tensor of arbitrary shape.
-    contraction_axis: The axis that will be contracted in the matrix multiply.
-
-  Returns:
-    A tuple of (normalized_weight, restore_shape):
-      - normalized_weight: The weight reshaped to (ra, ca) format.
-      - restore_shape: A function to restore the original shape.
-  """
-  # Move the contraction axis to the last dimension.
-  x = jnp.moveaxis(x, contraction_axis, -1)
-  before_shape = x.shape
-  # Reshape the weight to (ra, ca).
-  x = x.reshape(-1, x.shape[-1])
-
-  def restore_shape(x: qarray.MaybeQArray) -> qarray.MaybeQArray:
-    x = x.reshape(before_shape)
-    return jax.tree.map(lambda x: jnp.moveaxis(x, -1, contraction_axis), x)
-
-  return x, restore_shape
