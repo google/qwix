@@ -144,6 +144,119 @@ class SinglePassCalibrationProvider(CalibrationProvider, metaclass=abc.ABCMeta):
       quant_stat.value = aggregator.update(quant_stat.value, stats)
 
 
+class TwoPassCalibrationProvider(CalibrationProvider, metaclass=abc.ABCMeta):
+  """Calibration provider that requires two forward passes per batch.
+
+  This base class encapsulates the two-pass calibration protocol:
+
+  1. Float pass: Cache float-precision activations (original model weights).
+  2. Quantized pass: Compute stats using cached float and current quantized
+     activations.
+
+  Subclasses implement ``compute_stats`` to define algorithm-specific
+  stat computation from the float/quantized activation pair.
+
+  Two-pass calibration must run in eager mode (outside ``jax.jit``) because
+  the float LHS cache is Python-side state that cannot be traced. Use
+  ``calibrate_batch()`` to run both passes.
+  """
+
+  _FLOAT_MODE = 'float'
+  _QUANTIZED_MODE = 'quantized'
+
+  def __init__(self, rules):
+    super().__init__(rules)
+    self._mode: str | None = None
+    self._float_lhs_cache: dict[str, jax.Array] = {}
+
+  @abc.abstractmethod
+  def compute_stats(
+      self, quantized_lhs: jax.Array, float_lhs: jax.Array
+  ) -> dict[str, Any]:
+    """Computes statistics from quantized and float activation pair.
+
+    Args:
+      quantized_lhs: Quantized input activations, shape (ca, samples).
+      float_lhs: Float input activations, shape (ca, samples).
+
+    Returns:
+      A dict of stat arrays to accumulate via SimpleMovingAverage.
+    """
+
+  def calibrate_batch(
+      self,
+      cal_model: Any,
+      float_variables: Any,
+      quant_variables: Any,
+      *args,
+      **kwargs,
+  ) -> dict[str, Any]:
+    """Run both float and quantized passes for one calibration batch.
+
+    Args:
+      cal_model: The model returned by qwix_model.quantize_model().
+      float_variables: Variables dict with float params (original weights).
+      quant_variables: Variables dict with dequantized PTQ params.
+      *args: Positional args passed to cal_model.apply() (e.g., input batch).
+      **kwargs: Keyword args passed to cal_model.apply().
+
+    Returns:
+      The new variables dict containing accumulated quant_stats from the
+      quantized pass.
+    """
+    # Pass 1: Float forward pass to cache float-precision activations.
+    self._mode = self._FLOAT_MODE
+    self._float_lhs_cache.clear()
+    cal_model.apply(float_variables, *args, mutable='quant_stats', **kwargs)
+
+    # Validate that the float pass cached something.
+    if not self._float_lhs_cache:
+      raise ValueError(
+          'No float activations cached during float pass. '
+          'Ensure the model has matching rule layers.'
+      )
+
+    # Pass 2: Quantized forward pass to compute and accumulate stats.
+    self._mode = self._QUANTIZED_MODE
+    _, new_vars = cal_model.apply(
+        quant_variables, *args, mutable='quant_stats', **kwargs
+    )
+    self._mode = None
+    return new_vars
+
+  def _collect_stats(self, lhs: jax.Array, weight_name: str) -> None:
+    if self._mode is None:
+      raise ValueError(
+          'Must use calibrate_batch() to run two-pass calibration.'
+      )
+
+    var_name = weight_name + self.get_stats_suffix()
+
+    # Cache key includes module path to distinguish layers with the same
+    # parameter name (e.g., Dense_0/kernel vs Dense_1/kernel).
+    module_path = '/'.join(map(str, flax_util.get_current_module_path()))
+    cache_key = module_path + '/' + var_name
+
+    if self._mode == self._FLOAT_MODE:
+      self._float_lhs_cache[cache_key] = lhs
+    elif self._mode == self._QUANTIZED_MODE:
+      float_lhs = self._float_lhs_cache.get(cache_key)
+      if float_lhs is None:
+        raise ValueError(
+            f'No cached float LHS for {cache_key}. Ensure float pass '
+            'covers the same operations as quantized pass.'
+        )
+      stats = self.compute_stats(lhs, float_lhs)
+
+      # Accumulate stats via SimpleMovingAverage.
+      aggregator = averaging.SimpleMovingAverage()
+      quant_stat = flax_util.get_or_create_variable(
+          'quant_stats', var_name, lambda: aggregator.init(stats)
+      )
+      if flax_util.should_update_quant_stats():
+        quant_stat.value = aggregator.update(quant_stat.value, stats)
+
+
 def normalize_weight(
     x: jax.Array, contraction_axis: int
 ) -> tuple[jax.Array, Callable[..., qarray.MaybeQArray]]:
