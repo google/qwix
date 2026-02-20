@@ -21,6 +21,7 @@ from typing import Any, Callable, Sequence
 import jax
 from jax import numpy as jnp
 from qwix._src import aux_data
+from qwix._src import interception
 from qwix._src import qconfig
 from qwix._src.core import conv_general
 from qwix._src.core import dot_general
@@ -66,13 +67,12 @@ def get_all_ops():
   #   l2_norm_full_name = l2_norm.__module__ + '.' + l2_norm.__name__
   #   provider._ops[l2_norm_full_name] = provider._ops['jax.numpy.tanh']
 
-  partial = functools.partial
   quantize = lambda *a, **k: functools.partial(QuantizedOp, input_idx=a, **k)
 
   return {
       # go/keep-sorted start
       'flax.linen.BatchNorm.__call__': BatchNorm,
-      'flax.linen.Dropout.__call__': partial(TransparentOp, input_idx=[1]),
+      'flax.linen.Dropout.__call__': Dropout,
       'flax.linen.GroupNorm.__call__': quantize(1, op_name='norm_op'),
       'flax.linen.LayerNorm.__call__': quantize(1, op_name='norm_op'),
       'flax.linen.avg_pool': OnlyInputOp,
@@ -80,22 +80,14 @@ def get_all_ops():
       'flax.nnx.BatchNorm.__call__': BatchNorm,
       'jax._src.numpy.indexing.rewriting_take': Take,  # a.__getitem__
       'jax.custom_jvp.__call__': CustomJvpCall,  # handles relu and relu6.
-      'jax.image.resize': OnlyInputOp,
-      'jax.lax.broadcast_in_dim': TransparentOp,
+      'jax.image.resize': quantize(0),
       'jax.lax.conv_general_dilated': DotEinsumConv,
       'jax.lax.dot_general': DotEinsumConv,
-      'jax.lax.reshape': TransparentOp,
       'jax.lax.split': Split,
-      'jax.lax.squeeze': TransparentOp,
-      'jax.lax.stop_gradient': TransparentOp,
-      'jax.lax.transpose': TransparentOp,
-      'jax.lax.with_sharding_constraint': TransparentOp,
       'jax.nn.gelu': quantize(0),
       'jax.nn.leaky_relu': quantize(0),
       'jax.nn.silu': Silu,
       'jax.nn.softmax': Softmax,
-      'jax.numpy.array': TransparentOp,
-      'jax.numpy.astype': TransparentOp,
       'jax.numpy.clip': OnlyOutputOp,
       'jax.numpy.concatenate': Concatenate,
       'jax.numpy.cos': NoQuantOp,
@@ -107,7 +99,6 @@ def get_all_ops():
       'jax.numpy.pad': OnlyOutputOp,
       'jax.numpy.repeat': quantize(0),  # not fully supported by the converter.
       'jax.numpy.sin': NoQuantOp,
-      'jax.numpy.squeeze': TransparentOp,
       'jax.numpy.sum': quantize(0),
       'jax.numpy.take': Take,
       'jax.numpy.tanh': Tanh,
@@ -154,6 +145,32 @@ _WEIGHT_NAME = 'weight_name'  # str
 # Fixed range for logistic functions whose output ranges are known, e.g.
 # softmax.
 _FIXED_RANGE = 'fixed_range'  # tuple[float, float]
+
+# Metadata keys that depend on the value being preserved.
+# If the value changes (e.g. add, mul), these keys become invalid.
+_VALUE_DEPENDENT_METADATA = (
+    _WEIGHT_NAME,
+    _FQ_RULE,
+    _FIXED_RANGE,
+    _ALLOW_FUSION,
+)
+
+# These ops only change the tensor view or layout, not the values.
+# If an op is in this list, we propagate value-dependent metadata.
+_VALUE_PRESERVING_PRIMITIVES = {
+    # unary ops
+    'reshape',
+    'transpose',
+    'broadcast_in_dim',
+    'slice',
+    'squeeze',
+    'rev',
+    'dynamic_slice',
+    'stop_gradient',
+    'convert_element_type',
+    # N-ary ops
+    'concatenate',
+}
 
 
 GetRuleAndOpIdFn = Callable[[str], tuple[qconfig.QuantizationRule, str]]
@@ -381,44 +398,6 @@ class OnlyOutputOp(QuantizedOp):
     return self._fake_quant_output(out, rule)
 
 
-class TransparentOp(QuantizedOp):
-  """A transparent op doesn't quantize anything. It only forwards aux data.
-
-  This is mainly used for ops that doesn't change the actual value of the
-  inputs, e.g. reshape, transpose, etc. This is similar to OnlyOutputOp,
-  but it reuses the previous rule and forwards more aux data.
-  """
-
-  input_idx = [0]  # default to a unary op.
-  forwarded_aux_data = (
-      _IS_ACTIVATION,
-      _WEIGHT_NAME,
-      _FQ_RULE,
-      _FIXED_RANGE,
-      _ALLOW_FUSION,
-  )
-
-  def __call__(self, *args, **kwargs):
-    if len(self.input_idx) > 1:
-      raise ValueError(
-          f'Unsupported num of inputs {self.input_idx} for op {self._op_name}.'
-      )
-    out = self._call_original_op(*args, **kwargs)
-
-    def forward(out, arg):
-      for key in self.forwarded_aux_data:
-        value = aux_data.get(arg, key, None)
-        if value is not None:
-          aux_data.set(out, key, value)
-      # Also forward the FQ_ARRAY if it's used to skip the quantization.
-      fq_array = aux_data.get(arg, _FQ_ARRAY, None)
-      if fq_array == 'self':
-        aux_data.set(out, _FQ_ARRAY, fq_array)
-
-    jax.tree.map(forward, out, args[self.input_idx[0]])
-    return out
-
-
 class NoQuantOp(QuantizedOp):
   """An fp op doesn't have a corresponding quantized op."""
 
@@ -468,6 +447,111 @@ class FinalOutput(QuantizedOp):
       aux_data.set(x, _FIXED_RANGE, self.fixed_range_for_output)
     # Only FQ the output if the previous op wants.
     return self._maybe_fake_quant(x, None, op_id)
+
+
+def _forward_metadata(inputs: Any, outputs: Any, is_value_preserving_op: bool):
+  """Forwards metadata from inputs to outputs.
+
+  Args:
+    inputs: The input value(s) of the op, could be a pytree.
+    outputs: The output value(s) of the op, could be a pytree.
+    is_value_preserving_op: Whether the op preserves the value.
+
+  Metadata propagation rules:
+  1. _IS_ACTIVATION: Propagated if ANY input is an activation (Union).
+     This tracks data provenance - if data comes from an activation, it remains
+     an activation regardless of the operation.
+
+  2. _WEIGHT_NAME, _FQ_RULE, _FIXED_RANGE, _ALLOW_FUSION: Propagated ONLY for
+     value-preserving ops (e.g. reshape, transpose).
+     These keys are "value-preserving" because they describe properties of the
+     specific tensor values (e.g. "this tensor is weight 'w'", "this tensor has
+     range X"). If the values change (e.g. add 1), these properties are lost.
+
+  3. _FQ_ARRAY: Propagated if ALL activation inputs share the same FQ array
+     (Intersection) AND the op is value-preserving.
+     This ensures we don't accidentally treat a mixed or modified value as
+     already quantized.
+  """
+  metadata = {}
+  is_activation = False
+  all_args_quantized = True
+  weight_names = set()
+  for arg in jax.tree.leaves(inputs):
+    if not isinstance(arg, jax.Array):
+      continue
+
+    # Check if at least one arg is activation.
+    if aux_data.get(arg, _IS_ACTIVATION, False):
+      is_activation = True
+    # Check if every arg is quantized.
+    if aux_data.get(arg, _FQ_ARRAY, None) != 'self':
+      all_args_quantized = False
+
+    # For value-preserving ops, handle _VALUE_DEPENDENT_METADATA.
+    if is_value_preserving_op:
+      for key in _VALUE_DEPENDENT_METADATA:
+        val = aux_data.get(arg, key, None)
+        if val is None:
+          continue
+        if key == _WEIGHT_NAME:
+          weight_names.add(val)
+        else:
+          # Last wins for value dependent metadata.
+          metadata[key] = val
+
+  # Set _IS_ACTIVATION if at least one arg is activation.
+  if is_activation:
+    metadata[_IS_ACTIVATION] = True
+  # For value-preserving ops, set _WEIGHT_NAME if purely a single weight op.
+  elif len(weight_names) == 1:
+    metadata[_WEIGHT_NAME] = next(iter(weight_names))
+  # For value-preserving ops, set _FQ_ARRAY if all args are fq and out is act.
+  if is_value_preserving_op and is_activation and all_args_quantized:
+    metadata[_FQ_ARRAY] = 'self'
+
+  # Propagate metadata to outputs.
+  if metadata:
+    for x in jax.tree.leaves(outputs):
+      for key, val in metadata.items():
+        aux_data.set(x, key, val)
+
+
+class Dropout(QuantizedOp):
+  """A dedicated handler for Dropout to maintain the metadata chain.
+
+  Dropout uses `mul` primitive which is not in the transparent allowlist of
+  PrimitiveBindOp. We need to explicitly forward the activation metadata
+  to ensure the quantization chain is not broken.
+  """
+
+  input_idx = [1]
+
+  def __call__(self, *args, **kwargs):
+    out = self._call_original_op(*args, **kwargs)
+    _forward_metadata(args[self.input_idx[0]], out, is_value_preserving_op=True)
+    return out
+
+
+class PrimitiveBindOp(QuantizedOp):
+  """Propagates metadata tags across JAX primitives."""
+
+  def __init__(self, **kwargs):
+    super().__init__(
+        op_full_name=interception.PRIMITIVE_BIND_KEY,
+        get_rule_and_op_id_fn=lambda x: (None, ''),
+        fake_quant_fn=lambda x, y, z: x,
+        **kwargs,
+    )
+
+  def __call__(self, primitive, *args, **params):
+    out = self._call_original_op(primitive, *args, **params)
+    _forward_metadata(
+        args,
+        out,
+        is_value_preserving_op=primitive.name in _VALUE_PRESERVING_PRIMITIVES,
+    )
+    return out
 
 
 class BatchNorm(QuantizedOp):

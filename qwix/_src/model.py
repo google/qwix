@@ -108,10 +108,9 @@ def quantize_linen_model(
       wrapped = True
 
     # Step 2: intercept the method.
-    method = interception.wrap_func_intercepted(
+    method = _apply_interceptors(
         method,
-        provider.get_intercept_map,
-        input_transform=functools.partial(_input_transform, provider),
+        provider,
         output_transform=functools.partial(
             provider.process_model_output, method_name
         ),
@@ -169,10 +168,9 @@ def quantize_nnx_model(
   # and the update the class of the model.
   new_fields = {
       "_unquantized_type": model_class,
-      call_method: interception.wrap_func_intercepted(
+      call_method: _apply_interceptors(
           getattr(model_class, call_method),
-          provider.get_intercept_map,
-          input_transform=functools.partial(_input_transform, provider),
+          provider,
           output_transform=functools.partial(
               _output_transform_nnx, provider, call_method
           ),
@@ -223,3 +221,51 @@ def _output_transform_nnx(
   args = inspect.currentframe().f_back.f_locals["args"]  # pytype: disable=attribute-error
   self = args[0]  # pylint: disable=unused-variable
   return provider.process_model_output(method_name, output)
+
+
+def _apply_interceptors(
+    method: Any,
+    provider: qconfig.QuantizationProvider,
+    output_transform: Any,
+    should_intercept: Any = lambda: True,
+) -> Any:
+  """Apply interceptors to a method.
+
+  For ODML providers, there are two interceptors:
+  1. Structural interceptor (first): Handles low-level primitives (e.g.
+     `PrimitiveBindOp`) to propagate metadata throughout the JAX trace.
+  2. Numerical interceptor (last): Handles high-level operations (e.g.
+     `dot_general`) to apply quantization logic.
+
+  For all other providers, there is only one numerical interceptor.
+
+  Args:
+    method: The method to intercept.
+    provider: The quantization provider.
+    output_transform: A function to transform the output of the intercepted
+      method.
+    should_intercept: A predicate to decide whether the interception should be
+      applied at all.
+
+  Returns:
+    The intercepted method.
+  """
+  interceptors = list(provider.get_interceptors())
+  for i, interceptor in enumerate(interceptors):
+    # The last interceptor map is the numerical one, which handles high-level
+    # ops to quantize. We want the outermost wrapper to handle input/output
+    # transformations so that they happen at the boundary of the intercepted
+    # method.
+    is_last = i == len(interceptors) - 1
+    method = interception.wrap_func_intercepted(
+        method,
+        interceptor,
+        input_transform=(
+            functools.partial(_input_transform, provider)
+            if is_last
+            else lambda *x: x
+        ),
+        output_transform=output_transform if is_last else lambda x: x,
+        should_intercept=should_intercept,
+    )
+  return method

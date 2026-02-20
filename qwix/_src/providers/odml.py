@@ -26,6 +26,7 @@ import numpy as np
 from qwix._src import aux_data
 from qwix._src import averaging
 from qwix._src import flax_util
+from qwix._src import interception
 from qwix._src import qconfig
 from qwix._src.core import qarray
 from qwix._src.providers import odml_ops
@@ -109,6 +110,25 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
     # weight_name is used to distinguish weights from activations.
     aux_data.set(ret if unbox else ret.unbox(), 'weight_name', name)
     return ret
+
+  def get_interceptors(
+      self,
+  ) -> Sequence[Callable[[], interception.Interceptor]]:
+    """Returns a list of interceptor factories.
+
+    The interceptors are returned in the following order:
+    1. Structural interceptor: Handles low-level primitives (e.g.
+       `PrimitiveBindOp`) to propagate metadata.
+    2. Numerical interceptor: Handles high-level ops (e.g. `dot_general`) to
+       quantize them.
+    """
+
+    # Functional layer: handle primitives to propagate metadata.
+    def get_structural_map():
+      return {interception.PRIMITIVE_BIND_KEY: odml_ops.PrimitiveBindOp()}
+
+    # Numerical layer: handle high-level ops to quantize.
+    return [get_structural_map, self.get_intercept_map]
 
   def get_intercept_map(self):
     """Used for interception."""
@@ -281,11 +301,10 @@ class OdmlConversionProvider(OdmlQatProvider):
     intercept_map['jax.lax.dot_general'] = functools.partial(
         self._flatten_dot_general,
         _dot_general=intercept_map['jax.lax.dot_general'],
-        _reshape=intercept_map['jax.lax.reshape'],
     )
     return intercept_map
 
-  def _flatten_dot_general(self, *args, _dot_general, _reshape, **kwargs):
+  def _flatten_dot_general(self, *args, _dot_general, **kwargs):
     """Flatten N-D weights to 2-D to support channelwise quantization."""
     # This special handling is needed because tflite doesn't support multiple
     # quantization_dimensions.
@@ -296,9 +315,9 @@ class OdmlConversionProvider(OdmlQatProvider):
     ):
       args = list(args)
       dout = args[1].shape[1:]
-      args[1] = _reshape(args[1], (args[1].shape[0], np.prod(dout)))
+      args[1] = jax.lax.reshape(args[1], (args[1].shape[0], np.prod(dout)))
       out = _dot_general(*args, **kwargs)
-      return _reshape(out, out.shape[:-1] + dout)
+      return jax.lax.reshape(out, out.shape[:-1] + dout)
     return _dot_general(*args, **kwargs)
 
   def _fake_quant(

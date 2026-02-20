@@ -140,6 +140,17 @@ class QuantizationProvider:
       )
     return intercept_map
 
+  def get_interceptors(
+      self,
+  ) -> Sequence[Callable[[], interception.Interceptor]]:
+    """Returns a list of interceptor factories.
+
+    The default implementation returns a single interceptor that handles
+    all ops. Subclasses can override this method to return multiple
+    interceptors if needed (e.g. ODML providers).
+    """
+    return [self.get_intercept_map]
+
   def process_model_inputs(
       self, model: Any, model_args: Sequence[Any], model_kwargs: dict[str, Any]
   ) -> tuple[Any, Sequence[Any], dict[str, Any]]:

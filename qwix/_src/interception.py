@@ -28,6 +28,9 @@ Function: TypeAlias = Callable[..., Any]
 # { "jax.lax.sin": replaced_sin }.
 Interceptor: TypeAlias = Mapping[str, Function]
 
+# The key used to intercept jax._src.core.Primitive.bind.
+PRIMITIVE_BIND_KEY = "jax._src.core.Primitive.bind"
+
 
 def wrap_func_intercepted(
     func: Function,
@@ -128,6 +131,9 @@ def wrap_func_intercepted(
     # Check if JIT is already disabled.
     if jax.config.jax_disable_jit:
       need_to_disable_jit = False
+    elif PRIMITIVE_BIND_KEY in interceptor:
+      # Disable JIT to ensure primitive calls are intercepted.
+      need_to_disable_jit = True
 
     # Apply the input transform.
     args, kwargs = input_transform(args, kwargs)
