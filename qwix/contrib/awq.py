@@ -33,6 +33,7 @@ import dataclasses
 from typing import Any
 
 import flax
+from flax import nnx
 import jax
 from qwix._src import averaging
 from qwix._src import qconfig
@@ -69,6 +70,9 @@ class WithAwqScale(ptq.WithAux[qarray.QArray]):
 
   awq_scale: jax.Array
   contracting_axis: int = flax.struct.field(pytree_node=False)
+
+# Register as NNX data to allow JAX arrays in Module attributes.
+nnx.register_data_type(WithAwqScale)
 
 
 class AwqCalibrationProvider(calibration.StatsCalibrationProvider):

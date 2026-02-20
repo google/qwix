@@ -16,6 +16,7 @@
 import dataclasses
 import functools
 from typing import Callable, Collection, Mapping, Sequence, TypeAlias
+from flax import nnx
 import flax.struct
 import jax
 from jax import numpy as jnp
@@ -96,6 +97,9 @@ class QArray:
 
   def swapaxes(self, axis1: int, axis2: int) -> 'QArray':
     return jax.tree.map(lambda x: x.swapaxes(axis1, axis2), self)
+
+# Register as NNX data to allow JAX arrays in Module attributes.
+nnx.register_data_type(QArray)
 
 
 def reshape(array: QArray, *new_shape) -> QArray:

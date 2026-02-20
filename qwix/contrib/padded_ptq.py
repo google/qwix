@@ -25,6 +25,7 @@ import functools
 import sys
 from typing import Any, Mapping, TypeAlias
 
+from flax import nnx
 import flax.struct
 import jax
 import jax.numpy as jnp
@@ -67,6 +68,8 @@ class PaddedQArray(qarray.QArray):
       pytree_node=False, default=()
   )
 
+# Register as NNX data to allow JAX arrays in Module attributes.
+nnx.register_data_type(PaddedQArray)
 
 MaybeQArray: TypeAlias = jax.Array | qarray.QArray | PaddedQArray
 

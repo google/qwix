@@ -70,6 +70,9 @@ class WithAux(Generic[ArrayTypeVar]):
       )
     return self
 
+# Register as NNX data to allow JAX arrays in Module attributes.
+nnx.register_data_type(WithAux)
+
 
 class PtqProvider(qconfig.QuantizationProvider):
   """Quantization provider for PTQ.
