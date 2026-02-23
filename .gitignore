@@ -39,3 +39,6 @@ htmlcov/
 
 # --- Jupyter Notebooks (Optional) ---
 .ipynb_checkpoints
+
+# --- Agents ---
+agents/

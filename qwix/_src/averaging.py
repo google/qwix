@@ -23,7 +23,10 @@ Calibration: TypeAlias = dict[str, jax.Array]
 
 
 class SimpleMovingAverage:
-  """Simple moving average maintains a count and sums of the calibration."""
+  """Simple moving average maintains a count and sums of the calibration.
+
+  Used to compute a running average.
+  """
 
   def __init__(self, bootstrap_steps: int = 0):
     """Initializes the simple moving average.
