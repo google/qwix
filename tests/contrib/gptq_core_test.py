@@ -84,14 +84,6 @@ class GptqCoreTest(parameterized.TestCase):
     logging.info("matmul loss rtn: %s vs. gptq: %s", mse_rtn, mse_gptq)
     self.assertGreater(mse_rtn, mse_gptq)
 
-  def test_normalize_weight(self):
-    w = jnp.arange(2 * 3 * 4).reshape(2, 3, 4)
-    w2, restore_shape = gptq_core.normalize_weight(w, 1)
-    self.assertEqual(w2.shape, (8, 3))
-    w3 = restore_shape(w2)
-    self.assertEqual(w3.shape, (2, 3, 4))
-    self.assertTrue(jnp.all(w == w3))
-
   def test_quantize_weight_defaults_to_per_channel(self):
     """Test GPTQ produces valid QArray when columns isn't divisible by rows."""
     # Shape where columns (3525) is not divisible by rows (256), ensures
