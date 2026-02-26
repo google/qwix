@@ -35,12 +35,13 @@ from typing import Any
 import flax
 from flax import nnx
 import jax
-from qwix._src import averaging
 from qwix._src import qconfig
 from qwix._src.core import qarray
 from qwix._src.providers import ptq
 from qwix.contrib import awq_core
 from qwix.contrib import calibration
+
+_STATS_SUFFIX = '_awq'
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -75,11 +76,12 @@ class WithAwqScale(ptq.WithAux[qarray.QArray]):
 nnx.register_data_type(WithAwqScale)
 
 
-class AwqCalibrationProvider(calibration.StatsCalibrationProvider):
+class AwqCalibrationProvider(calibration.SinglePassCalibrationProvider):
   """Calibration provider for AWQ.
 
   This provider collects `awq_quant_stats` (per-channel activation scales) by
-  using `StatsCalibrationProvider` to intercept compatible operations. These
+  using `SinglePassCalibrationProvider` to intercept compatible operations.
+  These
   statistics are used by `quantize_params` to compute AWQ scales. This provider
   does not perform actual quantization or use quantized operations.
   """
@@ -93,7 +95,7 @@ class AwqCalibrationProvider(calibration.StatsCalibrationProvider):
     return {'act_scale': act_scale}
 
   def get_stats_suffix(self) -> str:
-    return '_awq'
+    return _STATS_SUFFIX
 
 
 def quantize_params(
@@ -122,74 +124,36 @@ def quantize_params(
     weights, returns WithAwqScale wrappers containing the QArray and per-channel
     AWQ scales. For non-AWQ weights, returns WithAux wrappers (same as PTQ).
   """
-  quantized_params = {}
-  not_quantized_params = {}
-  for path, w in flax.traverse_util.flatten_dict(params).items():
-    abs_w = ptq.get_value_from_path(abstract_quantized_params, path)
-    awq_stats_path = (*path[:-1], path[-1] + '_awq')
-    awq_stats = ptq.get_value_from_path(awq_quant_stats, awq_stats_path)
-
-    if not isinstance(abs_w, ptq.WithAux) or awq_stats is None:
-      # Not quantized by AWQ.
-      not_quantized_params[path] = w
-      continue
-
-    # Get the contracting axis by assuming that all non-contracting axes
-    # are in channelwise_axes.
-    contracting_axis = set(range(w.ndim)) - set(abs_w.how.channelwise_axes)
-    if len(contracting_axis) != 1:
-      # Fallback to PTQ if we can't identify a single contracting axis.
-      not_quantized_params[path] = w
-      continue
-
-    contracting_axis = list(contracting_axis)[0]
-
-    # Normalize the weight to (ra, ca) format.
-    w, restore_shape = awq_core.normalize_weight(w, contracting_axis)
-    how = dataclasses.replace(abs_w.how, channelwise_axes=[0])
-    if contracting_axis in how.tiled_axes:
-      how = dataclasses.replace(
-          how, tiled_axes={1: how.tiled_axes[contracting_axis]}
-      )
-
-    # Get the activation scale, which should be (ca,).
-    calibration_stats = averaging.SimpleMovingAverage().get_calibration(
-        awq_stats
-    )
-    activation_scale = calibration_stats['act_scale']
-    assert activation_scale.shape[0] == w.shape[1]
+  def _quantize(ctx: calibration.CalibratedQuantContext) -> Any:
+    activation_scale = ctx.calibration_stats['act_scale']
+    assert activation_scale.shape[0] == ctx.weight.shape[1]
 
     # Quantize the weight with AWQ.
     w_q, scales = awq_core.quantize_weight(
-        w, activation_scale, how, n_grid=n_grid
+        ctx.weight, activation_scale, ctx.how, n_grid=n_grid
     )
 
     # Restore original shape for QArray.
-    w_q = restore_shape(w_q)
+    w_q = ctx.restore_shape(w_q)
 
-    # Store AWQ scales as 1D array (in_features,) for simplicity.
-    # scales is (1, in_features), squeeze to (in_features,).
+    # Store AWQ scales as 1D array (in_features,).
     awq_scale_1d = scales.squeeze(0)
 
-    # Store AWQ scales separately for per-channel compensation during inference.
-    quantized_params[path] = WithAwqScale(
+    return WithAwqScale(
         array=w_q,
         awq_scale=awq_scale_1d,
-        contracting_axis=contracting_axis,
-        how=abs_w.how,
+        contracting_axis=ctx.contracting_axis,
+        how=ctx.abs_w.how,
     )
 
-  # Quantize the non-AWQ params with PTQ.
-  not_quantized_params = flax.traverse_util.unflatten_dict(not_quantized_params)
-  ptq_quantized_params = ptq.quantize_params(
-      not_quantized_params,
+  return calibration.quantize_params_with_calibration(
+      params,
       abstract_quantized_params,
+      awq_quant_stats,
+      _STATS_SUFFIX,
+      _quantize,
       allow_extra_params=allow_extra_params,
   )
-  ptq_quantized_params = flax.traverse_util.flatten_dict(ptq_quantized_params)
-  quantized_params.update(ptq_quantized_params)
-
-  return flax.traverse_util.unflatten_dict(quantized_params)
 
 
 class AwqInferenceProvider(ptq.PtqProvider):
