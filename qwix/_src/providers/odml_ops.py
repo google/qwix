@@ -83,7 +83,6 @@ def get_all_ops():
       'jax.image.resize': quantize(0),
       'jax.lax.conv_general_dilated': DotEinsumConv,
       'jax.lax.dot_general': DotEinsumConv,
-      'jax.lax.split': Split,
       'jax.nn.gelu': quantize(0),
       'jax.nn.leaky_relu': quantize(0),
       'jax.nn.silu': Silu,
@@ -170,6 +169,8 @@ _VALUE_PRESERVING_PRIMITIVES = {
     'convert_element_type',
     # N-ary ops
     'concatenate',
+    'gather',
+    'split',
 }
 
 
@@ -677,26 +678,6 @@ class Take(OnlyInputOp):
       # Output doesn't need more FQ.
       aux_data.set(out, _FQ_ARRAY, 'self')
     return self._fake_quant_output(out, rule)
-
-
-class Split(OnlyInputOp):
-  """jax.lax.split."""
-
-  def __call__(
-      self, x: jax.Array, sizes: Sequence[int], axis: int = 0
-  ) -> jax.Array:
-    if not aux_data.get(x, _IS_ACTIVATION, False):
-      return self._call_original_op(x, sizes, axis)
-
-    rule, op_id = self._get_rule_and_op_id_fn(self._op_name)
-    x = self._maybe_fake_quant(x, rule, op_id)
-
-    outputs = self._call_original_op(x, sizes, axis)
-    # Output doesn't need more FQ.
-    for output in outputs:
-      aux_data.set(output, _FQ_ARRAY, 'self')
-      self._fake_quant_output(output, rule)
-    return outputs
 
 
 class Silu(QuantizedOp):

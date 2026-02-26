@@ -418,6 +418,24 @@ class ValuePreservingPrimitivesModel(nn.Module):
     slice_sizes = (1, 5)
     x = jax.lax.dynamic_slice(x, start_indices, slice_sizes)
 
+    # Test split (value preserving)
+    # x shape is (1, 5)
+    # Split into 5 parts of shape (1, 1)
+    splits = jax.numpy.split(x, 5, axis=1)
+    x = splits[0]
+
+    # Test gather (Take op) - value preserving for metadata
+    # Gather from the first element
+    indices = jnp.array([0])
+    x = jax.lax.gather(
+        x,
+        indices,
+        dimension_numbers=jax.lax.GatherDimensionNumbers(
+            offset_dims=(0,), collapsed_slice_dims=(1,), start_index_map=(1,)
+        ),
+        slice_sizes=(1, 1),
+    )
+
     # Quantization should be able to propagate through these.
     # We use a valid quantizable op at the end to verify checks are passed.
     x = nn.Dense(features=5)(x)
@@ -434,9 +452,10 @@ class ValuePreservingPrimitivesModel(nn.Module):
   expected_ops_summary = {
       'quantize_op_count': 1,
       'dequantize_op_count': 1,
+      # Cast(f32->f16), cast(f16->f32), slice are FP.
       'fp_op_count': 3,
-      # cast(f32->f16), cast(f16->f32), slice are FP. Dense is Int.
-      'int_op_count': 1,
+      # Dense, split, gather are INT, operate on quantized inputs and outputs.
+      'int_op_count': 3,
   }
 
 
