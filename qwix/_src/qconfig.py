@@ -212,7 +212,7 @@ class QuantizationProvider:
     if (module_path, op_id) not in self._logged_ops:
       # Avoid logging the same message multiple times.
       self._logged_ops.add((module_path, op_id))
-      logging.info(
+      logging.debug(
           '[QWIX] module=%r op=%s rule=%s', module_path, op_id, rule_idx
       )
     return rule, op_id
