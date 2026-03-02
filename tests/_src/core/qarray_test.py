@@ -371,6 +371,30 @@ class QArrayTest(parameterized.TestCase):
     )
     self.assertTrue(jnp.allclose(actual, expected, atol=1e-6))
 
+  def test_qwix_sparsify(self):
+    x = jnp.array([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
+    # 2:4 sparsity (2 elements non-zero in each block of 4)
+    how = qarray.HowToSparsify(n=2, m=4, order='R')
+    y = qarray.qwix_sparsify(x, how)
+    expected = jnp.array([[0.0, 0.0, 3.0, 4.0], [0.0, 0.0, 7.0, 8.0]])
+    self.assertTrue(jnp.array_equal(y, expected))
+
+  def test_quantize_with_sparsity(self):
+    x = jnp.array([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
+    how = qarray.HowToQuantize(
+        qtype=jnp.int8,
+        sparsify=qarray.HowToSparsify(n=2, m=4, order='R'),
+    )
+    qx = qarray.quantize(x, how)
+    # Expected: sparsity applies first, then quantization.
+    # Sparsified x: [[0, 0, 3, 4], [0, 0, 7, 8]]
+    # Quantized x should reflect these zeros.
+    dequant_x = qarray.dequantize(qx)
+    expected = jnp.array([[0.0, 0.0, 3.0, 4.0], [0.0, 0.0, 7.0, 8.0]])
+    self.assertTrue(jnp.allclose(dequant_x, expected, atol=1e-1))
+    self.assertTrue(jnp.all(dequant_x[0, :2] == 0))
+    self.assertTrue(jnp.all(dequant_x[1, :2] == 0))
+
 
 if __name__ == '__main__':
   absltest.main()
