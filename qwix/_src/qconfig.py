@@ -29,6 +29,33 @@ from qwix._src import interception
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
+class SparsityRule:
+  """Sparsity rules that match and configure the sparsity behavior."""
+
+  # N:M sparsity for weights and activations. If m > 0, sparsity is enabled.
+  # 1:4/2:4 and 3:4 sparsity are supported.
+  # TODO(shivaniagrawal): Raise value error if
+  # weight_sparsity_n >= weight_sparsity_m.
+  weight_sparsity_n: int = 0
+  weight_sparsity_m: int = 0
+  # Apply pruning using this index order. See
+  # sparsity.jax.sparsity_core.get_sparsity_mask for details.
+  weight_sparsity_order: str = 'R'
+  weight_sparsity_block_size: int = 0
+  weight_sparsity_offset: int = 0
+  weight_sparsity_start_step: int = 0
+  weight_sparsity_update_step: int = 1
+
+  eval_mode: bool = False
+
+  activation_sparsity_n: int = 0
+  activation_sparsity_m: int = 0
+  activation_sparsity_order: str = 'R'
+  activation_sparsity_block_size: int = 0
+  activation_sparsity_offset: int = 0
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class QuantizationRule:
   """Quantization rules that match and configure the quantization behavior."""
 
@@ -89,6 +116,10 @@ class QuantizationRule:
   # batch axes. In dynamic-range quantization, the batch axes will have
   # per-channel scales and this config is ignored.
   act_batch_axes: Collection[int] = (0,)
+
+  # Sparsity rule for weights or activations.
+  # Note that the implementation is still under development.
+  sparsity_rule: SparsityRule | None = None
 
 
 def get_current_rule(op_name: str) -> QuantizationRule | None:

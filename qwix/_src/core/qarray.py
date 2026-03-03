@@ -21,6 +21,7 @@ import flax.struct
 import jax
 from jax import numpy as jnp
 from qwix._src.core import numerics
+from qwix._src.core import sparsity_core as sparsity
 
 
 # ---------------------------------------------
@@ -252,6 +253,48 @@ def validate_qarray(array: QArray):
 
 
 @dataclasses.dataclass(slots=True, frozen=True, kw_only=True)
+class HowToSparsify:
+  """Determines how to apply N:M sparsity to an array."""
+
+  # Maximum number of non-zero values in each block.
+  n: int
+  # Number of values in each block.
+  m: int
+  # Apply pruning using this index order. See
+  # sparsity.jax.sparsity_core.get_sparsity_mask for details.
+  order: str = 'R'
+  # See sparsity.jax.sparsity_core.get_sparsity_mask for details.
+  block_size: int = 0
+  # See sparsity.jax.sparsity_core.get_sparsity_mask for details.
+  offset: int = 0
+
+
+def qwix_sparsify(array: jax.Array, how: HowToSparsify) -> jax.Array:
+  """Applies N:M sparsity to a dense array.
+
+  N:M sparsity ensures that at most N values are non-zero in each block of M
+  consecutive values. Sparsity is based on magnitude.
+
+  Args:
+    array: The array to sparsify.
+    how: How to sparsify the array.
+
+  Returns:
+    A sparsified array with the same shape and type as input.
+  """
+  # TODO(shivaniagrawal): Replace this with curriculum learning.
+  mask = sparsity.get_sparsity_mask(
+      array,
+      n_sparsity=how.n,
+      m_sparsity=how.m,
+      order=how.order,
+      block_size=how.block_size,
+      offset=how.offset,
+  )
+  return jnp.where(mask, array, jnp.zeros_like(array))
+
+
+@dataclasses.dataclass(slots=True, frozen=True, kw_only=True)
 class HowToQuantize:
   """Determines how to quantize an array."""
 
@@ -276,6 +319,8 @@ class HowToQuantize:
   calibration_method: str = 'absmax'
   # Noise function to use for stochastic rounding.
   noise_fn: numerics.NoiseFn | None = None
+  # Sparsify configuration for weights.
+  sparsify: HowToSparsify | None = None
 
 
 ShapeT: TypeAlias = Sequence[int]
@@ -580,6 +625,8 @@ def quantize_with_scale_zero_point(
 
 def quantize(array: jax.Array, how: HowToQuantize) -> QArray:
   """Quantizes an array using a dynamic range."""
+  if how.sparsify is not None:
+    array = qwix_sparsify(array, how.sparsify)
   calibration = calibrate(array, how)
   scale, zero_point = compute_scale_zero_point(calibration, how.qtype)
   return quantize_with_scale_zero_point(

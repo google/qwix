@@ -61,6 +61,9 @@ class QtRule(qconfig.QuantizationRule):
   # guarantees.
   additional_qt_config: Mapping[str, Any] | None = None
 
+  # NOTE: Configuration for applying sparsity during training is parovided
+  # already as the sparsity_rule field in the QuantizationRule.
+
 
 class QtProvider(qconfig.QuantizationProvider):
   """Quantization provider for Quantized Training (QT)."""
@@ -93,6 +96,8 @@ class QtProvider(qconfig.QuantizationProvider):
           out_sharding=out_sharding,
       )
     config = self._create_dot_general_qt_config(rule, op_id, lhs, rhs)
+    # TODO(amanda/shivaniagrawal): plug in sparsityModule just before calling  # pylint: disable=g-bad-todo
+    # quantize in dot_general_qt.py.
     return dot_general_qt.dot_general_qt(lhs, rhs, dimension_numbers, config)
 
   def einsum(
