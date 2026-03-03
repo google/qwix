@@ -68,7 +68,7 @@ def uniform_noise(
     shape: tuple[int, ...],
 ) -> jax.Array:
   """Uniform noise."""
-  return jax.random.uniform(key, shape) - 0.5
+  return jax.random.uniform(key, shape, jnp.float32, -0.5, 0.5)
 
 
 def get_noise_fn(
