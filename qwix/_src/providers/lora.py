@@ -207,7 +207,9 @@ class LoraProvider(ptq.PtqProvider):
 
     if rule.dropout > 0:
       # This also works for linen.
-      lhs = nnx.Dropout(rule.dropout)(lhs, rngs=flax_util.make_rng('dropout'))
+      lhs = nnx.Dropout(rule.dropout, deterministic=False)(
+          lhs, rngs=flax_util.make_rng('dropout')
+      )
 
     return res + lhs @ lora_a @ lora_b * (rule.alpha / rule.rank)
 
@@ -256,7 +258,9 @@ class LoraProvider(ptq.PtqProvider):
 
     if rule.dropout > 0:
       # This also works for linen.
-      lhs = nnx.Dropout(rule.dropout)(lhs, rngs=flax_util.make_rng('dropout'))
+      lhs = nnx.Dropout(rule.dropout, deterministic=False)(
+          lhs, rngs=flax_util.make_rng('dropout')
+      )
 
     return res + (
         jax.numpy.einsum(lora_einsum_str, lhs, lora_a, lora_b, **kwargs)
@@ -323,7 +327,9 @@ class LoraProvider(ptq.PtqProvider):
 
     if rule.dropout > 0:
       # This also works for linen.
-      lhs = nnx.Dropout(rule.dropout)(lhs, rngs=flax_util.make_rng('dropout'))
+      lhs = nnx.Dropout(rule.dropout, deterministic=False)(
+          lhs, rngs=flax_util.make_rng('dropout')
+      )
 
     return res + jax.lax.conv_general_dilated(
         lhs,
