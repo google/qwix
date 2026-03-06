@@ -311,9 +311,11 @@ class QuantizedOp:
     if array.dtype not in (jnp.float32, jnp.bfloat16):
       return array
 
-    # Check if the array is a weight.
+    # 1) Handle the Weight case (immediate quantization).
+    # rule.weight_qtype means this op will use rule.weight_qtype as weights.
     if aux_data.get(array, _WEIGHT_NAME, None) is not None:
       if rule and rule.weight_qtype:
+        # If there is a rule for weights, quantize the weights.
         how = qarray.HowToQuantize(
             qtype=rule.weight_qtype,
             channelwise_axes=(),
@@ -325,13 +327,34 @@ class QuantizedOp:
         fq_array = self._fake_quant_fn(array, how, None)
         aux_data.set(array, _FQ_ARRAY, fq_array)
         return fq_array
+      else:
+        # No rule for weights, return as is.
+        return array
+
+    # 2) Handle the Activation case (delayed quantization).
+    # rule.act_qtype means this op will produce an rule.act_qtype output.
+    # The producer(Op N-1) sets the rule for the activation.
+    # The consumer(Op N) uses that rule to quantize the activation.
+
+    # Do not quantize if the rule explicitly disables it.
+    if rule and rule.act_qtype is None:
       return array
 
-    # Check if the array should be quantized as the output of the previous op.
     previous_rule = aux_data.get(array, _FQ_RULE, None)
     if previous_rule is not None:
+      # Delayed Quantization: The Previous Op (Producer) specified how its
+      # output should be quantized. The Current Op (Consumer) now executes
+      # that rule on this input array.
       rule = previous_rule
+    else:
+      # Immediate Quantiztion: If the input activation has no previous rule
+      # (e.g. the first layer after ModelInput, or the first layer after an
+      # excluded layer), we use the current op's rule to quantize it
+      # immediately.
+      pass
 
+    # If there is no rule or the rule does not have an activation quantization
+    # type, return as is.
     if rule is None or rule.act_qtype is None:
       return array
     if not rule.act_static_scale:
@@ -353,16 +376,19 @@ class QuantizedOp:
     return fq_array
 
   def _fake_quant_output(
-      self, array: jax.Array, rule: qconfig.QuantizationRule | None
-  ) -> jax.Array:
+      self, outputs: Any, rule: qconfig.QuantizationRule | None
+  ) -> Any:
     """Fake quantize an output activation, which is delayed to the next op."""
-    aux_data.set(array, _IS_ACTIVATION, True)
-    if self.fixed_range_for_output is not None:
-      aux_data.set(array, _FIXED_RANGE, self.fixed_range_for_output)
-    # Output is only quantized in SRQ.
-    if rule and rule.act_qtype and rule.act_static_scale:
-      aux_data.set(array, _FQ_RULE, rule)
-    return array
+    # Handle all leaves of the pytree.
+    for x in jax.tree_util.tree_leaves(outputs):
+      if isinstance(x, jax.Array):
+        aux_data.set(x, _IS_ACTIVATION, True)
+        if self.fixed_range_for_output is not None:
+          aux_data.set(x, _FIXED_RANGE, self.fixed_range_for_output)
+        # Output is only quantized in SRQ.
+        if rule and rule.act_qtype and rule.act_static_scale:
+          aux_data.set(x, _FQ_RULE, rule)
+    return outputs
 
 
 class OnlyInputOp(QuantizedOp):
@@ -618,11 +644,11 @@ class UfuncCall(QuantizedOp):
     return super()._fake_quant_inputs(args, rule, op_id)
 
   def _fake_quant_output(
-      self, array: jax.Array, rule: qconfig.QuantizationRule | None
-  ) -> jax.Array:
+      self, outputs: Any, rule: qconfig.QuantizationRule | None
+  ) -> Any:
     if self._output_allow_fusion:
-      aux_data.set(array, _ALLOW_FUSION, True)
-    return super()._fake_quant_output(array, rule)
+      aux_data.set(outputs, _ALLOW_FUSION, True)
+    return super()._fake_quant_output(outputs, rule)
 
 
 class Concatenate(QuantizedOp):

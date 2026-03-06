@@ -459,6 +459,34 @@ class ValuePreservingPrimitivesModel(nn.Module):
   }
 
 
+@srq_test_case
+class ModelOutputPyTree(nn.Module):
+  """Verify that tuple outputs are tagged correctly."""
+
+  @nn.compact
+  def __call__(self, x, use_running_average=None):
+    if use_running_average is None:
+      use_running_average = True
+    x = nn.BatchNorm(use_running_average=use_running_average)(x)
+    # Return a tuple to force _fake_quant_output to iterate over leaves.
+    # This simulates an op that returns multiple outputs (like TopK or unique).
+    return (x, x)
+
+  def create_input(self):
+    return jax.random.uniform(jax.random.key(0), (1, 4, 1, 1), jnp.float32)
+
+  expected_quant_stats_keys = {
+      'batch_norm_op0',
+      'final_output0',
+  }
+
+  expected_ops_summary = {
+      'quantize_op_count': 2,
+      'dequantize_op_count': 2,
+      'int_op_count': 0,
+  }
+
+
 class VAE(nn.Module):
 
   def setup(self):
@@ -701,11 +729,36 @@ class OdmlTest(parameterized.TestCase):
         set(qat_variables['quant_stats'].keys()),
         {
             'norm_op0',
-            # silu0 is here because norm_op0 needs to quantize its output.
-            'silu0',
-            # but there's no silu0_sigmoid or final_output0.
+            # silu0 is absent because silu explicitly disabled quantization,
+            # overriding the previous op's request.
         },
     )
+
+  def test_model_output_pytree(self):
+    rules = [
+        qconfig.QuantizationRule(
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+        ),
+    ]
+    model = ModelOutputPyTree()
+    qat_provider = odml.OdmlQatProvider(rules)
+    qat_model = qwix_model.quantize_model(model, qat_provider)
+    model_input = model.create_input()
+    qat_variables = qat_model.init(jax.random.key(0), model_input)
+
+    # Run with plain apply, no mutable needed since we force tuple return in
+    # the model.
+    # We assign the outputs to _ because we only check quant_stats below.
+    _ = qat_model.apply(
+        qat_variables,
+        model_input,
+    )
+
+    # Verify that the outputs are quantized (have tags implied by quant_stats
+    # presence)
+    self.assertIn('batch_norm_op0', qat_variables['quant_stats'])
+    self.assertIn('final_output0', qat_variables['quant_stats'])
 
   @parameterized.named_parameters(
       dict(
@@ -894,10 +947,27 @@ class OdmlTest(parameterized.TestCase):
 
 
 def print_diff(name, x, y):
-  abs_diff = jnp.abs(x - y)
-  rel_diff = jnp.nan_to_num(abs_diff / jnp.maximum(jnp.abs(x), jnp.abs(y)))
-  abs_diff = abs_diff.mean()
-  rel_diff = rel_diff.mean()
+  leaves_x = jax.tree_util.tree_leaves(x)
+  leaves_y = jax.tree_util.tree_leaves(y)
+  if len(leaves_x) != len(leaves_y):
+    logging.warning(
+        'Structure mismatch in print_diff: %d vs %d leaves',
+        len(leaves_x),
+        len(leaves_y),
+    )
+    return float('inf'), float('inf')
+
+  abs_diffs = []
+  rel_diffs = []
+  for lx, ly in zip(leaves_x, leaves_y):
+    abs_d = jnp.abs(lx - ly)
+    rel_d = jnp.nan_to_num(abs_d / jnp.maximum(jnp.abs(lx), jnp.abs(ly)))
+    abs_diffs.append(abs_d.mean())
+    rel_diffs.append(rel_d.mean())
+
+  abs_diff = np.mean(abs_diffs)
+  rel_diff = np.mean(rel_diffs)
+
   logging.info('%s: %f, %f', name, abs_diff, rel_diff)
   return abs_diff, rel_diff
 
