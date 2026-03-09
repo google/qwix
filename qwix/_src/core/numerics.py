@@ -27,17 +27,55 @@ _QUANTIZE_DTYPES = (jnp.bfloat16, jnp.float16, jnp.float32, jnp.float64)
 
 
 def should_quantize(dtype: jax.typing.DTypeLike) -> bool:
-  """Returns True if the dtype should be quantized."""
+  """Checks if a given dtype is a floating-point type eligible for quantization.
+
+  Quantization is typically applied to high-precision floating-point values to
+  reduce memory usage and increase computational efficiency.
+
+  Args:
+    dtype: The data type to check.
+
+  Returns:
+    True if the dtype is a standard floating-point type.
+  """
   return jnp.dtype(dtype) in _QUANTIZE_DTYPES
 
 
 def can_dequant_on_output(qtype: jax.typing.DTypeLike) -> bool:
-  """qtypes that cannot be optimized by computing in quantized types first then dequantize."""
+  """Checks if the qtype supports dequantizing after quantized computation.
+
+  This allows performing heavy operations (like matrix multiplications)
+  directly on quantized values and applying the dequantization step only to the
+  final result. This is generally possible for uniform data types (e.g., int8).
+  However, non-uniform types like 'nf4' (NormalFloat 4) use a non-linear
+  lookup table of buckets, making direct arithmetic on quantized indices
+  mathematically invalid.
+
+  Args:
+    qtype: The quantization data type to check.
+
+  Returns:
+    True if the qtype supports dequantizing after the computation in quantized
+    representation, False otherwise.
+  """
   return qtype not in ['nf4']
 
 
 def get_asymmetric_bound(qtype: jax.typing.DTypeLike) -> tuple[float, float]:
-  """Returns the bound of the given qtype used in asymmetric quantization."""
+  """Returns the continuous range of target values before rounding.
+
+  This function returns the exact boundaries of the target type in floats.
+  Asymmetric quantization maps the input range to the full continuous range of
+  the target type, including the "extra" negative value (e.g., -128
+  for int8).
+
+  Args:
+    qtype: The quantization type. Currently only supports standard JAX integer
+      types like jnp.int8 or jnp.int4.
+
+  Returns:
+    A tuple of (min, max) representing the continuous representable range.
+  """
   try:
     dtype = jnp.dtype(qtype)
   except TypeError as e:
@@ -53,7 +91,19 @@ def get_asymmetric_bound(qtype: jax.typing.DTypeLike) -> tuple[float, float]:
 
 
 def get_symmetric_bound(qtype: jax.typing.DTypeLike) -> float:
-  """Returns the bound of the given qtype used in symmetric quantization."""
+  """Returns the maximum magnitude of continuous target values before rounding.
+
+  In symmetric quantization, the range is centered at zero. For integer
+  types, the bound is extended to qmax + 0.5 to ensure the maximum bucket
+  is fully utilized. This defines a representable continuous range of [-B, B].
+
+  Args:
+    qtype: The quantization type. Supports standard JAX dtypes (e.g., jnp.int8)
+      and synthetic string identifiers (e.g., 'nf4', 'int3', 'mxfp8').
+
+  Returns:
+    The positive bound B. The representable continuous range is [-B, B].
+  """
   match qtype:
     case 'nf4':
       return 1.0
@@ -70,10 +120,14 @@ def get_symmetric_bound(qtype: jax.typing.DTypeLike) -> float:
   if jnp.dtype(qtype).itemsize > 1:
     raise ValueError(f'Cannot use {qtype} as qtype.')
   try:
-    # TODO(dangyi): Extend the finfo.max bucket for a better utilization.
+    # TODO(jiwonshin): Extend the finfo.max bucket (e.g. by half a step-size)
+    # for better utilization. Similar to the +0.5 for integers below, this
+    # would allow the maximum floating-point bucket to represent a wider
+    # range of the input signal before clipping.
     return float(jnp.finfo(qtype).max)
   except ValueError:
-    # See the comment above for why we add 0.5.
+    # Integer types: we add 0.5 because the 'max' bucket captures
+    # values in [qmax - 0.5, qmax + 0.5).
     return jnp.iinfo(qtype).max + 0.5
 
 
@@ -82,7 +136,20 @@ def convert_to(
     qtype: jax.typing.DTypeLike,
     noise_fn: NoiseFn | None = None,
 ) -> jax.Array:
-  """Rounds and converts x to the given qtype."""
+  """Converts a high-precision array to the quantized representation.
+
+  This function performs the discrete mapping of continuous values to quantized
+  buckets (rounding/clipping or bucketization). It assumes the input 'x' has
+  already been scaled to the target type's representable range.
+
+  Args:
+    x: The input array, already scaled to the target type's range.
+    qtype: The target quantized representation (e.g., 'int8', 'nf4').
+    noise_fn: Optional function for stochastic rounding.
+
+  Returns:
+    The array in its quantized storage format (indices or low-precision type).
+  """
   # Handles synthetic qtypes.
   match qtype:
     case 'nf4':
@@ -125,7 +192,23 @@ def convert_to(
 
 
 def convert_from(x: jax.Array, qtype: jax.typing.DTypeLike) -> jax.Array:
-  """Converts x from the given qtype."""
+  """Converts a non-uniform quantized array back to floating-point values.
+
+  For non-uniform types (like 'nf4'), this function performs 'unbucketing'
+  by mapping quantized indices back to their corresponding floating-point
+  values.
+
+  For native uniform types (e.g., 'int8'), this is a no-op.
+
+  Args:
+    x: The array in its quantized representation (indices or low-precision).
+    qtype: The quantization type that was used to create 'x'.
+
+  Returns:
+    The array after representation conversion. For non-uniform types, the
+    result is in a floating-point format. For native types, the result
+    retains the original dtype of 'x'.
+  """
   match qtype:
     case 'nf4':
       return nf4_to_fp(x)
@@ -140,7 +223,10 @@ def convert_from(x: jax.Array, qtype: jax.typing.DTypeLike) -> jax.Array:
 
 # NB: to work around the issue of calling Jax functions in module-level context.
 def get_nf4_buckets() -> jax.Array:
-  """Returns the NF4 buckets defined in Appendix E in https://arxiv.org/pdf/2305.14314."""
+  """Returns the NF4 buckets.
+
+  The buckets are defined in Appendix E of https://arxiv.org/pdf/2305.14314.
+  """
   nf4_buckets = jnp.array([
       -1.0,
       -0.6961928009986877,
