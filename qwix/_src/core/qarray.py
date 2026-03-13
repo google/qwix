@@ -370,7 +370,7 @@ def get_tiled_axes(array: QArray) -> dict[int, int]:
   """
   tiled_axes = {}
   for i, (j, k) in enumerate(zip(array.qvalue.shape, array.scale.shape)):
-    if j != k and k != 1:
+    if k != 1:
       tiled_axes[i] = j // k
   return tiled_axes
 
