@@ -125,7 +125,7 @@ def _fast_conv_general_dilated(
     lhs_value = lhs.qvalue
     lhs_scale = lhs.scale
     lhs_zero_point = lhs.zero_point
-    if qarray.get_tiled_axes(lhs):
+    if any(v > 1 for v in qarray.get_tiled_axes(lhs).values()):
       raise ValueError('subchannel is not supported for conv_general_dilated.')
   else:
     lhs_value = lhs
@@ -136,7 +136,7 @@ def _fast_conv_general_dilated(
     rhs_value = rhs.qvalue
     rhs_scale = rhs.scale
     rhs_zero_point = rhs.zero_point
-    if qarray.get_tiled_axes(rhs):
+    if any(v > 1 for v in qarray.get_tiled_axes(rhs).values()):
       raise ValueError('subchannel is not supported for conv_general_dilated.')
   else:
     rhs_value = rhs
