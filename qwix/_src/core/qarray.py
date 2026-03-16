@@ -362,15 +362,20 @@ def split_axis(
 def get_tiled_axes(array: QArray) -> dict[int, int]:
   """Infers the tiled axes from a QArray.
 
+  This function treats channelwise quantization as a special case of subchannel
+  quantization with tile_size=1.
+
   Args:
     array: The QArray to infer the tiled axes from.
 
   Returns:
-    A dict from tiled axis to tile size.
+    A dict from subchannel and channelwise axes to tile size. Channelwise
+    axes are reported as having tile_size=1. This allows for uniform
+    handling of both quantization schemes.
   """
   tiled_axes = {}
   for i, (j, k) in enumerate(zip(array.qvalue.shape, array.scale.shape)):
-    if j != k and k != 1:
+    if k != 1:
       tiled_axes[i] = j // k
   return tiled_axes
 

@@ -210,7 +210,7 @@ class QArrayTest(parameterized.TestCase):
         qvalue=jnp.ones((10, 256, 16), jnp.int8),
         scale=jnp.ones((10, 8, 2)),
     )
-    self.assertEqual(qarray.get_tiled_axes(array), {1: 32, 2: 8})
+    self.assertEqual(qarray.get_tiled_axes(array), {0: 1, 1: 32, 2: 8})
 
   def test_array_methods(self):
     array = self._make_array((2, 2, 6))
