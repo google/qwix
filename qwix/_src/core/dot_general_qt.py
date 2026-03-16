@@ -215,7 +215,7 @@ def dot_general_qt_bwd(
 
     if g_qtype and numerics.should_quantize(g.dtype):
       if isinstance(y, qarray.QArray) and not any(
-          v > 1 for v in qarray.get_tiled_axes(y).values()
+          tile_size > 1 for tile_size in qarray.get_tiled_axes(y).values()
       ):
         # Apply the scale of y to g, this trick avoids requantizing y because
         # the y from fwd pass has different channelwise_axes.
