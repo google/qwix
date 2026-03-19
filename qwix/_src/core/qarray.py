@@ -21,6 +21,7 @@ import flax.struct
 import jax
 from jax import numpy as jnp
 from qwix._src.core import numerics
+from qwix._src.core import sparsity
 
 
 # ---------------------------------------------
@@ -251,6 +252,31 @@ def validate_qarray(array: QArray):
 # ---------------------------------------------
 
 
+def sparsify(array: jax.Array, how: sparsity.SparsityRule) -> jax.Array:
+  """Applies N:M sparsity to a dense array.
+
+  N:M sparsity ensures that at most N values are non-zero in each block of M
+  consecutive values. Sparsity is based on magnitude.
+
+  Args:
+    array: The array to sparsify.
+    how: How to sparsify the array.
+
+  Returns:
+    A sparsified array with the same shape and type as input.
+  """
+  # TODO(b/493278511): Replace this with curriculum learning.
+  mask = sparsity.get_sparsity_mask(
+      array,
+      n_sparsity=how.weight_sparsity_n,
+      m_sparsity=how.weight_sparsity_m,
+      order=how.weight_sparsity_order,
+      block_size=how.weight_sparsity_block_size,
+      offset=how.weight_sparsity_offset,
+  )
+  return jnp.where(mask, array, jnp.zeros_like(array))
+
+
 @dataclasses.dataclass(slots=True, frozen=True, kw_only=True)
 class HowToQuantize:
   """Determines how to quantize an array."""
@@ -276,6 +302,9 @@ class HowToQuantize:
   calibration_method: str = 'absmax'
   # Noise function to use for stochastic rounding.
   noise_fn: numerics.NoiseFn | None = None
+
+  # NOTE: Add support for HowToSparsify sparsify configuration for weights.
+  sparsity_rule: sparsity.SparsityRule | None = None
 
 
 ShapeT: TypeAlias = Sequence[int]
@@ -585,6 +614,8 @@ def quantize_with_scale_zero_point(
 
 def quantize(array: jax.Array, how: HowToQuantize) -> QArray:
   """Quantizes an array using a dynamic range."""
+  if how.sparsity_rule is not None:
+    array = sparsify(array, how.sparsity_rule)
   calibration = calibrate(array, how)
   scale, zero_point = compute_scale_zero_point(calibration, how.qtype)
   return quantize_with_scale_zero_point(

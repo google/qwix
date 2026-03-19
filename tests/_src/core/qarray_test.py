@@ -19,6 +19,7 @@ from absl.testing import parameterized
 import jax
 from jax import numpy as jnp
 from qwix._src.core import qarray
+from qwix._src.core import sparsity
 
 jax.config.update('jax_threefry_partitionable', False)
 
@@ -370,6 +371,33 @@ class QArrayTest(parameterized.TestCase):
         jnp.zeros(target_shape),
     )
     self.assertTrue(jnp.allclose(actual, expected, atol=1e-6))
+
+  def test_sparsify(self):
+    x = jnp.array([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
+    # 2:4 sparsity (2 elements non-zero in each block of 4)
+    how = sparsity.SparsityRule(
+        weight_sparsity_n=2, weight_sparsity_m=4, weight_sparsity_order='R'
+    )
+    y = qarray.sparsify(x, how)
+    expected = jnp.array([[0.0, 0.0, 3.0, 4.0], [0.0, 0.0, 7.0, 8.0]])
+    self.assertTrue(jnp.array_equal(y, expected))
+
+  def test_quantize_with_sparsity(self):
+    x = jnp.array([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
+    how = qarray.HowToQuantize(
+        qtype=jnp.int8,
+        sparsity_rule=sparsity.SparsityRule(
+            weight_sparsity_n=2, weight_sparsity_m=4, weight_sparsity_order='R'
+        ),
+    )
+    qx = qarray.quantize(x, how)
+    # Sparsified x: [[0, 0, 3, 4], [0, 0, 7, 8]]
+    # Quantized x should reflect these zeros.
+    dequant_x = qarray.dequantize(qx)
+    expected = jnp.array([[0.0, 0.0, 3.0, 4.0], [0.0, 0.0, 7.0, 8.0]])
+    self.assertTrue(jnp.allclose(dequant_x, expected, atol=1e-1))
+    self.assertTrue(jnp.all(dequant_x[0, :2] == 0))
+    self.assertTrue(jnp.all(dequant_x[1, :2] == 0))
 
 
 if __name__ == '__main__':
