@@ -15,9 +15,11 @@
 
 from absl.testing import absltest
 from absl.testing import parameterized
+from flax import nnx
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+from qwix._src import averaging
 from qwix._src import model as qwix_model
 from qwix._src.core import qarray
 from qwix._src.providers import ptq
@@ -190,6 +192,41 @@ class QuantizeParamsWithCalibrationTest(parameterized.TestCase):
     y_shared = ptq_model.apply({'params': shared_result}, x)
     y_direct = ptq_model.apply({'params': direct_result}, x)
     self.assertTrue(jnp.allclose(y_shared, y_direct))
+
+  def test_nnx_returns_pure_dict(self):
+    q_rules = [gptq.GptqRule(weight_qtype=jnp.int8)]
+    x = jnp.ones((4, 12))
+    model = nnx.Linear(in_features=12, out_features=6, rngs=nnx.Rngs(0))
+    abs_model = nnx.eval_shape(
+        lambda: qwix_model.quantize_model(model, ptq.PtqProvider(q_rules), x)
+    )
+    orig_params = nnx.to_pure_dict(nnx.state(model, nnx.Param))
+    fake_hessian = jnp.eye(12)
+    aggregator = averaging.SimpleMovingAverage()
+    quant_stats = {
+        'kernel_gptq': aggregator.update(
+            aggregator.init({'hessian': fake_hessian}),
+            {'hessian': fake_hessian},
+        )
+    }
+
+    def mock_quantize(prepared):
+      w = qarray.quantize(prepared.weight, prepared.how)
+      w = prepared.restore_shape(w)
+      return prepared.abs_w.replace(array=w)
+
+    result = calibration.quantize_params_with_calibration(
+        orig_params,
+        abs_model,
+        quant_stats,
+        '_gptq',
+        mock_quantize,
+    )
+
+    self.assertIsInstance(result, dict)
+    nnx.update(abs_model, result)
+    y = abs_model(x)
+    self.assertEqual(y.shape, (4, 6))
 
 
 if __name__ == '__main__':

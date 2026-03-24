@@ -18,12 +18,12 @@ import dataclasses
 from typing import Any, Callable
 
 import flax
+from flax import nnx
 import jax
 from jax import numpy as jnp
 from qwix._src import averaging
 from qwix._src import flax_util
 from qwix._src import qconfig
-from qwix._src.core import qarray
 from qwix._src.providers import ptq
 
 
@@ -32,7 +32,7 @@ class CalibrationProvider(qconfig.QuantizationProvider, metaclass=abc.ABCMeta):
 
   This provider handles the common boilerplate for all calibration providers:
   rule type checking, dimension validation, weight name lookup, and LHS
-  reshaping. Subclasses implement `_collect_stats` to define what happens
+  reshaping. Subclasses implement ``_collect_stats`` to define what happens
   with the validated, reshaped activations.
   """
 
@@ -45,7 +45,16 @@ class CalibrationProvider(qconfig.QuantizationProvider, metaclass=abc.ABCMeta):
     """Returns the suffix for the stats variable name (e.g., '_gptq')."""
 
   @abc.abstractmethod
-  def _collect_stats(self, lhs: jax.Array, weight_name: str) -> None:
+  def _collect_stats(
+      self,
+      lhs: jax.Array,
+      weight_name: str,
+      *,
+      module_path: tuple[str, ...],
+      op_name: str,
+      op_id: str | None,
+      lhs_id: int,
+  ) -> None:
     """Collects statistics from the reshaped input activations.
 
     Called after all validation passes. The LHS has already been reshaped
@@ -54,6 +63,10 @@ class CalibrationProvider(qconfig.QuantizationProvider, metaclass=abc.ABCMeta):
     Args:
       lhs: Input activations reshaped to (ca, rest) format.
       weight_name: The name of the weight parameter for this operation.
+      module_path: The current module path for this operation.
+      op_name: The intercepted operation name.
+      op_id: The operation identifier assigned by the quantization tracer.
+      lhs_id: Python object id of the original lhs before reshaping.
     """
 
   def dot_general(
@@ -63,11 +76,35 @@ class CalibrationProvider(qconfig.QuantizationProvider, metaclass=abc.ABCMeta):
       dimension_numbers: jax.lax.DotDimensionNumbers,
       *args,
       rule: qconfig.QuantizationRule | None = None,
+      op_id: str | None = None,
       **kwargs,
   ) -> jax.Array:
+    """Intercepts supported weight-bearing ``dot_general`` ops for calibration.
+
+    Subclasses do not need to reimplement the common matching and validation
+    logic. This method:
+
+    - resolves the active quantization rule and op id,
+    - rejects unsupported dimension-number patterns,
+    - identifies the weight parameter on the RHS,
+    - reshapes the LHS to ``(contracting_dim, rest)``, and
+    - delegates the actual stats handling to ``_collect_stats``.
+
+    Args:
+      lhs: The left-hand side array.
+      rhs: The right-hand side array.
+      dimension_numbers: The dimension numbers for the dot_general operation.
+      *args: Additional positional arguments to pass to dot_general.
+      rule: The quantization rule to apply.
+      op_id: The operation identifier assigned by the quantization tracer.
+      **kwargs: Additional keyword arguments to pass to dot_general.
+
+    Returns:
+      The result of the dot_general operation.
+    """
     res = jax.lax.dot_general(lhs, rhs, dimension_numbers, *args, **kwargs)
-    if rule is None:
-      rule, _ = self._get_current_rule_and_op_id('dot_general')
+    if rule is None or op_id is None:
+      rule, op_id = self._get_current_rule_and_op_id('dot_general')
 
     rule_type = self.get_rule_type()
     if not isinstance(rule, rule_type):
@@ -84,16 +121,25 @@ class CalibrationProvider(qconfig.QuantizationProvider, metaclass=abc.ABCMeta):
       # If we cannot identify the weight parameter, we skip calibration.
       return res
 
+    lhs_id = id(lhs)
     # Reorder lhs to (ca, rest) format.
     lhs = jnp.moveaxis(lhs, lhs_ca[0], 0)
     lhs = lhs.reshape(lhs.shape[0], -1)
 
-    self._collect_stats(lhs, weight_name)
+    self._collect_stats(
+        lhs,
+        weight_name,
+        module_path=tuple(map(str, flax_util.get_current_module_path())),
+        op_name='dot_general',
+        op_id=op_id,
+        lhs_id=lhs_id,
+    )
 
     return res
 
   def einsum(self, einsum_str, *operands, **kwargs):
-    rule, _ = self._get_current_rule_and_op_id('einsum')
+    """Intercepts supported binary ``einsum`` ops via their lowered dot call."""
+    rule, op_id = self._get_current_rule_and_op_id('einsum')
     rule_type = self.get_rule_type()
     if not isinstance(rule, rule_type):
       return jnp.einsum(einsum_str, *operands, **kwargs)
@@ -103,7 +149,7 @@ class CalibrationProvider(qconfig.QuantizationProvider, metaclass=abc.ABCMeta):
 
     def stats_dot_general(lhs, rhs, dimension_numbers, *args, **kwargs):
       return self.dot_general(
-          lhs, rhs, dimension_numbers, *args, rule=rule, **kwargs
+          lhs, rhs, dimension_numbers, *args, rule=rule, op_id=op_id, **kwargs
       )
 
     with jax.disable_jit():
@@ -124,16 +170,27 @@ class CalibrationProvider(qconfig.QuantizationProvider, metaclass=abc.ABCMeta):
 class SinglePassCalibrationProvider(CalibrationProvider, metaclass=abc.ABCMeta):
   """Calibration provider that collects single-pass statistics.
 
-  This provider implements the simple stats template: `compute_stats`
-  produces a dict of arrays, which are accumulated into the `quant_stats`
-  collection using `SimpleMovingAverage`.
+  This provider implements the simple stats template: ``compute_stats``
+  produces a dict of arrays, which are accumulated into the ``quant_stats``
+  collection using ``SimpleMovingAverage``.
   """
 
   @abc.abstractmethod
   def compute_stats(self, lhs: jax.Array) -> dict[str, Any]:
     """Computes statistics from the input array."""
 
-  def _collect_stats(self, lhs: jax.Array, weight_name: str) -> None:
+  def _collect_stats(
+      self,
+      lhs: jax.Array,
+      weight_name: str,
+      *,
+      module_path: tuple[str, ...],
+      op_name: str,
+      op_id: str | None,
+      lhs_id: int,
+  ) -> None:
+    """Accumulates one batch of single-pass calibration statistics."""
+    del module_path, op_name, op_id, lhs_id
     stats = self.compute_stats(lhs)
     aggregator = averaging.SimpleMovingAverage()
     var_name = weight_name + self.get_stats_suffix()
@@ -146,7 +203,7 @@ class SinglePassCalibrationProvider(CalibrationProvider, metaclass=abc.ABCMeta):
 
 def normalize_weight(
     x: jax.Array, contraction_axis: int
-) -> tuple[jax.Array, Callable[..., qarray.MaybeQArray]]:
+) -> tuple[jax.Array, Callable[..., Any]]:
   """Normalizes a weight tensor into (rows, columns) format.
 
   Reshapes a weight tensor of arbitrary rank into a 2D matrix where the
@@ -175,7 +232,7 @@ def normalize_weight(
 
 @dataclasses.dataclass(frozen=True)
 class CalibratedQuantContext:
-  """Context containing a weight, calibration stats, and quantization metadata.
+  """A weight prepared for algorithm-specific quantization.
 
   Attributes:
     weight: Normalized weight in (rows, columns) format.
@@ -192,8 +249,56 @@ class CalibratedQuantContext:
   calibration_stats: dict[str, jax.Array]
   abs_w: ptq.WithAux
   contracting_axis: int
-  restore_shape: Callable[..., qarray.MaybeQArray]
+  restore_shape: Callable[..., Any]
   path: tuple[str, ...]
+
+
+def extract_calibrated_quant_context(
+    path: tuple[str, ...],
+    weight: jax.Array,
+    abs_w: ptq.WithAux,
+    stats: Any,
+) -> CalibratedQuantContext | None:
+  """Extracts the calibration context for a single weight.
+
+  Args:
+    path: The dictionary path for this weight.
+    weight: Floating-point weight to quantize.
+    abs_w: The WithAux wrapper from the abstract quantized tree.
+    stats: The calibration statistics for this weight.
+
+  Returns:
+    The CalibratedQuantContext, or None if the weight cannot be quantized
+    (e.g., if there is not exactly one contracting axis).
+  """
+  # Get the contracting axis by assuming that all non-contracting axes
+  # are in channelwise_axes.
+  contracting_axis = set(range(weight.ndim)) - set(abs_w.how.channelwise_axes)
+  if len(contracting_axis) != 1:
+    # Fallback to PTQ if we can't identify a single contracting axis.
+    return None
+  contracting_axis = contracting_axis.pop()
+
+  # Normalize the weight to (ra, ca) format.
+  w_norm, restore_shape = normalize_weight(weight, contracting_axis)
+  how = dataclasses.replace(abs_w.how, channelwise_axes=[0])
+  if contracting_axis in how.tiled_axes:
+    how = dataclasses.replace(
+        how, tiled_axes={1: how.tiled_axes[contracting_axis]}
+    )
+
+  # Get calibration stats.
+  calibration_stats = averaging.SimpleMovingAverage().get_calibration(stats)
+
+  return CalibratedQuantContext(
+      weight=w_norm,
+      how=how,
+      calibration_stats=calibration_stats,
+      abs_w=abs_w,
+      contracting_axis=contracting_axis,
+      restore_shape=restore_shape,
+      path=path,
+  )
 
 
 def quantize_params_with_calibration(
@@ -210,7 +315,7 @@ def quantize_params_with_calibration(
   This function handles the common boilerplate for all calibration-based
   quantization algorithms (GPTQ, QEP, AWQ): parameter iteration, stats
   lookup, weight normalization, and PTQ fallback. The algorithm-specific
-  logic is provided via `quantize_fn`.
+  logic is provided via ``quantize_fn``.
 
   Args:
     params: The floating-point param tree to quantize.
@@ -237,36 +342,11 @@ def quantize_params_with_calibration(
       not_quantized_params[path] = w
       continue
 
-    # Get the contracting axis by assuming that all non-contracting axes
-    # are in channelwise_axes.
-    contracting_axis = set(range(w.ndim)) - set(abs_w.how.channelwise_axes)
-    if len(contracting_axis) != 1:
-      # Fallback to PTQ if we can't identify a single contracting axis.
+    ctx = extract_calibrated_quant_context(path, w, abs_w, stats)
+    if ctx is None:
       not_quantized_params[path] = w
       continue
-    contracting_axis = list(contracting_axis)[0]
 
-    # Normalize the weight to (ra, ca) format.
-    w_norm, restore_shape = normalize_weight(w, contracting_axis)
-    how = dataclasses.replace(abs_w.how, channelwise_axes=[0])
-    if contracting_axis in how.tiled_axes:
-      how = dataclasses.replace(
-          how, tiled_axes={1: how.tiled_axes[contracting_axis]}
-      )
-
-    # Get calibration stats.
-    calibration_stats = averaging.SimpleMovingAverage().get_calibration(stats)
-
-    # Delegate to algorithm-specific quantization.
-    ctx = CalibratedQuantContext(
-        weight=w_norm,
-        how=how,
-        calibration_stats=calibration_stats,
-        abs_w=abs_w,
-        contracting_axis=contracting_axis,
-        restore_shape=restore_shape,
-        path=path,
-    )
     quantized_params[path] = quantize_fn(ctx)
 
   # PTQ fallback for non-quantized params.
@@ -279,4 +359,7 @@ def quantize_params_with_calibration(
   ptq_quantized_params = flax.traverse_util.flatten_dict(ptq_quantized_params)
   quantized_params.update(ptq_quantized_params)
 
+  if isinstance(abstract_quantized_params, nnx.Module):
+    quantized_params = nnx.to_pure_dict(nnx.state(quantized_params))
+    return flax.traverse_util.unflatten_dict(quantized_params)
   return flax.traverse_util.unflatten_dict(quantized_params)
