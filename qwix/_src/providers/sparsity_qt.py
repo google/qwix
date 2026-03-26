@@ -17,26 +17,23 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 from qwix._src import flax_util
-from qwix._src import qconfig
 from qwix._src.core import sparsity
 
 
 class SparsityModule(nn.Module):
   """Sparsity module for Flax."""
 
-  sparsity_rule: qconfig.SparsityRule | None = None
+  sparsity_rule: sparsity.SparsityRule | None = None
 
   def _maybe_update_mask(
       self,
       weight: jax.Array,
       step: jax.Array,
+      mask_val: jax.Array,
   ) -> jax.Array:
     """Updates the sparsity mask based on the current step and config."""
 
-    mask_val = flax_util.get_or_create_variable(
-        'compression', 'mask', lambda: jnp.ones(weight.shape, jnp.bool_)
-    )
-    # NOTE: Reshape if mask and wesight have shape mismatch.
+    # NOTE: Reshape if mask and weight have shape mismatch.
     if mask_val.shape != weight.shape:
       mask_val = jnp.reshape(mask_val, weight.shape)
 
@@ -112,7 +109,9 @@ class SparsityModule(nn.Module):
       ):
         # Do not update mask for eval.
         if not self.sparsity_rule.eval_mode:
-          new_mask = self._maybe_update_mask(weight=weight, step=step.value)
+          new_mask = self._maybe_update_mask(
+              weight=weight, step=step.value, mask_val=mask.value
+          )
           mask.value = new_mask
           step.value = step.value + 1
 
