@@ -51,7 +51,6 @@ def dot(
     _qwix_dot_general: Internal argument for dependency injection of the
       underlying ``dot_general`` implementation. Defaults to
       ``qwix.dot_general``.
-
   Returns:
     The dot product of ``a`` and ``b``.
   """
