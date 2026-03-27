@@ -267,6 +267,87 @@ class OrbaxSafetensorsIntegrationTest(absltest.TestCase):
     self.assertTrue(hasattr(q_proj_weight.array, "qvalue"))
     self.assertEqual(q_proj_weight.array.qvalue.dtype, jnp.float8_e4m3fn)
 
+  def test_load_prequantized_2d_blocksize_checkpoints(self):
+    dir_1d = self.create_tempdir().full_path
+    path_1d = epath.Path(dir_1d)
+    dir_2d = self.create_tempdir().full_path
+    path_2d = epath.Path(dir_2d)
+
+    tile_size = 32
+    # Weights are 128x128, tile_size 32 means 4 blocks per axis.
+    scales_2d = np.random.uniform(0.1, 1.0, size=(4, 4)).astype(np.float32)
+    scales_1d = np.repeat(scales_2d, tile_size, axis=1)
+    qvalue = np.random.randint(-128, 127, size=(128, 128), dtype=np.int8)
+
+    flat_tree_1d = {
+        "model.language_model.embed_tokens.weight.qvalue": qvalue,
+        "model.language_model.embed_tokens.weight.scale": scales_1d,
+        "model.language_model.layers.0.linear_attn.q_proj.weight.qvalue": (
+            qvalue
+        ),
+        "model.language_model.layers.0.linear_attn.q_proj.weight.scale": (
+            scales_1d
+        ),
+    }
+    flat_tree_2d = {
+        "model.language_model.embed_tokens.weight.qvalue": qvalue,
+        "model.language_model.embed_tokens.weight.scale": scales_2d,
+        "model.language_model.layers.0.linear_attn.q_proj.weight.qvalue": (
+            qvalue
+        ),
+        "model.language_model.layers.0.linear_attn.q_proj.weight.scale": (
+            scales_2d
+        ),
+    }
+
+    snp.save_file(flat_tree_1d, path_1d / "model.safetensors")
+    snp.save_file(flat_tree_2d, path_2d / "model.safetensors")
+
+    devices = jax.devices()
+    mesh = jax.sharding.Mesh(np.array(devices), ("x",))
+
+    loaded_quant_params_1d = load_nested_safetensors(str(path_1d), mesh=mesh)
+    loaded_quant_params_2d = load_nested_safetensors(str(path_2d), mesh=mesh)
+
+    q_rule = qwix.QuantizationRule(
+        module_path=".*",
+        weight_qtype="float8_e4m3fn",
+        act_qtype="float8_e4m3fn",
+        act_static_scale=False,
+        tile_size=tile_size,
+    )
+
+    model_input = jnp.ones((1, 128))
+
+    with jax.set_mesh(mesh):
+
+      def create_quantized_model():
+        return nnx.eval_shape(
+            lambda: qwix.quantize_model(
+                CustomTestModel(rngs=nnx.Rngs(0)),
+                qwix.PtqProvider([q_rule]),
+                model_input,
+            )
+        )
+
+      model_1d = create_quantized_model()
+      model_2d = create_quantized_model()
+
+      processed_params_1d = qwix.process_prequantized_params(
+          loaded_quant_params_1d, model_1d
+      )
+      nnx.update(model_1d, processed_params_1d)
+
+      processed_params_2d = qwix.process_prequantized_params(
+          loaded_quant_params_2d, model_2d
+      )
+      nnx.update(model_2d, processed_params_2d)
+
+    out_1d = model_1d(model_input)
+    out_2d = model_2d(model_input)
+
+    np.testing.assert_allclose(out_1d, out_2d, rtol=1e-5, atol=1e-5)
+
 
 if __name__ == "__main__":
   absltest.main()

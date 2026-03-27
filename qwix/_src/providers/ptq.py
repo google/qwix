@@ -653,6 +653,7 @@ def _apply_sharding_and_dtype(
     value: Any,
     abstract_value: Any,
     path: tuple[str, ...],
+    allow_broadcast: bool = False,
 ) -> jax.Array:
   """Converts a host/device array-like value into the template's array shape."""
   abstract_value = flax_util.unbox(abstract_value)
@@ -673,9 +674,17 @@ def _apply_sharding_and_dtype(
     value = jnp.asarray(value, dtype=abstract_value.dtype)
 
   if value.shape != abstract_value.shape:
-    raise ValueError(
-        f'{path} has shape {value.shape}, expected {abstract_value.shape}.'
-    )
+    if allow_broadcast:
+      try:
+        value = qarray.broadcast_to(value, abstract_value.shape)
+      except Exception as e:
+        raise ValueError(
+            f'{path} has shape {value.shape}, expected {abstract_value.shape}.'
+        ) from e
+    else:
+      raise ValueError(
+          f'{path} has shape {value.shape}, expected {abstract_value.shape}.'
+      )
 
   return value
 
@@ -736,7 +745,9 @@ def _process_quantized_param(
 
   abs_array = abs_param.array
   qvalue = _apply_sharding_and_dtype(payload['qvalue'], abs_array.qvalue, path)
-  scale = _apply_sharding_and_dtype(payload['scale'], abs_array.scale, path)
+  scale = _apply_sharding_and_dtype(
+      payload['scale'], abs_array.scale, path, allow_broadcast=True
+  )
 
   expected_zero_point = abs_array.zero_point
   zero_point = payload.get('zero_point')
@@ -749,7 +760,7 @@ def _process_quantized_param(
     raise ValueError(f'{path} is missing required quantized leaf "zero_point".')
   if expected_zero_point is not None:
     zero_point = _apply_sharding_and_dtype(
-        zero_point, expected_zero_point, path
+        zero_point, expected_zero_point, path, allow_broadcast=True
     )
 
   qarray_leaf = qarray.QArray(
