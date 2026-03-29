@@ -146,6 +146,32 @@ class DotGeneralTest(parameterized.TestCase):
     self.assertEqual(res.shape, (4, 4))
     self.assertTrue(jnp.allclose(res, jnp.full((4, 4), 8.0), atol=0.1))
 
+  def test_kernel_dot_general(self):
+    lhs = jnp.ones((4, 8), jnp.float32)
+    rhs = jnp.ones((8, 16), jnp.float32)
+
+    # Channelwise on axis 1 (contracting)
+    lhs_how = qarray.HowToQuantize(
+        qtype=jnp.int8,
+        tiled_axes={1: 1},
+    )
+    # Channelwise on axis 0 (contracting)
+    rhs_how = qarray.HowToQuantize(
+        qtype=jnp.int8,
+        tiled_axes={0: 1},
+    )
+
+    q_lhs = qarray.quantize(lhs, lhs_how)
+    q_rhs = qarray.quantize(rhs, rhs_how)
+
+    _ = dot_general.dot_general(
+        q_lhs,
+        q_rhs,
+        (([1], [0]), ([], [])),
+        use_kernel=True,
+        kernel_kwargs=dict(bm=4, bn=4, bk=1),
+    )
+
 
 if __name__ == '__main__':
   absltest.main()

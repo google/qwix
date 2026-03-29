@@ -19,6 +19,7 @@ import itertools
 from typing import Any
 import jax
 from jax import numpy as jnp
+from jax.experimental import pallas as pl
 from qwix._src.core import numerics
 from qwix._src.core import qarray
 
@@ -97,6 +98,7 @@ def _apply_tiling(
   Returns:
     A tuple of (new_ca, new_ba, sum_axes).
   """
+  a = 0
   new_ca = [a + sum(t <= a for t in tiled_axes) for a in contracting_axes]
   new_ba = [a + sum(t < a for t in tiled_axes) for a in batch_axes]
   # We choose to insert the tile_count axes to the end of the batch axes.
@@ -391,6 +393,75 @@ def loop_dot_general(
 # If a contracting dimension has a tile size smaller than this threshold, tiled
 # dot general will be inefficient and we should dequantize the input first.
 MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT = 128
+INTERPRET: bool = True
+
+
+def quantized_matmul_kernel(x_ref, sx_ref, y_ref, sy_ref, o_ref):
+  @pl.when(pl.program_id(2) == 0)
+  def _():
+    o_ref[...] = jnp.zeros_like(o_ref)
+
+  o_ref[...] += (
+      jnp.matmul(x_ref[...], y_ref[...]).astype(sx_ref.dtype)
+      * sx_ref[...]
+      * sy_ref[...]
+  )
+
+
+def q_matmul(x, sx, y, sy, *, bm=128, bk=128, bn=128, dtype=jnp.float32):
+  """Computes a quantized matmul with support for subchannel quantization."""
+  mdim, kdim = x.shape
+  _, ndim = y.shape
+  k_tiles = sx.shape[1]
+
+  # Block specs for x and y.
+  assert mdim % bm == 0, f'Block size must divide matrix size,  {mdim=} {bm=}'
+  assert ndim % bn == 0, f'Block size must divide matrix size,  {ndim=} {bn=}'
+  assert kdim % bk == 0, f'Block size must divide matrix size,  {kdim=} {bk=}'
+  grid = (mdim // bm, ndim // bn, kdim // bk)
+  x_blockspec = pl.BlockSpec((bm, bk), lambda a, b, c: (a, c))
+  y_blockspec = pl.BlockSpec((bk, bn), lambda a, b, c: (c, b))
+
+  # Block specs for sx and sy.
+  # (M, K) * (K, N) and (m, k) * (k, n)
+  # We also have bm, bk, bn
+
+  # k information
+  k_tile_size = kdim // k_tiles
+  assert k_tile_size == bk, (
+      'Block size must match the tile size for the reduction axis'
+      f' {k_tile_size=} {bk=}'
+  )
+  assert sx.shape[1] == sy.shape[0], 'Number of tiles must match for the scales'
+
+  # m information
+  if sx.shape[0] == 1:
+    sx_blockspec = pl.BlockSpec((1, 1), lambda a, b, c: (0, c))
+  else:
+    scale_m_size = sx.shape[0] // grid[0]
+    assert (
+        sx.shape[0] % grid[0] == 0
+    ), f'Block size must divide scale size,  {sx.shape[0]=} {grid[0]=}'
+    sx_blockspec = pl.BlockSpec((scale_m_size, 1), lambda a, b, c: (a, c))
+
+  # n information
+  if sy.shape[1] == 1:
+    sy_blockspec = pl.BlockSpec((1, 1), lambda a, b, c: (c, 0))
+  else:
+    scale_n_size = sy.shape[1] // grid[1]
+    assert (
+        sy.shape[1] % grid[1] == 0
+    ), f'Block size must divide scale size,  {sy.shape[1]=} {grid[1]=}'
+    sy_blockspec = pl.BlockSpec((1, scale_n_size), lambda a, b, c: (c, b))
+
+  return pl.pallas_call(
+      quantized_matmul_kernel,
+      out_shape=jax.ShapeDtypeStruct((mdim, ndim), dtype),
+      grid=grid,
+      in_specs=(x_blockspec, sx_blockspec, y_blockspec, sy_blockspec),
+      out_specs=pl.BlockSpec((bm, bn), lambda a, b, c: (a, b)),
+      interpret=INTERPRET,
+  )(x, sx, y, sy).astype(dtype)
 
 
 def dot_general(
@@ -399,6 +470,9 @@ def dot_general(
     dimension_numbers: jax.lax.DotDimensionNumbers,
     precision: jax.lax.PrecisionLike = None,
     preferred_element_type: jax.typing.DTypeLike | None = None,
+    *,
+    use_kernel: bool = False,
+    kernel_kwargs: dict[str, Any] | None = None,
     **kwargs,
 ) -> jax.Array:
   """Computes a general dot product with support for ``QArray`` inputs.
@@ -413,6 +487,8 @@ def dot_general(
     dimension_numbers: The dimension numbers passed to dot_general.
     precision: The precision for jax.lax.dot_general.
     preferred_element_type: The preferred element type for jax.lax.dot_general.
+    use_kernel: Whether to use the Pallas kernel implementation.
+    kernel_kwargs: Keyword arguments to pass to the Pallas kernel.
     **kwargs: Additional keyword arguments to dot_general.
 
   Returns:
@@ -452,6 +528,28 @@ def dot_general(
         if tile_size < MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT:
           use_fast_dot_general = False
           break
+
+  if (
+      use_kernel
+      and isinstance(lhs, qarray.QArray)
+      and isinstance(rhs, qarray.QArray)
+      and lhs.zero_point is None
+      and rhs.zero_point is None
+  ):
+    # now check that this is performing a dot since this kernel only supports dot.
+    # assert dimension_numbers[0][0] == dimension_numbers[1][1]
+    # assert dimension_numbers == (((1,), (0,)), ((), ()))
+    # Doing these checks manually
+    assert len(dimension_numbers) == 2
+    assert len(dimension_numbers[0]) == 2
+    assert len(dimension_numbers[1]) == 2
+    assert tuple(dimension_numbers[0][0]) == (1,)
+    assert tuple(dimension_numbers[0][1]) == (0,)
+    assert len(dimension_numbers[1][0]) == 0
+    assert len(dimension_numbers[1][1]) == 0
+    return q_matmul(
+        lhs.qvalue, lhs.scale, rhs.qvalue, rhs.scale, **kernel_kwargs
+    )
 
   if use_fast_dot_general:
     return _fast_dot_general(
