@@ -303,8 +303,6 @@ class HowToQuantize:
   # Noise function to use for stochastic rounding.
   noise_fn: numerics.NoiseFn | None = None
 
-  # NOTE: Add support for HowToSparsify sparsify configuration for weights.
-  sparsity_rule: sparsity.SparsityRule | None = None
 
 
 ShapeT: TypeAlias = Sequence[int]
@@ -614,8 +612,7 @@ def quantize_with_scale_zero_point(
 
 def quantize(array: jax.Array, how: HowToQuantize) -> QArray:
   """Quantizes an array using a dynamic range."""
-  if how.sparsity_rule is not None:
-    array = sparsify(array, how.sparsity_rule)
+
   calibration = calibrate(array, how)
   scale, zero_point = compute_scale_zero_point(calibration, how.qtype)
   return quantize_with_scale_zero_point(
