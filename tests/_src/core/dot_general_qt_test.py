@@ -19,6 +19,7 @@ from jax import numpy as jnp
 from qwix._src.core import dot_general
 from qwix._src.core import dot_general_qt
 from qwix._src.core import qarray
+from qwix._src.core import sparsity
 
 
 def _fake_quant(
@@ -282,6 +283,26 @@ class DotGeneralQtTest(parameterized.TestCase):
     )
 
     self.assertFalse(jnp.array_equal(grads_unmasked, grads_masked))
+
+  def test_sparsity_rule(self):
+    """Verifies that DotGeneralQtConfig accepts sparsity_rule and it doesn't crash."""
+    rule = sparsity.SparsityRule(
+        weight_sparsity_n=2,
+        weight_sparsity_m=4,
+    )
+    config = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='int8',
+        rhs_qtype='int8',
+        sparsity_rule=rule,
+    )
+    self.assertEqual(config.sparsity_rule, rule)
+
+    lhs = jax.random.normal(jax.random.key(0), (2, 4), jnp.float32)
+    rhs = jax.random.normal(jax.random.key(1), (4, 2), jnp.float32)
+    dimension_numbers = (((1,), (0,)), ((), ()))
+
+    # Verify that dot_general_qt runs with the config without crashing.
+    dot_general_qt.dot_general_qt(lhs, rhs, dimension_numbers, config)
 
 
 if __name__ == '__main__':

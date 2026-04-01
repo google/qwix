@@ -24,6 +24,7 @@ from qwix._src import interception
 from qwix._src.core import dot_general
 from qwix._src.core import numerics
 from qwix._src.core import qarray
+from qwix._src.core import sparsity
 
 
 @dataclasses.dataclass(slots=True, frozen=True, kw_only=True)
@@ -76,6 +77,8 @@ class DotGeneralQtConfig:
   drhs_residual_qtype: jax.typing.DTypeLike | None = None
   drhs_residual_calibration_method: str = 'absmax'
   drhs_residual_disable_channelwise_axes: bool = False
+
+  sparsity_rule: sparsity.SparsityRule | None = None
 
 
 def _ranges_like(*xs):
@@ -331,6 +334,9 @@ def dot_general_qt(
     rhs_calibration = qarray.calibrate(rhs, rhs_how)
     if config.rhs_collect_quant_stat:
       rhs_calibration = config.rhs_collect_quant_stat(rhs_calibration)
+
+  if config.sparsity_rule is not None:
+    rhs = qarray.sparsify(rhs, config.sparsity_rule)
 
   return dot_general_qt_fwd_bwd(
       lhs, rhs, lhs_calibration, rhs_calibration, dimension_numbers, config

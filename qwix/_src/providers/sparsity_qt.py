@@ -17,14 +17,13 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 from qwix._src import flax_util
-from qwix._src import qconfig
 from qwix._src.core import sparsity
 
 
 class SparsityModule(nn.Module):
   """Sparsity module for Flax."""
 
-  sparsity_rule: qconfig.SparsityRule | None = None
+  sparsity_rule: sparsity.SparsityRule | None = None
 
   def _maybe_update_mask(
       self,

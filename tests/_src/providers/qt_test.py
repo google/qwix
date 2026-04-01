@@ -20,6 +20,7 @@ from jax import numpy as jnp
 from qwix._src import flax_util
 from qwix._src import model as qwix_model
 from qwix._src import qconfig
+from qwix._src.core import sparsity
 from qwix._src.providers import qt
 
 
@@ -167,6 +168,37 @@ class QtTest(absltest.TestCase):
         quant_stats["dot_general0_lhs"]["sum_of_absmax"], act_sum_of_absmax
     )
     self.assertEqual(quant_stats["dot_general0_lhs"]["count"], 2)
+
+  def test_dot_general_with_sparsity(self):
+    """Tests that dot_general applies sparsity to rhs."""
+    lhs = jnp.ones((1, 4), dtype=jnp.bfloat16)
+    rhs = jnp.ones((4, 1), dtype=jnp.bfloat16)
+
+    rule = qt.QtRule(
+        weight_qtype=jnp.int8,
+        additional_qt_config={
+            "sparsity_rule": sparsity.SparsityRule(
+                weight_sparsity_n=2,
+                weight_sparsity_m=4,
+            )
+        },
+    )
+    provider = qt.QtProvider([rule])
+
+    class TestModule(nn.Module):
+      provider: qt.QtProvider
+
+      def __call__(self, lhs, rhs):
+        dimension_numbers = (((1,), (0,)), ((), ()))
+        return self.provider.dot_general(lhs, rhs, dimension_numbers)
+
+    module = TestModule(provider)
+    out = module.apply({}, lhs, rhs)
+
+    # 2:4 sparsity means 2 elements non-zero in each block of 4.
+    # Since rhs is all ones, sparsifying it will make 2 elements zero.
+    # So the dot product of ones(1,4) and sparsified ones(4,1) should be 2.0.
+    self.assertEqual(out, jnp.array([[2.0]], dtype=jnp.bfloat16))
 
 
 if __name__ == "__main__":
