@@ -1,4 +1,4 @@
-# Copyright 2024 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,17 +13,44 @@
 # limitations under the License.
 """Core sparsity quantized training support."""
 
-import flax.linen as nn
+from flax import nnx
 import jax
 import jax.numpy as jnp
-from qwix._src import flax_util
 from qwix._src.core import sparsity
 
 
-class SparsityModule(nn.Module):
-  """Sparsity module for Flax."""
+class SparsityModule(nnx.Module):
+  """A stateful module for managing and applying structured sparsity in Flax NNX.
 
-  sparsity_rule: sparsity.SparsityRule | None = None
+  This module tracks the training step and maintains a persistent sparsity mask
+  as `nnx.BatchStat` variables (effectively part of the model's batch stats,
+  not trainable parameters). It can be used to apply structured N:M sparsity
+  to activations and/or weights.
+
+  For weight sparsity, it periodically updates a cached boolean mask based on
+  the `SparsityRule` and applied it to the weights. For activation sparsity,
+  it computes and applies the mask dynamically on each call if enabled.
+
+  Attributes:
+    step: An `nnx.BatchStat` tracking the number of update steps.
+    mask: An `nnx.BatchStat` holding the persistent boolean mask for weights.
+    sparsity_rule: The `SparsityRule` configuration.
+  """
+
+  step: nnx.BatchStat
+  mask: nnx.BatchStat
+
+  def __init__(
+      self,
+      shape: tuple[int, ...],
+      sharding_axes: tuple[jax.sharding.PartitionSpec | None, ...],
+      sparsity_rule: sparsity.SparsityRule | None = None,
+  ):
+    self.sparsity_rule = sparsity_rule
+    self.step = nnx.BatchStat(jnp.zeros([], jnp.int32))
+    self.mask = nnx.BatchStat(
+        jnp.ones(shape, jnp.bool_), sharding=sharding_axes
+    )
 
   def _maybe_update_mask(
       self,
@@ -31,13 +58,9 @@ class SparsityModule(nn.Module):
       step: jax.Array,
   ) -> jax.Array:
     """Updates the sparsity mask based on the current step and config."""
-
-    mask_val = flax_util.get_or_create_variable(
-        'compression', 'mask', lambda: jnp.ones(weight.shape, jnp.bool_)
-    )
-    # NOTE: Reshape if mask and wesight have shape mismatch.
+    mask_val = self.mask.value
     if mask_val.shape != weight.shape:
-      mask_val = jnp.reshape(mask_val, weight.shape)
+      mask_val = mask_val[tuple(slice(0, s) for s in weight.shape)]
 
     def mask_update(w: jax.Array, mask_val: jax.Array) -> jax.Array:  # pylint: disable=unused-argument
       if self.sparsity_rule is None:
@@ -65,7 +88,8 @@ class SparsityModule(nn.Module):
           % self.sparsity_rule.weight_sparsity_update_step,
           0,
       )
-      return jnp.logical_and(in_update_window, is_update_step)
+      should_update = jnp.logical_and(in_update_window, is_update_step)
+      return should_update
 
     new_mask_val = jax.lax.cond(
         should_update_mask(step),
@@ -76,7 +100,6 @@ class SparsityModule(nn.Module):
     )
     return new_mask_val
 
-  @nn.compact
   def __call__(
       self, inputs: jax.Array, weight: jax.Array
   ) -> tuple[jax.Array, jax.Array]:
@@ -97,29 +120,17 @@ class SparsityModule(nn.Module):
           input_mask, inputs, jnp.zeros(inputs.shape, inputs.dtype)
       )
     if self.sparsity_rule.weight_sparsity_m != 0:
+      if self.mask is None:
+        self.mask = nnx.BatchStat(jnp.ones(weight.shape, jnp.bool_))
 
-      step = flax_util.get_or_create_variable(
-          'compression', 'step', lambda: jnp.zeros([], jnp.int32)
+      # Only update if not in eval mode
+      if not self.sparsity_rule.eval_mode:
+        new_mask = self._maybe_update_mask(weight=weight, step=self.step.value)
+        self.mask.value = new_mask
+        self.step.value = self.step.value + 1
+
+      weight = jnp.where(
+          self.mask.value, weight, jnp.zeros(weight.shape, weight.dtype)
       )
-
-      mask = flax_util.get_or_create_variable(
-          'compression', 'mask', lambda: jnp.ones(weight.shape, jnp.bool_)
-      )
-
-      if not self.is_initializing() and self.has_variable(
-          'compression', 'mask'
-      ):
-        # Do not update mask for eval.
-        if not self.sparsity_rule.eval_mode:
-          new_mask = self._maybe_update_mask(weight=weight, step=step.value)
-          mask.value = new_mask
-          step.value = step.value + 1
-
-        # Unless updated mask is all ones, so we apply mask irrespective of
-        # start_step
-
-        weight = jnp.where(
-            mask.value, weight, jnp.zeros(weight.shape, weight.dtype)
-        )
 
     return inputs, weight
