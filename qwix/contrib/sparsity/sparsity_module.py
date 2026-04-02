@@ -126,7 +126,6 @@ class SparsityModule(nnx.Module):
       # Only update if not in eval mode
       if not self.sparsity_rule.eval_mode:
         new_mask = self._maybe_update_mask(weight=weight, step=self.step.value)
-        jax.debug.print('amanda Current Sparsity Step: {s}', s=self.step.value)
         self.mask.value = new_mask
         self.step.value = self.step.value + 1
 
