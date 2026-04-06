@@ -14,8 +14,7 @@
 """Tests for QEP core algorithms."""
 
 import functools
-import logging
-
+from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax

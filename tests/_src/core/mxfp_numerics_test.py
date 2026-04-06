@@ -33,7 +33,7 @@ Hardware Support Summary:
 - CPU: Currently raises NotImplementedError in JAX.
 """
 
-import logging
+from absl import logging
 from absl.testing import absltest
 import jax
 import jax.numpy as jnp

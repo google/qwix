@@ -13,9 +13,9 @@
 # limitations under the License.
 
 import functools
-import logging
 import time
 
+from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax

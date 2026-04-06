@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
 from unittest import mock
+
+from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
