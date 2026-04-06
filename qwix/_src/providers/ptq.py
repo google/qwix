@@ -101,13 +101,14 @@ class PtqProvider(qconfig.QuantizationProvider):
       self,
       rules: Sequence[qconfig.QuantizationRule],
       *,
+      disable_jit: bool = False,
       _qarray_module=qarray,
       _dot_general_fn=dot_general.dot_general,
       _einsum_fn=einsum.einsum,
       _conv_general_dilated_fn=conv_general.conv_general_dilated,
   ):
     """Initializes the PTQ provider."""
-    super().__init__(rules)
+    super().__init__(rules, disable_jit=disable_jit)
     self._qarray_module = _qarray_module
     self._dot_general_fn = _dot_general_fn
     self._einsum_fn = _einsum_fn

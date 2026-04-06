@@ -104,14 +104,18 @@ class QuantizationProvider:
   injected into the model by using interception.py.
   """
 
-  def __init__(self, rules: Sequence[QuantizationRule]):
+  def __init__(
+      self, rules: Sequence[QuantizationRule], *, disable_jit: bool = False
+  ):
     """Initialize the provider.
 
     Args:
       rules: The quantization rules in the order of precedence.
+      disable_jit: Whether to disable JIT when wrapping methods.
     """
     self._rules = [self._init_rule(rule) for rule in rules]
     self._logged_ops = set()
+    self.disable_jit = disable_jit
 
   def _init_rule(self, rule: QuantizationRule) -> QuantizationRule:
     """Validate and set default values for the rule."""
@@ -125,20 +129,24 @@ class QuantizationProvider:
 
   def get_intercept_map(self) -> dict[str, Callable[..., Any]]:
     """Returns the intercept map for interception.wrap_func_intercepted."""
-    # Common functions that are intercepted by all quantization providers.
+    # Use bound methods instead of lambdas for the intercept map to ensure
+    # stable hash values. Lambdas create new instances and different hashcodes
+    # whenever this method is called, which affects the interceptor identity.
     intercept_map = {
-        'qwix._src.qconfig.get_current_rule': (
-            lambda op: self._get_current_rule_and_op_id(op, only_rule=True)[0]
-        )
+        'qwix._src.qconfig.get_current_rule': self._get_current_rule_only
     }
     if interception.has_attribute('jax.experimental.pallas.pallas_call'):
       # Disable interception for ops in pallas_call.
       intercept_map['jax.experimental.pallas.pallas_call'] = (
-          lambda *args, **kwargs: interception.disable_interceptions(
-              pl.pallas_call(*args, **kwargs)
-          )
+          self._pallas_call_disable_interceptions
       )
     return intercept_map
+
+  def _get_current_rule_only(self, op: str) -> QuantizationRule | None:
+    return self._get_current_rule_and_op_id(op, only_rule=True)[0]
+
+  def _pallas_call_disable_interceptions(self, *args, **kwargs) -> Any:
+    return interception.disable_interceptions(pl.pallas_call)(*args, **kwargs)
 
   def get_interceptors(
       self,
