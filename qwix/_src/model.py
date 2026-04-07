@@ -267,6 +267,5 @@ def _apply_interceptors(
         ),
         output_transform=output_transform if is_last else lambda x: x,
         should_intercept=should_intercept,
-        disable_jit=provider.disable_jit,
     )
   return method

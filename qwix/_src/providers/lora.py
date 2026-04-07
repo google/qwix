@@ -138,7 +138,7 @@ class LoraProvider(ptq.PtqProvider):
   during LoRA training.
   """
 
-  def __init__(self, rules=None, *, disable_jit: bool = False, **kwargs):
+  def __init__(self, rules=None, **kwargs):
     """Initializes the LoraProvider.
 
     Usage:
@@ -150,7 +150,6 @@ class LoraProvider(ptq.PtqProvider):
 
     Args:
       rules: A list of quantization rules.
-      disable_jit: Whether to disable JIT when wrapping methods.
       **kwargs: The keyword arguments to create a rule. Only one of rules and
         kwargs should be provided.
     """
@@ -159,7 +158,7 @@ class LoraProvider(ptq.PtqProvider):
       rules = [LoraRule(**kwargs)]
     elif kwargs:
       raise ValueError('Only one of rules and kwargs should be provided.')
-    super().__init__(rules=rules, disable_jit=disable_jit)
+    super().__init__(rules=rules)
 
   def dot_general(
       self,

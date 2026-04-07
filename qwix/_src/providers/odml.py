@@ -64,14 +64,7 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
         outputs, e.g. (0, 1).
       strict: Whether to raise an error if an unknown op is discovered.
     """
-    # For ODML interception, we always disable JIT. This is because ODML relies
-    # on execution at the Python level to:
-    # 1. Patch low-level structural primitives (e.g., Primitive.bind) to
-    #    propagate metadata.
-    # 2. Support bytecode patching and recursive PjitFunction interception.
-    #    JAX's C++ dispatch bypasses the patched Python `__code__` when JIT
-    #    is enabled, preventing us from catching inner function calls.
-    super().__init__(rules, disable_jit=True)
+    super().__init__(rules)
     self._fixed_range_for_inputs = fixed_range_for_inputs
     self._fixed_range_for_outputs = fixed_range_for_outputs
     self._strict = strict
