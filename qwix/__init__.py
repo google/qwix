@@ -16,6 +16,7 @@
 
 # pylint: disable=g-multiple-import, g-importing-member
 
+from qwix import contrib
 from qwix._src.core.conv_general import conv_general_dilated
 from qwix._src.core.dot import dot
 from qwix._src.core.dot_general import dot_general
