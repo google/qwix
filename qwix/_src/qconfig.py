@@ -113,8 +113,10 @@ class QuantizationProvider:
       rules: The quantization rules in the order of precedence.
       disable_jit: Whether to disable JIT when wrapping methods.
     """
+    self._rule_matches = [0] * len(rules)
     self._rules = [self._init_rule(rule) for rule in rules]
     self._logged_ops = set()
+    self._initial_run_complete = False
     self.disable_jit = disable_jit
 
   def _init_rule(self, rule: QuantizationRule) -> QuantizationRule:
@@ -176,6 +178,7 @@ class QuantizationProvider:
   def process_model_output(self, method_name: str, model_output: Any) -> Any:
     """Process the model output before it is returned."""
     del method_name
+    self._initial_run_complete = True
     return model_output
 
   def _get_current_rule_and_op_id(
@@ -208,6 +211,8 @@ class QuantizationProvider:
         rule_idx = idx
         break
     rule = self._rules[rule_idx] if rule_idx is not None else None
+    if rule_idx is not None:
+      self._rule_matches[rule_idx] += 1
     if only_rule:
       return rule, None
 
@@ -228,3 +233,25 @@ class QuantizationProvider:
           '[QWIX] module=%r op=%s rule=%s', module_path, op_id, rule_idx
       )
     return rule, op_id
+
+  def get_unused_rules(self) -> Sequence[QuantizationRule]:
+    """Returns the quantization rules that did not match any operations.
+
+    This should be called after model quantization (e.g., `quantize_model`) to
+    verify that all rules were applied as expected. A rule is considered unused
+    if its `module_path` regex did not match any module's path, or if its
+    `op_names` did not match any intercepted operation within a matching module.
+
+    Returns:
+      A sequence of unused quantization rules.
+    """
+    if not self._initial_run_complete:
+      raise ValueError(
+          'Quantization is not completed yet. Please call `quantize_model`'
+          ' before calling `get_unused_rules`.'
+      )
+    return [
+        self._rules[i]
+        for i, rule_matches in enumerate(self._rule_matches)
+        if rule_matches == 0
+    ]

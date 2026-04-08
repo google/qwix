@@ -46,6 +46,7 @@ class CustomProvider(qconfig.QuantizationProvider):
     return self._intercept_map
 
   def process_model_output(self, method_name: str, model_output: Any) -> Any:
+    self._initial_run_complete = True
     return model_output + 100
 
 

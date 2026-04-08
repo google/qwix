@@ -183,6 +183,7 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
 
   def process_model_output(self, method_name: str, model_output: Any) -> Any:
     """Quantize the output of the model."""
+    self._initial_run_complete = True
     if method_name == '__call__':
       method_name = 'final'  # backwards compatibility.
     # Quantize the model output if needed.
