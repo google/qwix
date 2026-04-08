@@ -104,14 +104,18 @@ class QuantizationProvider:
   injected into the model by using interception.py.
   """
 
-  def __init__(self, rules: Sequence[QuantizationRule]):
+  def __init__(
+      self, rules: Sequence[QuantizationRule], *, disable_jit: bool = False
+  ):
     """Initialize the provider.
 
     Args:
       rules: The quantization rules in the order of precedence.
+      disable_jit: Whether to disable JIT when wrapping methods.
     """
     self._rules = [self._init_rule(rule) for rule in rules]
     self._logged_ops = set()
+    self.disable_jit = disable_jit
 
   def _init_rule(self, rule: QuantizationRule) -> QuantizationRule:
     """Validate and set default values for the rule."""
@@ -132,10 +136,14 @@ class QuantizationProvider:
         )
     }
     if interception.has_attribute('jax.experimental.pallas.pallas_call'):
-      # Disable interception for ops in pallas_call.
+      # 1. Disable interceptions during the pallas_call factory setup.
+      # 2. Wrap the returned callable so that interceptions remain disabled
+      #    during deferred execution.
       intercept_map['jax.experimental.pallas.pallas_call'] = (
           lambda *args, **kwargs: interception.disable_interceptions(
-              pl.pallas_call(*args, **kwargs)
+              interception.disable_interceptions(pl.pallas_call)(
+                  *args, **kwargs
+              )
           )
       )
     return intercept_map
@@ -149,7 +157,11 @@ class QuantizationProvider:
     all ops. Subclasses can override this method to return multiple
     interceptors if needed (e.g. ODML providers).
     """
-    return [self.get_intercept_map]
+    return [
+        lambda: interception.Interceptor(
+            mapping=self.get_intercept_map(), id=id(self)
+        )
+    ]
 
   def process_model_inputs(
       self, model: Any, model_args: Sequence[Any], model_kwargs: dict[str, Any]

@@ -33,11 +33,17 @@ class NnModel(nn.Module):
 
 class CustomProvider(qconfig.QuantizationProvider):
 
-  def get_intercept_map(self) -> Mapping[str, Callable[..., Any]]:
-    return {
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    # Cache the intercept map so the lambdas share the same ID for
+    # stable output_transform deduplication across nested intercepts.
+    self._intercept_map = {
         "jax.numpy.sin": lambda x: x + 10,
         "jax.numpy.cos": lambda x: x + 20,
     }
+
+  def get_intercept_map(self) -> Mapping[str, Callable[..., Any]]:
+    return self._intercept_map
 
   def process_model_output(self, method_name: str, model_output: Any) -> Any:
     return model_output + 100

@@ -13,69 +13,137 @@
 # limitations under the License.
 """Intercepts Python functions by patching."""
 
+import collections.abc
+import contextlib
+import dataclasses
 import functools
 import sys
 import threading
 import types
-from typing import Any, Callable, Mapping, TypeAlias
+from typing import Any, Callable, TypeAlias
 
 import jax
 from qwix._src import aux_data
 
 Function: TypeAlias = Callable[..., Any]
 
-# An interceptor is a mapping from function names to the handler functions, e.g.
-# { "jax.lax.sin": replaced_sin }.
-Interceptor: TypeAlias = Mapping[str, Function]
-
 # The key used to intercept jax._src.core.Primitive.bind.
 PRIMITIVE_BIND_KEY = "jax._src.core.Primitive.bind"
+
+
+@dataclasses.dataclass(frozen=True)
+class Interceptor(collections.abc.Mapping[str, Function]):
+  """A container for interception mappings with a stable identity.
+
+  Provides an explicit `id` to guarantee a stable hashcode during JIT traces,
+  even if the enclosed mapping functions are dynamically wrapped or modified.
+
+  Attributes:
+    mapping: A dictionary mapping the target function name (e.g. module path or
+      op name) to its intercepted function implementation.
+    id: A stable, unique integer identifier (typically derived from the
+      quantization provider instance) that guarantees consistent JIT cache keys.
+  """
+
+  mapping: dict[str, Function]
+  id: int
+
+  def __getitem__(self, key: str) -> Function:
+    return self.mapping[key]
+
+  def __iter__(self):
+    return iter(self.mapping)
+
+  def __len__(self) -> int:
+    return len(self.mapping)
+
+  def __hash__(self) -> int:
+    return self.id
+
+
+def _preprocess_interceptor(
+    interceptor: Interceptor, disable_jit: bool
+) -> Interceptor:
+  """Preprocesses the interceptor by rewriting keys.
+
+  This function prepares the interceptor keys for the `_InterceptionManager` in
+  order to do a little bit more than just monkey-patching the attributes of the
+  objects. The keys are rewritten based on the type of the target function and
+  the `disable_jit` flag:
+
+  - **Functions (No Freevars):** Rewritten to use `.__code__` to target
+    bytecode patching instead of module attribute patching (helps with aliases).
+  - **JAX `PjitFunction`:**
+    - When `disable_jit=True`: Rewritten to use `._fun` (and eventually
+      `._fun.__code__`) to bypass JAX's C++ dispatch and target the inner
+      Python bytecode.
+    - When `disable_jit=False`: Keys remain unchanged to use standard module
+      attribute patching, ensuring the JIT compilation and caching layers are
+      properly preserved.
+  - **Everything Else:** Keys remain as-is, which tells the manager to use
+    standard module-level attribute monkey-patching.
+
+  Args:
+    interceptor: An Interceptor object containing the mapping and ID.
+    disable_jit: Whether JIT is disabled. Affects how `PjitFunction`s are
+      handled.
+
+  Returns:
+    A new Interceptor object with preprocessed keys.
+  """
+  interceptor_mapping = dict(interceptor)
+  # Preprocess the interceptor for JAX-specific and alias-aware rewrites.
+  for name in list(interceptor_mapping):
+    # Resolve path to the actual object (e.g., PjitFunction or FunctionType).
+    target_path = name
+    function_to_modify = get_attribute(target_path)
+
+    # 1. Rewrite `PjitFunction` to its inner Python function `_fun`
+    #    only when JIT is disabled; otherwise, use standard attribute patching.
+    if disable_jit and isinstance(
+        function_to_modify,
+        jax._src.lib._jax.PjitFunction,  # pylint: disable=protected-access
+    ):
+      new_path = target_path + "._fun"
+      interceptor_mapping[new_path] = interceptor_mapping.pop(target_path)
+      target_path = new_path
+      function_to_modify = function_to_modify._fun  # pylint: disable=protected-access
+
+    # 2. Rewrite `Function` to its code object for bytecode patching.
+    if (
+        isinstance(function_to_modify, types.FunctionType)
+        and not function_to_modify.__code__.co_freevars
+    ):
+      interceptor_mapping[target_path + ".__code__"] = interceptor_mapping.pop(
+          target_path
+      )
+
+  return Interceptor(mapping=interceptor_mapping, id=interceptor.id)
 
 
 def wrap_func_intercepted(
     func: Function,
     get_interceptor: Callable[[], Interceptor],
     *,
+    disable_jit: bool,
     input_transform: Callable[[Any, Any], tuple[Any, Any]] = lambda *x: x,
     output_transform: Callable[[Any], Any] = lambda x: x,
     should_intercept: Callable[[], bool] = lambda: True,
 ) -> Function:
-  """Wrap a function in a scope where functions in intercept_map are intercepted.
+  """Wraps a function to execute within an active interception scope.
 
-  We're doing a little bit more than just monkey-patching the attributes of the
-  objects, including
-
-  * The interception is both thread-local and non-recursive, which means
-    * the interception of one thread won't affect another thread.
-    * calling an intercepted function inside another intercepted function will
-      not trigger the double interception.
-    * the original functions will be restored when the replaced functions are
-      called.
-
-  * We try to patch the code object of a function rather than the function
-    itself. This allows us to patch all the aliases of a function, e.g.
-    patching jax.nn.gelu will also affect flax.linen.gelu.
-
-    These can be patched by replacing their code object:
-      * global functions, e.g. jax.lax.sin
-      * unbound methods, e.g. jax.numpy.ufunc.__call__. These don't have to be
-        patched through code objects, but it's hard to distinguish them from
-        global functions. These also includes static methods.
-    These cannot:
-      * callable objects, e.g. a PjitFunction object like jnp.sin.
-      * bound methods, e.g. jax.lax.sin_p.bind. They have __code__ attribute,
-        but cannot be set. These also includes class methods.
-      * functions with freevars.
-
-  * To support patching PjitFunction object, we disable JIT if any of those
-    functions are intercepted, and patch the _fun.__code__ attributes instead.
-    Note that replacing _fun attribute is not sufficient because it's not
-    actually used.
+  This returns a wrapped version of `func`. When called, it activates the
+  interceptors for the duration of the call. The scope is thread-local (isolated
+  per thread) and non-recursive (safe to call intercepted functions inside
+  handlers without infinite loops).
 
   Args:
     func: The function to wrap.
-    get_interceptor: A function that returns a mapping from function names to
-      functions, e.g. {"jax.lax.dot_general": quantized_dot_general}.
+    get_interceptor: A function/factory that returns an `Interceptor` object.
+      Using a factory function instead of a static instance defers any dynamic
+      attribute resolution or circular import checks until interception time,
+      while also allowing subclasses to cleanly append custom hooks.
+    disable_jit: Whether to disable JIT when calling the wrapped function.
     input_transform: A function to transform the input (args and kwargs) of the
       function.
     output_transform: A function to transform the output of the function.
@@ -88,65 +156,27 @@ def wrap_func_intercepted(
 
   @functools.wraps(func)
   def wrapper(*args, **kwargs):
-    # In Python, the id of an instance will change every time! i.e.
-    # id(obj.method) != id(obj.method).
-    interceptor_id = hash(get_interceptor)
-
-    if interception_manager.is_active(interceptor_id) or not should_intercept():
+    interceptor = _preprocess_interceptor(get_interceptor(), disable_jit)
+    # If the interceptor is already active for the current thread or
+    # should_intercept() returns False, return the original function.
+    if interception_manager.is_active(interceptor) or not should_intercept():
       return func(*args, **kwargs)
-
-    # Whether to disable JIT. This is needed if we patch any PjitFunction
-    # objects.
-    need_to_disable_jit = False
-
-    interceptor = dict(get_interceptor())
-    # Preprocess the interceptor for JAX-specific and alias-aware rewrites.
-    for name in list(interceptor):
-      # Resolve the path to the actual object (e.g., PjitFunction or
-      # FunctionType).
-      # {name: handler}
-      original_fn = get_attribute(name)
-
-      # 1. Handle PjitFunction objects: unwrap function and reach the source
-      # code.
-      # {name + "._fun": handler}
-      if isinstance(original_fn, jax._src.lib._jax.PjitFunction):  # pylint: disable=protected-access
-        fn_name = name + "._fun"
-        interceptor[fn_name] = interceptor.pop(name)
-        need_to_disable_jit = True
-        name = fn_name
-        original_fn = original_fn._fun  # pylint: disable=protected-access
-
-      # 2. Rewrite Functions to code objects to target the bytecode.
-      # This ensures that all aliases of the function (e.g., jnp.sin and
-      # jax.lax.sin) are intercepted since they share the same underlying code
-      # object.
-      # {name + ".__code__": handler}
-      if (
-          isinstance(original_fn, types.FunctionType)
-          and not original_fn.__code__.co_freevars
-      ):
-        interceptor[name + ".__code__"] = interceptor.pop(name)
-
-    # Check if JIT is already disabled.
-    if jax.config.jax_disable_jit:
-      need_to_disable_jit = False
-    elif PRIMITIVE_BIND_KEY in interceptor:
-      # Disable JIT to ensure primitive calls are intercepted.
-      need_to_disable_jit = True
 
     # Apply the input transform.
     args, kwargs = input_transform(args, kwargs)
 
-    interception_manager.activate_interceptor(interceptor_id, interceptor)
-    if need_to_disable_jit:
-      jax.config.update("jax_disable_jit", True)
+    # Scope the function execution within active interception.
+    interception_manager.activate_interceptor(interceptor)
+    context_manager = (
+        jax.disable_jit()
+        if (not jax.config.jax_disable_jit and disable_jit)
+        else contextlib.nullcontext()
+    )
     try:
-      output = func(*args, **kwargs)
+      with context_manager:
+        output = func(*args, **kwargs)
     finally:
-      if need_to_disable_jit:
-        jax.config.update("jax_disable_jit", False)
-      interception_manager.deactivate_interceptor(interceptor_id)
+      interception_manager.deactivate_interceptor(interceptor)
 
     # Apply the output transform.
     return output_transform(output)
@@ -193,31 +223,31 @@ class _InterceptionManager:
     # A list of interceptors, in installation order. We don't expect too many
     # interceptors, so it's fine to use a list for all the interceptors, and
     # it's fine to iterate over all of them in _on_intercepted_called.
-    self._interceptors: list[tuple[int, Interceptor]] = []
+    self._interceptors: list[Interceptor] = []
 
     # A dict of { (thread_id, interceptor_id): enabled } indicating whether the
     # current thread should apply the interception. The interception only
-    # applies when (thread_id, interceptor_id) is in the dict and enabled is
-    # True.
+    # applies when the key (thread_id, interceptor_id) is in the dict and the
+    # value enabled is True.
     self._intercepted_threads: dict[tuple[int, int], bool] = {}
 
-  def is_active(self, interceptor_id: int) -> bool:
+  def is_active(self, interceptor: Interceptor) -> bool:
     """Returns whether the interceptor is active for the current thread."""
     this_thread = threading.get_ident()
     with self._lock:
-      return (this_thread, interceptor_id) in self._intercepted_threads
+      return (this_thread, interceptor.id) in self._intercepted_threads
 
-  def activate_interceptor(self, interceptor_id: int, interceptor: Interceptor):
+  def activate_interceptor(self, interceptor: Interceptor):
     """Activates the interceptor for the current thread.
 
     If this interceptor is not yet installed (from other threads), this method
     also triggers the global patching of the relevant Python modules.
 
     Args:
-      interceptor_id: The unique identifier of the interceptor.
-      interceptor: A dictionary mapping intercepted function names to their
-        replacement functions.
+      interceptor: An Interceptor mapping object containing replacement
+        functions and its stable ID.
     """
+    interceptor_id = interceptor.id
     this_thread = threading.get_ident()
     with self._lock:
       if (this_thread, interceptor_id) in self._intercepted_threads:
@@ -226,9 +256,9 @@ class _InterceptionManager:
         )
       self._intercepted_threads[(this_thread, interceptor_id)] = True
       # Check if the interceptor is already installed by other threads.
-      if any(interceptor_id == i for i, _ in self._interceptors):
+      if any(interceptor_id == i.id for i in self._interceptors):
         return
-      self._interceptors.append((interceptor_id, interceptor))
+      self._interceptors.append(interceptor)
       # Register the interception for all the intercepted names.
       registered = []
       try:
@@ -243,8 +273,9 @@ class _InterceptionManager:
           self._maybe_remove_interception(name)
         raise e
 
-  def deactivate_interceptor(self, interceptor_id: int):
+  def deactivate_interceptor(self, interceptor: Interceptor):
     """Deactivates the interceptor for the current thread."""
+    interceptor_id = interceptor.id
     this_thread = threading.get_ident()
     with self._lock:
       # The current thread must already be intercepted.
@@ -259,9 +290,11 @@ class _InterceptionManager:
       # Remove the interceptor. This is inefficient but we don't expect too
       # many interceptors.
       interceptor_index = next(
-          i for i, j in enumerate(self._interceptors) if j[0] == interceptor_id
+          i
+          for i, interceptor in enumerate(self._interceptors)
+          if interceptor.id == interceptor_id
       )
-      _, interceptor = self._interceptors.pop(interceptor_index)
+      interceptor = self._interceptors.pop(interceptor_index)
       for name in interceptor:
         self._maybe_remove_interception(name)
 
@@ -316,7 +349,7 @@ class _InterceptionManager:
     Args:
       name: The name of the function to un-intercept.
     """
-    if any(name in interceptor for _, interceptor in self._interceptors):
+    if any(name in interceptor for interceptor in self._interceptors):
       return
     obj, attr = _resolve_path(name)
     if attr == "__code__":
@@ -334,7 +367,8 @@ class _InterceptionManager:
       # We apply the earliest interceptor first. This creates a behavior that
       # a later-installed interceptor will be called inside an earlier-installed
       # interceptor.
-      for interceptor_id, interceptor in self._interceptors:
+      for interceptor in self._interceptors:
+        interceptor_id = interceptor.id
         if (
             self._intercepted_threads.get((this_thread, interceptor_id), False)
             and name in interceptor

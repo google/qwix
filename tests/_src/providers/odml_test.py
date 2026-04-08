@@ -213,18 +213,22 @@ class OdmlTest(parameterized.TestCase):
     self.assertLen(factories, 2)
 
     # 1. Structural Layer (Primitives)
-    structural_map = factories[0]()
-    self.assertIn(interception.PRIMITIVE_BIND_KEY, structural_map)
+    structural_interceptor = factories[0]()
+    self.assertIn(
+        interception.PRIMITIVE_BIND_KEY, structural_interceptor.mapping
+    )
     self.assertIsInstance(
-        structural_map[interception.PRIMITIVE_BIND_KEY],
+        structural_interceptor.mapping[interception.PRIMITIVE_BIND_KEY],
         odml.odml_ops.PrimitiveBindOp,
     )
 
     # 2. Numerical Layer (High-level Ops)
-    numerical_map = factories[1]()
-    self.assertIn('jax.lax.dot_general', numerical_map)
+    numerical_interceptor = factories[1]()
+    self.assertIn('jax.lax.dot_general', numerical_interceptor.mapping)
     # Ensure no primitive bind in numerical layer to avoid double wrapping
-    self.assertNotIn(interception.PRIMITIVE_BIND_KEY, numerical_map)
+    self.assertNotIn(
+        interception.PRIMITIVE_BIND_KEY, numerical_interceptor.mapping
+    )
 
 
 if __name__ == '__main__':
