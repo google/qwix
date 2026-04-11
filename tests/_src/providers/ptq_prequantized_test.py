@@ -105,6 +105,42 @@ class PrequantizedPtqTest(parameterized.TestCase):
     nnx.update(abs_ptq_linear, processed_params)
     abs_ptq_linear(model_input)
 
+  def test_process_prequantized_params_full_precision_override(self):
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*", weight_qtype=jnp.int8, tile_size=4
+        ),
+    ]
+    model_input = jnp.ones((10, 12))
+    abs_ptq_linear, orig_params, _ = _build_linear_reference(
+        q_rules, model_input
+    )
+
+    # Simulate safetensors providing a pure full-precision array for a
+    # quantized block
+    full_precision_payload = {"kernel": orig_params["kernel"]}
+    with self.assertRaisesRegex(ValueError, "expected a quantized parameter"):
+      ptq.process_prequantized_params(full_precision_payload, abs_ptq_linear)
+
+  def test_process_prequantized_params_fp_template(self):
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*", weight_qtype=jnp.int8, tile_size=4
+        ),
+    ]
+    model_input = jnp.ones((10, 12))
+    fp_linear = nnx.Linear(12, 6, rngs=nnx.Rngs(0))
+
+    _, _, reference_params = _build_linear_reference(q_rules, model_input)
+    orbax_payload = _to_orbax_payload(reference_params)
+
+    processed_params = ptq.process_prequantized_params(orbax_payload, fp_linear)
+
+    self.assertIsInstance(processed_params["kernel"], dict)
+    self.assertIn("qvalue", processed_params["kernel"])
+    self.assertIn("scale", processed_params["kernel"])
+    self.assertNotIsInstance(processed_params["bias"], dict)
+
   def test_process_prequantized_params_nnx_einsum_sharding(self):
     mesh = jax.make_mesh(
         (2, 2),
@@ -188,11 +224,6 @@ class PrequantizedPtqTest(parameterized.TestCase):
     _assert_trees_allclose(self, processed_params, reference_params)
 
   @parameterized.named_parameters(
-      dict(
-          testcase_name="missing_qvalue",
-          modify_payload_fn=lambda p: p["kernel"].pop("qvalue"),
-          expected_regex="qvalue",
-      ),
       dict(
           testcase_name="missing_scale",
           modify_payload_fn=lambda p: p["kernel"].pop("scale"),
@@ -321,6 +352,44 @@ class PrequantizedPtqTest(parameterized.TestCase):
 
     with self.assertRaisesRegex(TypeError, "NNX PTQ models"):
       ptq.process_prequantized_params({}, abs_ptq_params)
+
+  def test_process_prequantized_params_with_lists(self):
+    class ListModel(nnx.Module):
+
+      def __init__(self, rngs):
+        self.layers = nnx.List([
+            nnx.Linear(12, 12, rngs=rngs),
+            nnx.Linear(12, 6, rngs=rngs),
+        ])
+
+      def __call__(self, x):
+        for layer in self.layers:
+          x = layer(x)
+        return x
+
+    rngs = nnx.Rngs(0)
+    model = ListModel(rngs)
+    model_input = jnp.ones((10, 12))
+
+    q_rules = [qconfig.QuantizationRule(weight_qtype=jnp.int8)]
+    abs_ptq_model = nnx.eval_shape(
+        lambda: qwix_model.quantize_model(
+            model,
+            ptq.PtqProvider(q_rules),
+            model_input,
+        )
+    )
+
+    orig_params = nnx.to_pure_dict(nnx.state(model, nnx.Param))
+    reference_params = ptq.quantize_params(orig_params, abs_ptq_model)
+    orbax_payload = _to_orbax_payload(reference_params)
+
+    processed_params = ptq.process_prequantized_params(
+        orbax_payload, abs_ptq_model
+    )
+
+    _assert_trees_allclose(self, processed_params, reference_params)
+    nnx.update(abs_ptq_model, processed_params)
 
 
 if __name__ == "__main__":
