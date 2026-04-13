@@ -119,7 +119,9 @@ class PrequantizedPtqTest(parameterized.TestCase):
     # Simulate safetensors providing a pure full-precision array for a
     # quantized block
     full_precision_payload = {"kernel": orig_params["kernel"]}
-    with self.assertRaisesRegex(ValueError, "expected a quantized parameter"):
+    with self.assertRaisesRegex(
+        ValueError, "Unhandled or invalid parameter combination"
+    ):
       ptq.process_prequantized_params(full_precision_payload, abs_ptq_linear)
 
   def test_process_prequantized_params_fp_template(self):

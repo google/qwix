@@ -547,60 +547,22 @@ def process_prequantized_params(
     allow_extra_params: bool = False,
     use_checkpoint_sharding: bool = False,
 ) -> Any:
-  """Converts pre-quantized NNX params into a PTQ runtime-compatible pure dict.
-
-  This helper reconstructs the same `nnx.update`-friendly pure dict shape
-  returned by `quantize_params`, but starts from pre-quantized weight payloads
-  produced outside of Qwix. The quantization metadata (`HowToQuantize` and
-  `qtype`) is sourced from `template_params`.
+  """Converts external pre-quantized params into an `nnx.update`-friendly pure dict.
 
   Args:
-    checkpoint_params: A nested dict matching NNX state paths. Quantized params
-      must use the shape `param -> qvalue`, `scale`, and optional `zero_point`.
-      Non-quantized params remain plain array leaves.
-    template_params: An NNX PTQ model, possibly abstract, created from
-      `nnx.eval_shape(...)`.
-    allow_extra_params: If True, ignore payload entries that are not present in
+    checkpoint_params: A nested dict matching NNX state paths (without `.value`
+      suffixes). Leaves must be either a `jax.Array` or a dict containing
+      `'qvalue'`, `'scale'`, and optional `'zero_point'`.
+    template_params: An NNX PTQ model, possibly abstract (e.g., from
+      `nnx.eval_shape`).
+    allow_extra_params: If True, ignore payload entries not present in
       `template_params`.
     use_checkpoint_sharding: If True, use sharding from checkpoint_params
       instead of template_params.
 
-  Example structures of flattened parameters:
-
-    checkpoint_params(quantized)
-      Path: ('layers', '0', 'mlp', 'experts_gate_up_proj_weight')
-      Type: dict
-      Value: {
-          "qvalue": jnp.array([[...]], dtype=jnp.int8),
-          "scale": jnp.array([[...]], dtype=jnp.bfloat16),
-      }
-
-    checkpoint_params(full precision)
-      Path: ('layers', '0', 'mlp', 'gate_weight', 'value')
-      Type: jax.Array
-
-    template_params(quantized)
-      Path: ('layers', '0', 'mlp', 'shared_expert_gate_proj', 'weight')
-      Type: qwix._src.providers.ptq.WithAux
-      Value: WithAux(
-          array=QArray(
-              qvalue=jax.ShapeDtypeStruct(
-                  shape=(D, shared_inter), dtype=jnp.int8
-              ),
-              scale=jax.ShapeDtypeStruct(
-                  shape=(1, shared_inter), dtype=jnp.bfloat16
-              ),
-              zero_point=None,
-          ),
-          how=HowToQuantize(...),
-      )
-
-    template_params(full precision)
-      Path: ('layers', '0', 'mlp', 'experts_gate_up_proj_weight', 'value')
-      Type: jax.ShapeDtypeStruct (eval_shape) or jax.Array (materialized)
-
   Returns:
-    A pure dict consumable by `nnx.update`.
+    A nested pure dict consumable by `nnx.update`. The nested key paths will
+    include `'value'` at the end, pointing to either a dict or a JAX array.
   """
   if not isinstance(template_params, nnx.Module):
     raise TypeError(
@@ -624,12 +586,15 @@ def process_prequantized_params(
     del path
     return isinstance(x, dict) and 'qvalue' in x
 
-  flattened_input = flax.traverse_util.flatten_dict(
+  # Value: WithAux(Case 1), QArray(Case 2), or a JAX array(Case 3).
+  flat_processed = {}
+  # Value: dict containing 'qvalue'(quantized) or a JAX array(fp).
+  flat_checkpoint = flax.traverse_util.flatten_dict(
       checkpoint_params, is_leaf=_is_leaf
   )
-
-  processed_params = {}
-  for path, checkpoint_param in flattened_input.items():
+  # tuple path example: ('layers', 0, 'mlp', 'experts_gate_up_proj_weight').
+  for path, checkpoint_param in flat_checkpoint.items():
+    # Value: WithAux(quantized) or jax.ShapeDtypeStruct / jax.Array (fp)
     template_param = get_value_from_path(template_params, path)
     if template_param is None:
       if not allow_extra_params:
@@ -651,8 +616,7 @@ def process_prequantized_params(
           use_checkpoint_sharding=use_checkpoint_sharding,
       )
 
-    # Case 2: checkpoint_param is prequantized (dict), template_param is
-    # full precision
+    # Case 2: checkpoint_param is prequantized (dict), template_param is fp.
     elif isinstance(checkpoint_param, dict) and not isinstance(
         template_param, WithAux
     ):
@@ -661,8 +625,7 @@ def process_prequantized_params(
           path,
       )
 
-    # Case 3: checkpoint_param is full precision, template_param is full
-    # precision
+    # Case 3: checkpoint_param is fp, template_param is fp.
     elif not isinstance(checkpoint_param, dict) and not isinstance(
         template_param, WithAux
     ):
@@ -673,21 +636,26 @@ def process_prequantized_params(
           use_checkpoint_sharding=use_checkpoint_sharding,
       )
 
-    # Case 4: checkpoint_param is full precision, template_param is WithAux
-    elif not isinstance(checkpoint_param, dict) and isinstance(
-        template_param, WithAux
-    ):
-      raise ValueError(
-          f'Found full precision parameter for {path} in checkpoint, but'
-          ' expected a quantized parameter in template.'
-      )
+    # Handle invalid combinations (e.g., checkpoint is full precision, but
+    # template expects WithAux).
     else:
-      raise ValueError(f'Unhandled case for {path}')
+      raise ValueError(
+          f'Unhandled or invalid parameter combination for {path}. '
+          f'checkpoint_param is {type(checkpoint_param)}, '
+          f'template_param is {type(template_param)}.'
+      )
 
-    processed_params[path] = processed
+    flat_processed[path] = processed
 
-  processed_dict = flax.traverse_util.unflatten_dict(processed_params)
-  return nnx.to_pure_dict(nnx.state(processed_dict))
+  # Key: nested key path.
+  # Value: WithAux(Case 1), QArray(Case 2), or a JAX array(Case 3).
+  nested_processed = flax.traverse_util.unflatten_dict(flat_processed)
+  # Key: nested key path and ['value'].
+  # Value: Dict(Case 1 and 2) or a JAX array(Case 3).
+  #   - Case 1: dict {"array": {"qvalue": ..., "scale": ...}}
+  #   - Case 2: dict {"qvalue": ..., "scale": ...}
+  #   - Case 3: <jax.Array>
+  return nnx.to_pure_dict(nnx.state(nested_processed))
 
 
 def _validate_prequantized_dict(
