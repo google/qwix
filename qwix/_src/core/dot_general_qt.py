@@ -62,10 +62,12 @@ class DotGeneralQtConfig:
   # the gradient clipping is always skipped.
   disable_gradient_clipping: bool = False
 
-  # By default, Qwix will use the quantized inputs from the fwd pass as the
-  # residuals during the bwd pass, which is generally more accurate and more
-  # efficient. Enabling this will allow separate quantization schema for the
-  # residuals.
+  # Whether to use original (unquantized) residuals or quantized residuals
+  # during the backward pass. Enabling this will allow separate quantization
+  # schema for the residuals. When constructed via QtProvider, this defaults to:
+  # 1. True if only fwd pass is quantized.
+  # 2. False if both fwd and bwd passes are quantized.
+  # 3. Users can override use_original_residuals via additional_qt_config.
   use_original_residuals: bool = False
 
   # Quantization for residuals. These only take effect when residuals are not

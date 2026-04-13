@@ -214,17 +214,19 @@ class CnnTest(parameterized.TestCase):
   def test_srq(self):
     cnn = CNN()
     q_rules = [
-        qconfig.QuantizationRule(
+        qt.QtRule(
             module_path=r'Conv_\d+',
             weight_qtype=jnp.int8,
             act_qtype=jnp.int8,
             act_static_scale=True,
+            bwd_qtype=jnp.int8,
         ),
-        qconfig.QuantizationRule(
+        qt.QtRule(
             module_path=r'Dense_\d+',
             weight_qtype=jnp.int8,
             act_qtype=jnp.int8,
             act_static_scale=True,
+            bwd_qtype=jnp.int8,
         ),
     ]
     qtcnn = qwix_model.quantize_model(cnn, qt.QtProvider(q_rules))

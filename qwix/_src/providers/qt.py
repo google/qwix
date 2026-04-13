@@ -361,6 +361,9 @@ class QtProvider(qconfig.QuantizationProvider):
             channelwise_noise_axes=rule.channelwise_noise_axes,
         )
 
+    fwd_quantized = rule.weight_qtype is not None or rule.act_qtype is not None
+    bwd_quantized = rule.bwd_qtype is not None
+
     qt_config = dot_general_qt.DotGeneralQtConfig(
         # fwd configs.
         lhs_qtype=lhs_qtype,
@@ -379,6 +382,7 @@ class QtProvider(qconfig.QuantizationProvider):
         dlhs_stochastic_rounding_noise_fn=bwd_stochastic_rounding_noise_fn,
         dlhs_grad_disable_channelwise_axes=rule.disable_channelwise_axes,
         # drhs configs.
+        use_original_residuals=fwd_quantized and not bwd_quantized,
         drhs_grad_qtype=rule.bwd_qtype,
         drhs_grad_calibration_method=rule.bwd_calibration_method,
         drhs_tile_size=drhs_tile_size,
