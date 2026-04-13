@@ -239,9 +239,15 @@ class LoraTest(parameterized.TestCase):
       # Apply sharding on the base model.
       self._shard_nnx_model(einsum, mesh)
       self.assertEqual(einsum.kernel.sharding_names, ("fsdp", "tp", None))
-      self.assertEqual(einsum.kernel.value.sharding.spec, ("fsdp", "tp", None))
+      self.assertEqual(
+          einsum.kernel.value.sharding.spec,
+          jax.sharding.PartitionSpec("fsdp", "tp", None),
+      )
       self.assertEqual(einsum.bias.sharding_names, ("tp", None))
-      self.assertEqual(einsum.bias.value.sharding.spec, ("tp", None))
+      self.assertEqual(
+          einsum.bias.value.sharding.spec,
+          jax.sharding.PartitionSpec("tp", None),
+      )
 
     lora_provider = lora.LoraProvider([
         lora.LoraRule(
@@ -274,7 +280,8 @@ class LoraTest(parameterized.TestCase):
     if weight_qtype is None:  # unquantized
       self.assertEqual(base_state.kernel.sharding_names, ("fsdp", "tp", None))
       self.assertEqual(
-          base_state.kernel.value.sharding.spec, ("fsdp", "tp", None)
+          base_state.kernel.value.sharding.spec,
+          jax.sharding.PartitionSpec("fsdp", "tp", None),
       )
     else:  # quantized weights
       self.assertEqual(base_state.kernel.array.qvalue.value.shape, (16, 8, 10))
@@ -290,11 +297,17 @@ class LoraTest(parameterized.TestCase):
     # regardless of whether apply_sharding_to_base_model is True or False.
     for variable in nnx.iter_graph(lora_einsum):
       if isinstance(variable, nnx.Variable):
-        self.assertEqual(variable.sharding, variable.value.sharding.spec)
+        self.assertEqual(
+            jax.sharding.PartitionSpec(*variable.sharding),
+            variable.value.sharding.spec,
+        )
 
     model_output = lora_einsum(model_input)
     self.assertTrue(model_output.shape, (16, 4, 8, 10))
-    self.assertTrue(model_output.sharding.spec, ("fsdp", None, "tp", None))
+    self.assertEqual(
+        model_output.sharding.spec,
+        jax.sharding.PartitionSpec("fsdp", None, "tp"),
+    )
 
   @parameterized.named_parameters(
       dict(
@@ -401,7 +414,10 @@ class LoraTest(parameterized.TestCase):
       )
     # Check the sharding of both the metadata and the actual jax.Array.
     self.assertEqual(conv.kernel.sharding_names, (None, None, "in", "out"))
-    self.assertEqual(conv.kernel.value.sharding.spec, (None, None, "in", "out"))
+    self.assertEqual(
+        conv.kernel.value.sharding.spec,
+        jax.sharding.PartitionSpec(None, None, "in", "out"),
+    )
 
     lora_provider = lora.LoraProvider(
         weight_qtype=qtype,
@@ -417,11 +433,16 @@ class LoraTest(parameterized.TestCase):
     self.assertIsInstance(lora_a, nnx.LoRAParam)
     self.assertEqual(lora_a.shape, (3, 3, 16, 3))
     self.assertEqual(lora_a.sharding_names, (None, None, "in", None))
-    self.assertEqual(lora_a.value.sharding.spec, (None, None, "in", None))
+    self.assertEqual(
+        lora_a.value.sharding.spec,
+        jax.sharding.PartitionSpec(None, None, "in", None),
+    )
     self.assertIsInstance(lora_b, nnx.LoRAParam)
     self.assertEqual(lora_b.shape, (3, 32))
     self.assertEqual(lora_b.sharding_names, (None, "out"))
-    self.assertEqual(lora_b.value.sharding.spec, (None, "out"))
+    self.assertEqual(
+        lora_b.value.sharding.spec, jax.sharding.PartitionSpec(None, "out")
+    )
 
   def _shard_nnx_model(self, model: nnx.Module, mesh: jax.sharding.Mesh):
     """Shards the model in-place with the given mesh."""

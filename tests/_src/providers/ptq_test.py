@@ -239,9 +239,15 @@ class PtqTest(parameterized.TestCase):
     sharded_state = jax.device_put(unsharded_state, sharding)
     nnx.update(fp_einsum, sharded_state)
     self.assertEqual(fp_einsum.kernel.sharding_names, ("fsdp", "tp", None))
-    self.assertEqual(fp_einsum.kernel.value.sharding.spec, ("fsdp", "tp", None))
+    self.assertEqual(
+        fp_einsum.kernel.value.sharding.spec,
+        jax.sharding.PartitionSpec("fsdp", "tp", None),
+    )
     self.assertEqual(fp_einsum.bias.sharding_names, ("tp", None))
-    self.assertEqual(fp_einsum.bias.value.sharding.spec, ("tp", None))
+    self.assertEqual(
+        fp_einsum.bias.value.sharding.spec,
+        jax.sharding.PartitionSpec("tp", None),
+    )
 
     with jax.set_mesh(mesh):
       # PTQ method 1: use quantize_model to convert both the model and params.
@@ -253,7 +259,9 @@ class PtqTest(parameterized.TestCase):
 
     def get_canonical_pspec(x: jax.Array):
       """The sharding.spec may be shorter than the ndim."""
-      return x.sharding.spec + (None,) * (x.ndim - len(x.sharding.spec))
+      return jax.sharding.PartitionSpec(
+          *(tuple(x.sharding.spec) + (None,) * (x.ndim - len(x.sharding.spec)))
+      )
 
     # Test PTQ param structure.
     qw = ptq_einsum.kernel
@@ -262,10 +270,16 @@ class PtqTest(parameterized.TestCase):
     self.assertEqual(qw.qvalue.dtype, jnp.int8)
     self.assertEqual(qw.qvalue.shape, (16, 8, 10))
     self.assertEqual(qw.qvalue.sharding_names, ("fsdp", "tp", None))
-    self.assertEqual(get_canonical_pspec(qw.qvalue.value), ("fsdp", "tp", None))
+    self.assertEqual(
+        get_canonical_pspec(qw.qvalue.value),
+        jax.sharding.PartitionSpec("fsdp", "tp", None),
+    )
     self.assertEqual(qw.scale.shape, (4, 8, 10))
     self.assertEqual(qw.scale.sharding_names, ("fsdp", "tp", None))
-    self.assertEqual(get_canonical_pspec(qw.scale.value), ("fsdp", "tp", None))
+    self.assertEqual(
+        get_canonical_pspec(qw.scale.value),
+        jax.sharding.PartitionSpec("fsdp", "tp", None),
+    )
 
     # PTQ method 2: call quantize_model in eval_shape and quantize_params.
     with jax.set_mesh(mesh):
