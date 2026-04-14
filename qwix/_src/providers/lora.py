@@ -13,6 +13,7 @@
 # limitations under the License.
 """Low-Rank Adapation (LoRA) support."""
 import dataclasses
+import math
 import string
 from typing import Any, Callable, Collection, Sequence
 import warnings
@@ -131,6 +132,79 @@ def _parse_einsum_str_for_lora(
   )
 
 
+def _create_lora_layer_shapes(
+    rhs_ca: Sequence[int],
+    rhs_ba: Sequence[int],
+    rhs_ra: Sequence[int],
+    contract_shape: typing.Shape,
+    batch_shape: typing.Shape,
+    remain_shape: typing.Shape,
+    rank: int,
+) -> tuple[
+    typing.Shape,  # a_shape
+    Sequence[int | None],  # a_sharding_transpose
+    typing.Shape,  # b_shape
+    Sequence[int | None],  # b_sharding_transpose
+]:
+  """Returns lora param shapes and sharding transposes for dot_general."""
+
+  # LoRA A: (batch, contracting, rank)
+  a_shape = (*batch_shape, math.prod(contract_shape), rank)
+  # LoRA B: (batch, rank, remain)
+  b_shape = (*batch_shape, rank, math.prod(remain_shape))
+
+  # Inherit sharding from first dims; XLA's SPMD partitioner will
+  # automatically infer and propagate sharding for subsequent ones.
+  a_sharding_transpose = (*rhs_ba, rhs_ca[0] if rhs_ca else None, None)
+  b_sharding_transpose = (*rhs_ba, None, rhs_ra[0] if rhs_ra else None)
+
+  return a_shape, a_sharding_transpose, b_shape, b_sharding_transpose
+
+
+def _compute_lora_delta(
+    lhs: jax.Array,
+    lora_a: jax.Array,
+    lora_b: jax.Array,
+    lhs_ca: Sequence[int],
+    lhs_ba: Sequence[int],
+    contract_shape: typing.Shape,
+    batch_shape: typing.Shape,
+    remain_shape: typing.Shape,
+    rank: int,
+    precision: jax.lax.PrecisionLike = None,
+) -> jax.Array:
+  """Computes the raw LoRA delta."""
+
+  lora_a_reshaped = jax.numpy.reshape(
+      lora_a, (*batch_shape, *contract_shape, rank)
+  )
+  delta_batch_axes = (*range(len(batch_shape)),)
+  lora_a_contract_axes = (
+      *range(len(batch_shape), len(batch_shape) + len(contract_shape)),
+  )
+  delta_a = jax.lax.dot_general(
+      lhs,
+      lora_a_reshaped,
+      ((lhs_ca, lora_a_contract_axes), (lhs_ba, delta_batch_axes)),
+      precision=precision,
+  )
+
+  # delta = delta_a @ lora_b
+  lora_b_reshaped = jax.numpy.reshape(
+      lora_b, (*batch_shape, rank, *remain_shape)
+  )
+  delta = jax.lax.dot_general(
+      delta_a,
+      lora_b_reshaped,
+      (
+          ((delta_a.ndim - 1,), (len(batch_shape),)),
+          (delta_batch_axes, delta_batch_axes),
+      ),
+      precision=precision,
+  )
+  return delta
+
+
 class LoraProvider(ptq.PtqProvider):
   """Provider for (Q)LoRA.
 
@@ -190,20 +264,35 @@ class LoraProvider(ptq.PtqProvider):
     if weight_name is None:  # rhs is not a weight.
       return res
 
-    # We only support ...a,ab->...b for now.
-    assert (
-        len(rhs.shape) == 2
-        and tuple(dimension_numbers[0][1]) == (0,)
-        and not dimension_numbers[1][1]
-    ), f'Unsupported: {rhs.shape=} {dimension_numbers=}'
+    (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dimension_numbers
+
+    rhs_ra = (
+        *(i for i in range(rhs.ndim) if i not in rhs_ca and i not in rhs_ba),
+    )
+
+    contract_shape = (*(rhs.shape[i] for i in rhs_ca),)
+    batch_shape = (*(rhs.shape[i] for i in rhs_ba),)
+    remain_shape = (*(rhs.shape[i] for i in rhs_ra),)
+
+    a_shape, a_sharding_transpose, b_shape, b_sharding_transpose = (
+        _create_lora_layer_shapes(
+            rhs_ca,
+            rhs_ba,
+            rhs_ra,
+            contract_shape,
+            batch_shape,
+            remain_shape,
+            rule.rank,
+        )
+    )
 
     lora_a, lora_b = _get_or_create_lora_params(
         name=weight_name,
         rule=rule,
-        a_shape=(rhs.shape[0], rule.rank),
-        b_shape=(rule.rank, rhs.shape[1]),
-        a_sharding_transpose=(0, None),
-        b_sharding_transpose=(None, 1),
+        a_shape=a_shape,
+        b_shape=b_shape,
+        a_sharding_transpose=a_sharding_transpose,
+        b_sharding_transpose=b_sharding_transpose,
     )
 
     if rule.dropout > 0:
@@ -212,7 +301,20 @@ class LoraProvider(ptq.PtqProvider):
           lhs, rngs=flax_util.make_rng('dropout')
       )
 
-    return res + lhs @ lora_a @ lora_b * (rule.alpha / rule.rank)
+    delta = _compute_lora_delta(
+        lhs,
+        lora_a,
+        lora_b,
+        lhs_ca,
+        lhs_ba,
+        contract_shape,
+        batch_shape,
+        remain_shape,
+        rule.rank,
+        precision=precision,
+    )
+
+    return res + delta * (rule.alpha / rule.rank)
 
   def einsum(
       self,

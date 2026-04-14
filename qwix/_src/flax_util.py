@@ -308,13 +308,13 @@ def unbox(maybe_boxed: Any) -> Any:
 
 
 def update_sharding(
-    spec: Sequence[Any],
+    spec: Sequence[Any] | jax.sharding.PartitionSpec,
     *,
     shape: Sequence[int] | None = None,
     split: Collection[int] | None = None,
     merge: Collection[int] | None = None,
     transpose: Sequence[int | None] | None = None,
-) -> tuple[Any, ...]:
+) -> tuple[Any, ...] | jax.sharding.PartitionSpec:
   """Derives the partition spec from an existing spec.
 
   Args:
@@ -330,6 +330,8 @@ def update_sharding(
     The updated partition spec.
   """
   assert bool(split) + bool(merge) + bool(transpose) <= 1
+  is_pspec = isinstance(spec, jax.sharding.PartitionSpec)
+
   if split:
     spec = [(a, None) if i in split else (a,) for i, a in enumerate(spec)]
     spec = sum(spec, ())  # flatten the list of tuples.
@@ -343,6 +345,9 @@ def update_sharding(
     assert len(shape) == len(spec), f'{shape=} {spec=}'
     # For scales: remove sharding for dimensions of size 1.
     spec = tuple(None if d == 1 else a for a, d in zip(spec, shape))
+
+  if is_pspec:
+    return jax.sharding.PartitionSpec(*spec)
 
   return spec
 
@@ -380,7 +385,7 @@ def update_boxed(
     shape = boxed.unbox().shape
     for possible_field in ('names', 'mesh_axes', 'axes_types'):
       axes = getattr(boxed, possible_field, None)
-      if isinstance(axes, (list, tuple)):
+      if isinstance(axes, (list, tuple, jax.sharding.PartitionSpec)):
         axes = update_sharding(
             axes, shape=shape, split=split, merge=merge, transpose=transpose
         )
@@ -396,7 +401,8 @@ def update_boxed(
     else:
       sharding_key = 'sharding_names'
     axes = metadata.get(sharding_key, None)
-    if isinstance(axes, (list, tuple)):
+
+    if isinstance(axes, (list, tuple, jax.sharding.PartitionSpec)):
       axes = update_sharding(
           axes, shape=shape, split=split, merge=merge, transpose=transpose
       )

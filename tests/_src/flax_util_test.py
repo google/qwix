@@ -145,6 +145,34 @@ class FlaxUtilTest(parameterized.TestCase):
     self.assertIsInstance(variables["lora_a"], nnx.LoRAParam)
     self.assertIsInstance(variables["lora_b"], nnx.LoRAParam)
 
+  def test_update_sharding(self):
+    # Test tuple
+    tuple_spec = ("a", "b")
+    updated = flax_util.update_sharding(tuple_spec, transpose=[1, 0])
+    self.assertEqual(updated, ("b", "a"))
+
+    updated = flax_util.update_sharding(tuple_spec, split=[0])
+    self.assertEqual(updated, ("a", None, "b"))
+
+    tuple_spec_with_none = ("a", None, "b")
+    updated = flax_util.update_sharding(tuple_spec_with_none, merge=[0])
+    self.assertEqual(updated, ("a", "b"))
+
+    # Test jax.sharding.PartitionSpec
+    pspec = jax.sharding.PartitionSpec("a", "b")
+    updated = flax_util.update_sharding(pspec, transpose=[1, 0])
+    self.assertIsInstance(updated, jax.sharding.PartitionSpec)
+    self.assertEqual(updated, jax.sharding.PartitionSpec("b", "a"))
+
+    updated = flax_util.update_sharding(pspec, split=[0])
+    self.assertIsInstance(updated, jax.sharding.PartitionSpec)
+    self.assertEqual(updated, jax.sharding.PartitionSpec("a", None, "b"))
+
+    pspec_with_none = jax.sharding.PartitionSpec("a", None, "b")
+    updated = flax_util.update_sharding(pspec_with_none, merge=[0])
+    self.assertIsInstance(updated, jax.sharding.PartitionSpec)
+    self.assertEqual(updated, jax.sharding.PartitionSpec("a", "b"))
+
   def test_unbox(self):
     mesh = jax.make_mesh(
         (1, 1),
@@ -193,6 +221,37 @@ class FlaxUtilTest(parameterized.TestCase):
       updated = flax_util.update_boxed(boxed, transpose=[2, 0, None])
       self.assertIsInstance(updated, nnx.Param)
       self.assertEqual(updated.sharding_names, ("b", "a", None))
+
+      # Test nn.Partitioned with jax.sharding.PartitionSpec
+      boxed_pspec = nn.Partitioned(
+          jnp.ones((4, 8)), names=jax.sharding.PartitionSpec("a", "b")
+      )
+      updated_pspec = flax_util.update_boxed(
+          boxed_pspec, value=jnp.ones((2, 2, 8)), split=[0]
+      )
+      self.assertIsInstance(updated_pspec, nn.Partitioned)
+      self.assertEqual(updated_pspec.value.shape, (2, 2, 8))
+      self.assertEqual(
+          updated_pspec.names, jax.sharding.PartitionSpec("a", None, "b")
+      )
+
+      # Test nnx.Param with jax.sharding.PartitionSpec
+      boxed_nnx_pspec = nnx.Param(
+          jnp.ones((2, 2, 8)),
+          out_sharding=jax.sharding.PartitionSpec("a", None, "b"),
+      )
+      updated_nnx_pspec = flax_util.update_boxed(
+          boxed_nnx_pspec, transpose=[2, 0, None]
+      )
+      self.assertIsInstance(updated_nnx_pspec, nnx.Param)
+      metadata = updated_nnx_pspec.get_metadata()
+      sharding_key = (
+          "out_sharding" if "out_sharding" in metadata else "sharding_names"
+      )
+      self.assertIsInstance(metadata[sharding_key], jax.sharding.PartitionSpec)
+      self.assertEqual(
+          metadata[sharding_key], jax.sharding.PartitionSpec("b", "a", None)
+      )
 
   def test_make_rng_linen(self):
     class MyModule(nn.Module):

@@ -354,6 +354,161 @@ class LoraTest(parameterized.TestCase):
     self.assertEqual(lora_b.unbox().shape, (3, 32))
     self.assertEqual(lora_b.names, (None, "b"))
 
+  def test_lora_dot_general_batch(self):
+    """Test LoRA on a dot_general operation with batch dimensions."""
+    batch, in_dim, contract, out_dim = 2, 4, 8, 16
+    rank = 3
+    alpha = 1.0
+
+    class BatchLinear(nnx.Module):
+
+      def __init__(self, rngs):
+        # kernel shape: (batch, contract, out)
+        self.kernel = nnx.Param(
+            jax.random.normal(rngs.params(), (batch, contract, out_dim))
+        )
+
+      def __call__(self, x):
+        # x: (batch, in, contract)
+        # dim_nums: ((lhs_contract, rhs_contract), (lhs_batch, rhs_batch))
+        return jax.lax.dot_general(
+            x,
+            self.kernel.value,
+            (((2,), (1,)), ((0,), (0,))),
+        )
+
+    model = BatchLinear(nnx.Rngs(0))
+    lora_provider = lora.LoraProvider([
+        lora.LoraRule(
+            module_path=".*",
+            rank=rank,
+            alpha=alpha,
+            lora_b_initializer=nnx.initializers.ones,
+        ),
+    ])
+
+    lhs = jnp.ones((batch, in_dim, contract))
+    lora_model = lora.apply_lora_to_model(model, lora_provider, lhs)
+
+    # Check if LoRA parameters were created and have expected shapes
+    variables = nnx.variables(lora_model, nnx.LoRAParam)
+    self.assertIn("kernel_lora_a", variables)
+    self.assertIn("kernel_lora_b", variables)
+
+    lora_a = variables["kernel_lora_a"].value
+    lora_b = variables["kernel_lora_b"].value
+
+    self.assertEqual(lora_a.shape, (batch, contract, rank))
+    self.assertEqual(lora_b.shape, (batch, rank, out_dim))
+
+    # Verify forward pass
+    output = lora_model(lhs)
+    self.assertEqual(output.shape, (batch, in_dim, out_dim))
+
+    # Expected output
+    res = jax.lax.dot_general(
+        lhs, model.kernel.value, (((2,), (1,)), ((0,), (0,)))
+    )
+    delta_a = jax.lax.dot_general(lhs, lora_a, (((2,), (1,)), ((0,), (0,))))
+    delta = jax.lax.dot_general(delta_a, lora_b, (((2,), (1,)), ((0,), (0,))))
+    expected = res + delta * (alpha / rank)
+
+    self.assertTrue(jnp.allclose(output, expected))
+
+  def test_lora_dot_general_multi_out_dim(self):
+    """Test LoRA on a dot_general operation with multiple output dimensions."""
+    batch, in_dim, contract, out_dim1, out_dim2 = 2, 4, 8, 4, 4
+    rank = 3
+    alpha = 1.0
+
+    class MultiOutLinear(nnx.Module):
+
+      def __init__(self, rngs):
+        # kernel shape: (batch, contract, out_dim1, out_dim2)
+        self.kernel = nnx.Param(
+            jax.random.normal(
+                rngs.params(), (batch, contract, out_dim1, out_dim2)
+            )
+        )
+
+      def __call__(self, x):
+        # x: (batch, in, contract)
+        # dim_nums: ((lhs_contract, rhs_contract), (lhs_batch, rhs_batch))
+        return jax.lax.dot_general(
+            x, self.kernel.value, (((2,), (1,)), ((0,), (0,)))
+        )
+
+    model = MultiOutLinear(nnx.Rngs(0))
+    lora_provider = lora.LoraProvider(rank=rank, alpha=alpha)
+    lhs = jnp.ones((batch, in_dim, contract))
+    lora_model = lora.apply_lora_to_model(model, lora_provider, lhs)
+
+    # Check if LoRA parameters were created and have expected shapes
+    variables = nnx.variables(lora_model, nnx.LoRAParam)
+    self.assertIn("kernel_lora_a", variables)
+    self.assertIn("kernel_lora_b", variables)
+
+    lora_a = variables["kernel_lora_a"].value
+    lora_b = variables["kernel_lora_b"].value
+
+    self.assertEqual(lora_a.shape, (batch, contract, rank))
+    self.assertEqual(lora_b.shape, (batch, rank, out_dim1 * out_dim2))
+
+    # Verify forward pass
+    output = lora_model(lhs)
+    self.assertEqual(output.shape, (batch, in_dim, out_dim1, out_dim2))
+
+    # Expected output
+    res = model(lhs)
+    delta_a = jax.lax.dot_general(lhs, lora_a, (((2,), (1,)), ((0,), (0,))))
+    lora_b_reshaped = jnp.reshape(lora_b, (batch, rank, out_dim1, out_dim2))
+    delta = jax.lax.dot_general(
+        delta_a, lora_b_reshaped, (((2,), (1,)), ((0,), (0,)))
+    )
+    expected = res + delta * (alpha / rank)
+
+    self.assertTrue(jnp.allclose(output, expected, atol=1e-5))
+
+  def test_lora_dot_general_no_weight(self):
+    """Tests that LoRA skips operations where rhs is not a weight."""
+
+    class NoWeightModel(nnx.Module):
+
+      def __call__(self, x):
+        # Multiply by a constant array, not a parameter
+        return jax.lax.dot_general(
+            x, jnp.ones((8, 8)), (((1,), (0,)), ((), ()))
+        )
+
+    model = NoWeightModel()
+    lora_provider = lora.LoraProvider(rank=2, alpha=1.0)
+    # This should work without error and without creating LoRA params
+    lora_model = lora.apply_lora_to_model(
+        model, lora_provider, jnp.ones((1, 8))
+    )
+    self.assertEmpty(nnx.variables(lora_model, nnx.LoRAParam))
+    output = lora_model(jnp.ones((1, 8)))
+    self.assertEqual(output.shape, (1, 8))
+
+  def test_lora_dot_general_no_remain(self):
+    """Tests LoRA where there are no remaining dimensions (full contraction)."""
+
+    class FullContractModel(nnx.Module):
+
+      def __init__(self, rngs):
+        self.kernel = nnx.Param(jax.random.normal(rngs.params(), (8,)))
+
+      def __call__(self, x):
+        return jax.lax.dot_general(
+            x, self.kernel.value, (((0,), (0,)), ((), ()))
+        )
+
+    model = FullContractModel(nnx.Rngs(0))
+    lora_provider = lora.LoraProvider(rank=2, alpha=1.0)
+    lora_model = lora.apply_lora_to_model(model, lora_provider, jnp.ones((8,)))
+    output = lora_model(jnp.ones((8,)))
+    self.assertEqual(output.shape, ())
+
   def test_lora_conv_nn(self):
     """Test LoRA on nn.Conv module."""
     conv = nn.Conv(
