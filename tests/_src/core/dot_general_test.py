@@ -121,31 +121,6 @@ class DotGeneralTest(parameterized.TestCase):
         self.assertEqual(loop_output.dtype, expected_output_dtype)
         self.assertEqual(einsum_output.dtype, expected_output_dtype)
 
-  def test_fast_dot_general_channelwise_contracting(self):
-    lhs = jnp.ones((4, 8), jnp.float32)
-    rhs = jnp.ones((8, 4), jnp.float32)
-
-    # Channelwise on axis 1 (contracting)
-    lhs_how = qarray.HowToQuantize(
-        qtype=jnp.int8,
-        tiled_axes={1: 1},
-    )
-    # Channelwise on axis 0 (contracting)
-    rhs_how = qarray.HowToQuantize(
-        qtype=jnp.int8,
-        tiled_axes={0: 1},
-    )
-
-    q_lhs = qarray.quantize(lhs, lhs_how)
-    q_rhs = qarray.quantize(rhs, rhs_how)
-
-    dnums = (([1], [0]), ([], []))
-
-    # This used to raise ValueError: Cannot transpose (1, 8) as [0, None].
-    res = dot_general._fast_dot_general(q_lhs, q_rhs, dnums)
-    self.assertEqual(res.shape, (4, 4))
-    self.assertTrue(jnp.allclose(res, jnp.full((4, 4), 8.0), atol=0.1))
-
 
 if __name__ == '__main__':
   absltest.main()

@@ -219,9 +219,7 @@ def dot_general_qt_bwd(
       y_disable_channelwise_axes = config.drhs_residual_disable_channelwise_axes
 
     if g_qtype and numerics.should_quantize(g.dtype):
-      if isinstance(y, qarray.QArray) and not any(
-          v > 1 for v in qarray.get_tiled_axes(y).values()
-      ):
+      if isinstance(y, qarray.QArray) and not qarray.get_tiled_axes(y):
         # Apply the scale of y to g, this trick avoids requantizing y because
         # the y from fwd pass has different channelwise_axes.
         assert y.zero_point is None and y.qtype == y.qvalue.dtype
