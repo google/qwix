@@ -336,8 +336,10 @@ class QuantizedOp:
     # The producer(Op N-1) sets the rule for the activation.
     # The consumer(Op N) uses that rule to quantize the activation.
 
-    # Do not quantize if the rule explicitly disables it.
-    if rule and rule.act_qtype is None:
+    # Do not quantize if the rule explicitly disables it or if there is no rule.
+    if rule is None or rule.act_qtype is None:
+      aux_data.set(array, _FQ_RULE, None)
+      aux_data.set(array, _FQ_ARRAY, None)
       return array
 
     previous_rule = aux_data.get(array, _FQ_RULE, None)
@@ -473,7 +475,8 @@ class FinalOutput(QuantizedOp):
     if self.fixed_range_for_output is not None:
       aux_data.set(x, _FIXED_RANGE, self.fixed_range_for_output)
     # Only FQ the output if the previous op wants.
-    return self._maybe_fake_quant(x, None, op_id)
+    previous_rule = aux_data.get(x, _FQ_RULE, None)
+    return self._maybe_fake_quant(x, previous_rule, op_id)
 
 
 def _forward_metadata(inputs: Any, outputs: Any, is_value_preserving_op: bool):
