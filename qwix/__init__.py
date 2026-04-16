@@ -17,6 +17,7 @@
 # pylint: disable=g-multiple-import, g-importing-member
 
 from qwix import contrib
+from qwix import version
 from qwix._src.core.conv_general import conv_general_dilated
 from qwix._src.core.dot import dot
 from qwix._src.core.dot_general import dot_general
@@ -34,3 +35,6 @@ from qwix._src.providers.ptq import (
 )
 from qwix._src.providers.qt import QtProvider, QtRule
 from qwix._src.qconfig import QuantizationProvider, QuantizationRule
+
+__version__: str = version.__version__
+del version

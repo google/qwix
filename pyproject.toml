@@ -1,6 +1,5 @@
 [project]
 name = "qwix"
-version = "0.1.5"
 authors = [
   { name = "Qwix Developers", email = "qwix-dev@google.com" },
 ]
@@ -26,6 +25,7 @@ dependencies = [
   "opt_einsum",
   "absl-py",
 ]
+dynamic = ["version"]
 
 [project.optional-dependencies]
 dev = [
@@ -46,6 +46,9 @@ Source = "https://github.com/google/qwix"
 [build-system]
 requires = ["setuptools >= 77.0.3"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = {attr = "qwix.version.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["qwix*"]
