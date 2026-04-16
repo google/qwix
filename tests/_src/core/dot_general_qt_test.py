@@ -334,24 +334,40 @@ class DotGeneralQtTest(parameterized.TestCase):
     self.assertFalse(jnp.array_equal(grads_unmasked, grads_masked))
 
   def test_sparsity_rule(self):
-    """Verifies that DotGeneralQtConfig accepts sparsity_rule and it doesn't crash."""
+    """Verifies that DotGeneralQtConfig accepts sparsity_rule and applies it to rhs."""
     rule = sparsity.SparsityRule(
         weight_sparsity_n=2,
         weight_sparsity_m=4,
     )
-    config = dot_general_qt.DotGeneralQtConfig(
+    config_with_sparsity = dot_general_qt.DotGeneralQtConfig(
         lhs_qtype='int8',
         rhs_qtype='int8',
         sparsity_rule=rule,
     )
-    self.assertEqual(config.sparsity_rule, rule)
+    config_without_sparsity = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='int8',
+        rhs_qtype='int8',
+        sparsity_rule=None,
+    )
+    self.assertEqual(config_with_sparsity.sparsity_rule, rule)
 
     lhs = jax.random.normal(jax.random.key(0), (2, 4), jnp.float32)
     rhs = jax.random.normal(jax.random.key(1), (4, 2), jnp.float32)
     dimension_numbers = (((1,), (0,)), ((), ()))
 
-    # Verify that dot_general_qt runs with the config without crashing.
-    dot_general_qt.dot_general_qt(lhs, rhs, dimension_numbers, config)
+    # Run dot_general_qt with internal sparsification
+    result_internal = dot_general_qt.dot_general_qt(
+        lhs, rhs, dimension_numbers, config_with_sparsity
+    )
+
+    # Run dot_general_qt with external sparsification
+    rhs_sparsified = qarray.sparsify(rhs, rule)
+    result_external = dot_general_qt.dot_general_qt(
+        lhs, rhs_sparsified, dimension_numbers, config_without_sparsity
+    )
+
+    # Outputs should strictly match
+    self.assertTrue(jnp.array_equal(result_internal, result_external))
 
 
 if __name__ == '__main__':

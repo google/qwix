@@ -320,6 +320,10 @@ def dot_general_qt(
     if config.lhs_collect_quant_stat:
       lhs_calibration = config.lhs_collect_quant_stat(lhs_calibration)
 
+  # Sparsify rhs before calibration and quantization to make sure we
+  # are quantizing the remaining values correctly
+  if config.sparsity_rule is not None:
+    rhs = qarray.sparsify(rhs, config.sparsity_rule)
   if config.rhs_qtype and numerics.should_quantize(rhs.dtype):
     rhs_how = dot_general.get_how_to_quantize(
         dimension_numbers=dimension_numbers,
@@ -334,10 +338,6 @@ def dot_general_qt(
     rhs_calibration = qarray.calibrate(rhs, rhs_how)
     if config.rhs_collect_quant_stat:
       rhs_calibration = config.rhs_collect_quant_stat(rhs_calibration)
-
-  if config.sparsity_rule is not None:
-    rhs = qarray.sparsify(rhs, config.sparsity_rule)
-
   return dot_general_qt_fwd_bwd(
       lhs, rhs, lhs_calibration, rhs_calibration, dimension_numbers, config
   )
