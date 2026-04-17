@@ -230,6 +230,41 @@ class OdmlTest(parameterized.TestCase):
         interception.PRIMITIVE_BIND_KEY, numerical_interceptor.mapping
     )
 
+  def test_mixed_tags_at_boundary(self):
+    class BranchModel(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        x1 = nn.Dense(features=8, name='quant_dense')(x)
+        x2 = nn.Dense(features=8, name='float_dense')(x)
+        return jnp.multiply(x1, x2)
+
+    model = BranchModel()
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*quant_dense.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+        ),
+    ]
+    qat_provider = odml.OdmlQatProvider(rules)
+    qat_model = qwix_model.quantize_model(model, qat_provider)
+    model_input = jnp.ones((1, 8), dtype=jnp.float32)
+    qat_vars = qat_model.init(jax.random.key(0), model_input)
+
+    flat_stats = flax.traverse_util.flatten_dict(qat_vars['quant_stats'])
+    stat_keys = {'/'.join(k[:-1]) for k in flat_stats}
+
+    # quant_dense should have stats collected
+    self.assertIn('quant_dense/dot_general0_lhs', stat_keys)
+
+    # float_dense should NOT have stats collected
+    self.assertNotIn('float_dense/dot_general0_lhs', stat_keys)
+
+    # multiply should NOT have stats collected because of mixed tags handling
+    self.assertNotIn('multiply0_lhs', stat_keys)
+    self.assertNotIn('multiply0_rhs', stat_keys)
+
 
 if __name__ == '__main__':
   absltest.main()
