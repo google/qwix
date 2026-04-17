@@ -237,13 +237,13 @@ class QtProvider(qconfig.QuantizationProvider):
         'jax.lax.ragged_dot': self.ragged_dot,
     }
 
-  def _collect_quant_stat(
+  def _update_and_get_quant_stat(
       self,
       name: str,
       batch_axes: tuple[int, ...],
       calibration: averaging.Calibration,
   ) -> averaging.Calibration:
-    """Collects the quantization statistics."""
+    """Updates the running quantization statistics and returns the average."""
     # Calculate the mean over the batch axes.
     calibration = jax.tree.map(
         lambda x: x.mean(axis=batch_axes, keepdims=True), calibration
@@ -274,7 +274,7 @@ class QtProvider(qconfig.QuantizationProvider):
     lhs_collect_quant_stat = None
     if rule.act_qtype is not None and rule.act_static_scale:
       lhs_collect_quant_stat = functools.partial(
-          self._collect_quant_stat, f'{op_id}_lhs', rule.act_batch_axes
+          self._update_and_get_quant_stat, f'{op_id}_lhs', rule.act_batch_axes
       )
     assert flax_util.find_param(rhs) is not None
 
@@ -322,7 +322,7 @@ class QtProvider(qconfig.QuantizationProvider):
       lhs_calibration_method = rule.act_calibration_method
       if rule.act_static_scale:
         lhs_collect_quant_stat = functools.partial(
-            self._collect_quant_stat, f'{op_id}_lhs', rule.act_batch_axes
+            self._update_and_get_quant_stat, f'{op_id}_lhs', rule.act_batch_axes
         )
 
     # RHS configs based on whether it's a weight or an activation.
@@ -341,7 +341,7 @@ class QtProvider(qconfig.QuantizationProvider):
       rhs_calibration_method = rule.act_calibration_method
       if rule.act_static_scale:
         rhs_collect_quant_stat = functools.partial(
-            self._collect_quant_stat, f'{op_id}_rhs', rule.act_batch_axes
+            self._update_and_get_quant_stat, f'{op_id}_rhs', rule.act_batch_axes
         )
 
     # bwd config, which is only enabled when bwd_qtype is set.
