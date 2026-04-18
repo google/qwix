@@ -115,7 +115,9 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
     # Clear the previous aux_data such as fq_array.
     aux_data.clear(ret if unbox else ret.unbox())
     # weight_name is used to distinguish weights from activations.
-    aux_data.set(ret if unbox else ret.unbox(), 'weight_name', name)
+    aux_data.set(
+        ret if unbox else ret.unbox(), odml_ops.AuxDataKey.WEIGHT_NAME, name
+    )
     return ret
 
   def get_interceptors(
@@ -171,7 +173,7 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
           # Clear the previous aux_data such as fq_array.
           aux_data.clear(node.value)
           # weight_name is used to distinguish weights from activations.
-          aux_data.set(node.value, 'weight_name', path[-1])
+          aux_data.set(node.value, odml_ops.AuxDataKey.WEIGHT_NAME, path[-1])
 
     # Quantize the model inputs if needed.
     op = odml_ops.ModelInput(
@@ -218,7 +220,7 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
       The fake quantized array.
     """
     # Check and apply the fixed-range calibration asscociated with the array.
-    fixed_range = aux_data.get(array, 'fixed_range', None)
+    fixed_range = aux_data.get(array, odml_ops.AuxDataKey.FIXED_RANGE, None)
     if fixed_range is not None:
       calibration_method = f'fixed,{fixed_range[0]},{fixed_range[1]}'
       how = dataclasses.replace(how, calibration_method=calibration_method)
@@ -324,7 +326,7 @@ class OdmlConversionProvider(OdmlQatProvider):
     # This special handling is needed because tflite doesn't support multiple
     # quantization_dimensions.
     if (
-        aux_data.get(args[1], 'weight_name', None) is not None
+        aux_data.get(args[1], odml_ops.AuxDataKey.WEIGHT_NAME, None) is not None
         and args[1].ndim > 2
         and tuple(args[2][0][1]) == (0,)
     ):
@@ -346,7 +348,7 @@ class OdmlConversionProvider(OdmlQatProvider):
     # Make the scale and zero point statically computed.
     with jax.ensure_compile_time_eval():
       # Check if the array is a weight or an activation.
-      weight_name = aux_data.get(array, 'weight_name', None)
+      weight_name = aux_data.get(array, odml_ops.AuxDataKey.WEIGHT_NAME, None)
       if weight_name is not None:  # Weights.
         assert quant_stat_name is None
         mdl_path = flax_util.get_current_module_path()

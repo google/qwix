@@ -14,6 +14,7 @@
 """ODML ops for QAT."""
 
 import dataclasses
+import enum
 import functools
 import sys
 from typing import Any, Callable, Sequence
@@ -115,43 +116,46 @@ NotAnActivationError = ValueError(  # pylint: disable=invalid-name
 )
 
 
-### Possible auxiliary data associated with an array
+class AuxDataKey(str, enum.Enum):
+  """Auxiliary data keys."""
 
-# Whether an array should be fake quantized by the next op and what rule to use.
-#
-# For the output of an op, it's not fake-quantized immediately because the next
-# op may choose to delay the FQ, e.g. dot_general + add + relu can be fused and
-# no FQ should be inserted in between.
-_FQ_RULE = 'fq_rule'  # QuantizationRule
+  # Whether an array should be fake quantized by the next op and what rule to
+  # use. For the output of an op, it's not fake-quantized immediately because
+  # the next op may choose to delay the FQ, e.g. dot_general + add + relu can be
+  # fused and no FQ should be inserted in between.
+  FQ_RULE = 'fq_rule'  # QuantizationRule
 
-# Whether the (unquantized) array is already fake-quantized in another code path
-# and what the fake-quantized array is. This avoids the same array being
-# fake-quantized multiple times.
-_FQ_ARRAY = 'fq_array'  # array
+  # Whether the (unquantized) array is already fake-quantized in another code
+  # path and what the fake-quantized array is. This avoids the same array being
+  # fake-quantized multiple times.
+  FQ_ARRAY = 'fq_array'  # array
 
-# Whether the previous op allows to fuse arithmetic ops or batch norm after it.
-_ALLOW_FUSION = 'allow_fusion'  # bool
+  # Whether the previous op allows to fuse arithmetic ops or batch norm after
+  # it.
+  ALLOW_FUSION = 'allow_fusion'  # bool
 
-# Whether the array is an activation. An array can be either an activation,
-# a weight, or a constant.
-_IS_ACTIVATION = 'is_activation'  # bool
+  # Whether the array is an activation. An array can be either an activation,
+  # a weight, or a constant.
+  IS_ACTIVATION = 'is_activation'  # bool
 
-# Whether the array is a weight and what is its name. Weights don't need to have
-# quantization statistics collected because they are statically quantized.
-# The name is useful in the conversion provider to find the static weight.
-_WEIGHT_NAME = 'weight_name'  # str
+  # Whether the array is a weight and what is its name. Weights don't need to
+  # have quantization statistics collected because they are statically
+  # quantized. The name is useful in the conversion provider to find the
+  # static weight.
+  WEIGHT_NAME = 'weight_name'  # str
 
-# Fixed range for logistic functions whose output ranges are known, e.g.
-# softmax.
-_FIXED_RANGE = 'fixed_range'  # tuple[float, float]
+  # Fixed range for logistic functions whose output ranges are known, e.g.
+  # softmax.
+  FIXED_RANGE = 'fixed_range'  # tuple[float, float]
+
 
 # Metadata keys that depend on the value being preserved.
 # If the value changes (e.g. add, mul), these keys become invalid.
 _VALUE_DEPENDENT_METADATA = (
-    _WEIGHT_NAME,
-    _FQ_RULE,
-    _FIXED_RANGE,
-    _ALLOW_FUSION,
+    AuxDataKey.WEIGHT_NAME,
+    AuxDataKey.FQ_RULE,
+    AuxDataKey.FIXED_RANGE,
+    AuxDataKey.ALLOW_FUSION,
 )
 
 # These ops only change the tensor view or layout, not the values.
@@ -245,7 +249,7 @@ class QuantizedOp:
       raise ValueError(f'input_idx is not set for op {self._op_name}.')
     for idx in self.input_idx:
       if isinstance(args[idx], jax.Array) and aux_data.get(
-          args[idx], _IS_ACTIVATION, False
+          args[idx], AuxDataKey.IS_ACTIVATION, False
       ):
         return True
     return False
@@ -303,7 +307,7 @@ class QuantizedOp:
       The fake quantized array.
     """
     # Check if the array is already quantized in another code path.
-    fq_array = aux_data.get(array, _FQ_ARRAY, None)
+    fq_array = aux_data.get(array, AuxDataKey.FQ_ARRAY, None)
     if fq_array is not None:
       return array if fq_array == 'self' else fq_array
 
@@ -313,7 +317,7 @@ class QuantizedOp:
 
     # 1) Handle the Weight case (immediate quantization).
     # rule.weight_qtype means this op will use rule.weight_qtype as weights.
-    if aux_data.get(array, _WEIGHT_NAME, None) is not None:
+    if aux_data.get(array, AuxDataKey.WEIGHT_NAME, None) is not None:
       if rule and rule.weight_qtype:
         # If there is a rule for weights, quantize the weights.
         how = qarray.HowToQuantize(
@@ -325,7 +329,7 @@ class QuantizedOp:
             calibration_method=rule.act_calibration_method,
         )
         fq_array = self._fake_quant_fn(array, how, None)
-        aux_data.set(array, _FQ_ARRAY, fq_array)
+        aux_data.set(array, AuxDataKey.FQ_ARRAY, fq_array)
         return fq_array
       else:
         # No rule for weights, return as is.
@@ -340,7 +344,7 @@ class QuantizedOp:
     if rule and rule.act_qtype is None:
       return array
 
-    previous_rule = aux_data.get(array, _FQ_RULE, None)
+    previous_rule = aux_data.get(array, AuxDataKey.FQ_RULE, None)
     if previous_rule is not None:
       # Delayed Quantization: The Previous Op (Producer) specified how its
       # output should be quantized. The Current Op (Consumer) now executes
@@ -372,7 +376,7 @@ class QuantizedOp:
     )
 
     fq_array = self._fake_quant_fn(array, how, quant_stat_name)
-    aux_data.set(array, _FQ_ARRAY, fq_array)
+    aux_data.set(array, AuxDataKey.FQ_ARRAY, fq_array)
     return fq_array
 
   def _fake_quant_output(
@@ -382,12 +386,12 @@ class QuantizedOp:
     # Handle all leaves of the pytree.
     for x in jax.tree_util.tree_leaves(outputs):
       if isinstance(x, jax.Array):
-        aux_data.set(x, _IS_ACTIVATION, True)
+        aux_data.set(x, AuxDataKey.IS_ACTIVATION, True)
         if self.fixed_range_for_output is not None:
-          aux_data.set(x, _FIXED_RANGE, self.fixed_range_for_output)
+          aux_data.set(x, AuxDataKey.FIXED_RANGE, self.fixed_range_for_output)
         # Output is only quantized in SRQ.
         if rule and rule.act_qtype and rule.act_static_scale:
-          aux_data.set(x, _FQ_RULE, rule)
+          aux_data.set(x, AuxDataKey.FQ_RULE, rule)
     return outputs
 
 
@@ -405,7 +409,7 @@ class OnlyInputOp(QuantizedOp):
     out = self._call_original_op(*args, **kwargs)
     if rule and rule.act_qtype:
       # Mark the output as already quantized.
-      aux_data.set(out, _FQ_ARRAY, 'self')
+      aux_data.set(out, AuxDataKey.FQ_ARRAY, 'self')
     return self._fake_quant_output(out, rule)
 
 
@@ -419,7 +423,7 @@ class OnlyOutputOp(QuantizedOp):
       return self._call_original_op(*args, **kwargs)
     rule, _ = self._get_rule_and_op_id_fn(self._op_name)
     if rule is None or rule.act_qtype is None:
-      rule = aux_data.get(args[self.input_idx[0]], _FQ_RULE, None)
+      rule = aux_data.get(args[self.input_idx[0]], AuxDataKey.FQ_RULE, None)
     # No quantization on the input.
     out = self._call_original_op(*args, **kwargs)
     return self._fake_quant_output(out, rule)
@@ -467,11 +471,13 @@ class FinalOutput(QuantizedOp):
     super().__init__(**kwargs)
 
   def __call__(self, x: Any) -> Any:
-    if self.check_activation and not aux_data.get(x, _IS_ACTIVATION, False):
+    if self.check_activation and not aux_data.get(
+        x, AuxDataKey.IS_ACTIVATION, False
+    ):
       raise NotAnActivationError
     _, op_id = self._get_rule_and_op_id_fn(self._op_name)
     if self.fixed_range_for_output is not None:
-      aux_data.set(x, _FIXED_RANGE, self.fixed_range_for_output)
+      aux_data.set(x, AuxDataKey.FIXED_RANGE, self.fixed_range_for_output)
     # Only FQ the output if the previous op wants.
     return self._maybe_fake_quant(x, None, op_id)
 
@@ -485,18 +491,19 @@ def _forward_metadata(inputs: Any, outputs: Any, is_value_preserving_op: bool):
     is_value_preserving_op: Whether the op preserves the value.
 
   Metadata propagation rules:
-  1. _IS_ACTIVATION: Propagated if ANY input is an activation (Union).
+  1. AuxDataKey.IS_ACTIVATION: Propagated if ANY input is an activation (Union).
      This tracks data provenance - if data comes from an activation, it remains
      an activation regardless of the operation.
 
-  2. _WEIGHT_NAME, _FQ_RULE, _FIXED_RANGE, _ALLOW_FUSION: Propagated ONLY for
-     value-preserving ops (e.g. reshape, transpose).
+  2. AuxDataKey.WEIGHT_NAME, AuxDataKey.FQ_RULE, AuxDataKey.FIXED_RANGE,
+     AuxDataKey.ALLOW_FUSION: Propagated ONLY for value-preserving ops (e.g.
+     reshape, transpose).
      These keys are "value-preserving" because they describe properties of the
      specific tensor values (e.g. "this tensor is weight 'w'", "this tensor has
      range X"). If the values change (e.g. add 1), these properties are lost.
 
-  3. _FQ_ARRAY: Propagated if ALL activation inputs share the same FQ array
-     (Intersection) AND the op is value-preserving.
+  3. AuxDataKey.FQ_ARRAY: Propagated if ALL activation inputs share the same
+     FQ array (Intersection) AND the op is value-preserving.
      This ensures we don't accidentally treat a mixed or modified value as
      already quantized.
   """
@@ -509,10 +516,10 @@ def _forward_metadata(inputs: Any, outputs: Any, is_value_preserving_op: bool):
       continue
 
     # Check if at least one arg is activation.
-    if aux_data.get(arg, _IS_ACTIVATION, False):
+    if aux_data.get(arg, AuxDataKey.IS_ACTIVATION, False):
       is_activation = True
     # Check if every arg is quantized.
-    if aux_data.get(arg, _FQ_ARRAY, None) != 'self':
+    if aux_data.get(arg, AuxDataKey.FQ_ARRAY, None) != 'self':
       all_args_quantized = False
 
     # For value-preserving ops, handle _VALUE_DEPENDENT_METADATA.
@@ -521,21 +528,21 @@ def _forward_metadata(inputs: Any, outputs: Any, is_value_preserving_op: bool):
         val = aux_data.get(arg, key, None)
         if val is None:
           continue
-        if key == _WEIGHT_NAME:
+        if key == AuxDataKey.WEIGHT_NAME:
           weight_names.add(val)
         else:
           # Last wins for value dependent metadata.
           metadata[key] = val
 
-  # Set _IS_ACTIVATION if at least one arg is activation.
+  # Set IS_ACTIVATION if at least one arg is activation.
   if is_activation:
-    metadata[_IS_ACTIVATION] = True
-  # For value-preserving ops, set _WEIGHT_NAME if purely a single weight op.
+    metadata[AuxDataKey.IS_ACTIVATION] = True
+  # For value-preserving ops, set WEIGHT_NAME if purely a single weight op.
   elif len(weight_names) == 1:
-    metadata[_WEIGHT_NAME] = next(iter(weight_names))
-  # For value-preserving ops, set _FQ_ARRAY if all args are fq and out is act.
+    metadata[AuxDataKey.WEIGHT_NAME] = next(iter(weight_names))
+  # For value-preserving ops, set FQ_ARRAY if all args are fq and out is act.
   if is_value_preserving_op and is_activation and all_args_quantized:
-    metadata[_FQ_ARRAY] = 'self'
+    metadata[AuxDataKey.FQ_ARRAY] = 'self'
 
   # Propagate metadata to outputs.
   if metadata:
@@ -585,12 +592,12 @@ class BatchNorm(QuantizedOp):
   """BatchNorm op, which can be fused into previous op completely."""
 
   def __call__(self, norm, x: jax.Array, *args, **kwargs) -> jax.Array:
-    if not aux_data.get(x, _IS_ACTIVATION, False):
+    if not aux_data.get(x, AuxDataKey.IS_ACTIVATION, False):
       return norm(x, *args, **kwargs)
-    if aux_data.get(x, _ALLOW_FUSION, False):
-      rule = aux_data.get(x, _FQ_RULE, None)
+    if aux_data.get(x, AuxDataKey.ALLOW_FUSION, False):
+      rule = aux_data.get(x, AuxDataKey.FQ_RULE, None)
       out = norm(x, *args, **kwargs)
-      aux_data.set(out, _ALLOW_FUSION, True)
+      aux_data.set(out, AuxDataKey.ALLOW_FUSION, True)
     else:
       rule, op_id = self._get_rule_and_op_id_fn('batch_norm_op')
       x = self._maybe_fake_quant(x, rule, op_id)
@@ -635,8 +642,8 @@ class UfuncCall(QuantizedOp):
     """Fake quantize the inputs of the op."""
     if (
         self._op_name in ('add', 'sub', 'mul', 'truediv')
-        and aux_data.get(args[1], _ALLOW_FUSION, False)
-        and not aux_data.get(args[2], _IS_ACTIVATION, False)
+        and aux_data.get(args[1], AuxDataKey.ALLOW_FUSION, False)
+        and not aux_data.get(args[2], AuxDataKey.IS_ACTIVATION, False)
     ):
       # The previous op allows to fuse adding a constant.
       self._output_allow_fusion = True
@@ -647,7 +654,7 @@ class UfuncCall(QuantizedOp):
       self, outputs: Any, rule: qconfig.QuantizationRule | None
   ) -> Any:
     if self._output_allow_fusion:
-      aux_data.set(outputs, _ALLOW_FUSION, True)
+      aux_data.set(outputs, AuxDataKey.ALLOW_FUSION, True)
     return super()._fake_quant_output(outputs, rule)
 
 
@@ -656,12 +663,17 @@ class Concatenate(QuantizedOp):
 
   def __call__(self, arrays: Sequence[jax.Array], *args, **kwargs) -> jax.Array:
     """QAT concatenate."""
-    if not any(aux_data.get(x, _IS_ACTIVATION, False) for x in arrays):
+    if not any(
+        aux_data.get(x, AuxDataKey.IS_ACTIVATION, False) for x in arrays
+    ):
       return self._call_original_op(arrays, *args, **kwargs)
 
     # Forward the fixed_range if all inputs have the same.
-    fixed_range = aux_data.get(arrays[0], _FIXED_RANGE, None)
-    if any(aux_data.get(x, _FIXED_RANGE, None) != fixed_range for x in arrays):
+    fixed_range = aux_data.get(arrays[0], AuxDataKey.FIXED_RANGE, None)
+    if any(
+        aux_data.get(x, AuxDataKey.FIXED_RANGE, None) != fixed_range
+        for x in arrays
+    ):
       fixed_range = None
 
     # If ourselves is not quantized, fake quantize the inputs if needed.
@@ -676,7 +688,7 @@ class Concatenate(QuantizedOp):
     out = jnp.concatenate(arrays, *args, **kwargs)
 
     if fixed_range is not None:
-      aux_data.set(out, _FIXED_RANGE, fixed_range)
+      aux_data.set(out, AuxDataKey.FIXED_RANGE, fixed_range)
     return self._fake_quant_output(out, rule)
 
 
@@ -702,7 +714,7 @@ class Take(OnlyInputOp):
     out = self._call_original_op(*args, **kwargs)
     if rule and rule.act_qtype:
       # Output doesn't need more FQ.
-      aux_data.set(out, _FQ_ARRAY, 'self')
+      aux_data.set(out, AuxDataKey.FQ_ARRAY, 'self')
     return self._fake_quant_output(out, rule)
 
 
@@ -711,12 +723,12 @@ class Silu(QuantizedOp):
 
   def __call__(self, x: jax.Array) -> jax.Array:
     """QAT silu."""
-    if not aux_data.get(x, _IS_ACTIVATION, False):
+    if not aux_data.get(x, AuxDataKey.IS_ACTIVATION, False):
       return self._call_original_op(x)
     rule, op_id = self._get_rule_and_op_id_fn(self._op_name)
     x = self._maybe_fake_quant(x, rule, op_id)
     y = jax.nn.sigmoid(x)
-    aux_data.set(y, _FIXED_RANGE, Softmax.fixed_range_for_output)
+    aux_data.set(y, AuxDataKey.FIXED_RANGE, Softmax.fixed_range_for_output)
     y = self._maybe_fake_quant(y, rule, op_id + '_sigmoid')
     return self._fake_quant_output(x * y, rule)
 
@@ -786,10 +798,18 @@ class DotEinsumConv(QuantizedOp):
     rule, op_id = self._get_rule_and_op_id_fn(self._op_name)
     args = list(args)
 
-    lhs_is_activation = aux_data.get(args[lhs_idx], _IS_ACTIVATION, False)
-    lhs_is_weight = aux_data.get(args[lhs_idx], _WEIGHT_NAME, None) is not None
-    rhs_is_activation = aux_data.get(args[rhs_idx], _IS_ACTIVATION, False)
-    rhs_is_weight = aux_data.get(args[rhs_idx], _WEIGHT_NAME, None) is not None
+    lhs_is_activation = aux_data.get(
+        args[lhs_idx], AuxDataKey.IS_ACTIVATION, False
+    )
+    lhs_is_weight = (
+        aux_data.get(args[lhs_idx], AuxDataKey.WEIGHT_NAME, None) is not None
+    )
+    rhs_is_activation = aux_data.get(
+        args[rhs_idx], AuxDataKey.IS_ACTIVATION, False
+    )
+    rhs_is_weight = (
+        aux_data.get(args[rhs_idx], AuxDataKey.WEIGHT_NAME, None) is not None
+    )
     assert lhs_is_activation + lhs_is_weight <= 1
     assert rhs_is_activation + rhs_is_weight <= 1
 
@@ -835,7 +855,7 @@ class DotEinsumConv(QuantizedOp):
       )
 
     out = self._call_original_op(*args, **kwargs)
-    aux_data.set(out, _ALLOW_FUSION, True)
+    aux_data.set(out, AuxDataKey.ALLOW_FUSION, True)
     return self._fake_quant_output(out, rule)
 
 
