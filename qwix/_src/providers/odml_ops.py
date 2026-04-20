@@ -410,7 +410,7 @@ class QuantizedOp:
         qtype=effective_rule.act_qtype,
         tiled_axes={},
         # Use per-channel scales for batch axes, which will be reduced later
-        # in _collect_quant_stat.
+        # in _update_and_get_quant_stat.
         channelwise_axes=effective_rule.act_batch_axes,
         calibration_method=effective_rule.act_calibration_method,
     )

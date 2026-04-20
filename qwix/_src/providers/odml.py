@@ -228,7 +228,7 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
     calibration = qarray.calibrate(array, how)
     if quant_stat_name is not None:
       is_fixed_range = how.calibration_method.startswith('fixed')
-      calibration = self._collect_quant_stat(
+      calibration = self._update_and_get_quant_stat(
           quant_stat_name, calibration, is_fixed_range
       )
     scale, zero_point = qarray.compute_scale_zero_point(calibration, how.qtype)
@@ -240,13 +240,13 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
     ste_array = qarray.clip_to_calibration(array, calibration, how.tiled_axes)
     return ste_array + jax.lax.stop_gradient(dq_array - ste_array)
 
-  def _collect_quant_stat(
+  def _update_and_get_quant_stat(
       self,
       name: str,
       calibration: averaging.Calibration,
       calibration_is_fixed_range: bool,
   ) -> averaging.Calibration:
-    """Collects the quantization statistics."""
+    """Updates the running quantization statistics and returns the average."""
     # For SRQ, only per-tensor scale is supported, so we don't need to check the
     # act_batch_axes at all.
     calibration = jax.tree.map(lambda x: x.mean(keepdims=True), calibration)
