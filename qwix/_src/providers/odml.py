@@ -41,6 +41,30 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
   * Quantizes output activations via a delayed fake_quant.
   * Supports limited per-channel quantization for weights.
   * Doesn't support subchannel quantization.
+
+  ## Tensor-Centric Rules vs. Operation-Centric Rules
+  In other Qwix providers (like PTQ), a rule's `act_qtype` defines how the
+  inputs to the matched operation are quantized. In the ODML provider, the
+  meaning is flipped to align with LiteRT's (TFLite) tensor-centric data model:
+  *   **`weight_qtype`**: Applies immediately to the weights of the matched
+      operation.
+  *   **`act_qtype`**: Defines the quantization type for the **OUTPUT** of the
+      operation matching the rule.
+
+  In LiteRT, quantization parameters belong to Tensors (edges), not Operations
+  (nodes). Tying quantization to the tensor provides two key benefits:
+  *   **Hardware Execution Efficiency**: Edge hardware accelerators (NPUs/DSPs)
+      operate directly on memory buffers. They expect self-contained tensor
+      descriptors that include quantization parameters, allowing them to load
+      and interpret the data statically without needing to inspect operation
+      metadata.
+  *   **Simpler Graph Optimizations**: It makes transformations like operator
+      fusion much easier to implement. Operations can be fused without losing or
+      complicating the quantization state of the remaining tensors. In Qwix
+      ODML, we leverage this by attaching rules to tensors but delaying their
+      application, keeping paths between fusible ops (like Conv and ReLU) clear
+      of `FakeQuant` nodes.
+  *   Please refer to tensorflow/compiler/mlir/lite/schema/schema.fbs for more.
   """
 
   def __init__(
@@ -77,6 +101,9 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
     self._strict = strict
     self._ops = odml_ops.get_all_ops()
 
+    # Only these contraction ops support toggling channelwise weight
+    # quantization (standard for ODML). For other ops, per-channel weight
+    # quantization is either not applicable or not supported.
     for name in [
         'jax.lax.conv_general_dilated',
         'jax.lax.dot_general',
@@ -147,7 +174,14 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
     ]
 
   def get_intercept_map(self):
-    """Used for interception."""
+    """Returns a map of function names to their intercepted implementations.
+
+    This method instantiates operator classes from `odml_ops` as functors that
+    bind to this provider's specific context (e.g., `_fake_quant`). JAX uses
+    these instances' `__call__` methods to replace the original operations,
+    allowing them to maintain operator-specific logic while accessing
+    provider-level state.
+    """
     intercept_map = super().get_intercept_map()
     intercept_map['flax.linen.Module.param'] = self.nn_param
     # Add all the ops to the intercept map.
@@ -163,8 +197,21 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
   def process_model_inputs(
       self, model: Any, model_args: Any, model_kwargs: Any
   ) -> tuple[Any, Any, Any]:
-    """Quantize the input of the model."""
-    # Set weight_name for nnx models. Linen models are handled in nn_param.
+    """Prepares model activations for quantization metadata propagation.
+
+    This method also handles weight tagging for NNX models as a special case.
+
+    Args:
+      model: The model to process.
+      model_args: Positional arguments to the model.
+      model_kwargs: Keyword arguments to the model.
+
+    Returns:
+      The processed model and arguments with appropriate auxiliary data.
+    """
+    # Weight Handling (NNX only): Eagerly iterate over the graph to clear stale
+    # metadata and tag parameters with _WEIGHT_NAME. For Flax Linen models,
+    # weights are handled lazily via `nn_param` interception.
     if isinstance(model, nnx.Module):
       for path, node in nnx.iter_graph(model):
         if isinstance(node, nnx.Module):
@@ -175,7 +222,14 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
           # weight_name is used to distinguish weights from activations.
           aux_data.set(node.value, odml_ops.AuxDataKey.WEIGHT_NAME, path[-1])
 
-    # Quantize the model inputs if needed.
+    # Activation Handling: Apply the `ModelInput` operator to all leaves of
+    # `model_args` and `model_kwargs` (the actual arguments passed to the
+    # model).
+    # ModelInput behavior:
+    # - For non-jax.Array objects (e.g., bool, int), it's a no-op.
+    # - For jax.Array objects, it clears stale metadata, marks them as
+    #   activations (_IS_ACTIVATION = True), and attaches fixed ranges if set.
+    # This prepares the inputs as origin points for metadata tracking.
     op = odml_ops.ModelInput(
         fixed_range_for_output=self._fixed_range_for_inputs,
         get_rule_and_op_id_fn=self._get_current_rule_and_op_id,
@@ -204,17 +258,24 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
       how: qarray.HowToQuantize,
       quant_stat_name: str | None = None,
   ) -> jax.Array:
-    """Apply fake quantization to array.
+    """Numerical operation used by intercepted model ops to fake-quantize tensors.
 
-    This function can be used on both activations and weights. Gradient will be
-    passed through.
+    This method is the core implementation passed as a callback to intercepted
+    operators (e.g., in `odml_ops.py`). It is invoked by those operators to
+    perform the actual numerical quantization tasks for both activations and
+    weights during the model execution.
+
+    It handles:
+    1. Calibration (including fixed-range overrides from `aux_data`).
+    2. Quantization statistics collection and moving-average updates.
+    3. Scale and zero-point computation.
+    4. Gradient pass-through via a straight-through estimator (STE).
 
     Args:
       array: The array to quantize.
-      how: How to quantize the array.
-      quant_stat_name: The name for the quantization statistics. If set, the
-        quantization statistics will be collected and the scale will be computed
-        from the statistics.
+      how: Parameters defining how to quantize the array (e.g., qtype).
+      quant_stat_name: Unique name for collecting and averaging quantization
+        statistics. If None, statistics are not collected.
 
     Returns:
       The fake quantized array.
