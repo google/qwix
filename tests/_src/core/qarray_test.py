@@ -110,8 +110,8 @@ class QArrayTest(parameterized.TestCase):
           testcase_name='mxfp8',
           array_shape=(10, 128, 64),
           qtype='mxfp8',
-          channelwise_axes=[],
-          tiled_axes={},
+          channelwise_axes=[0, 1],
+          tiled_axes={2: 32},
           calibration_method='absmax',
           expected_mae=0.0223389,
       ),
@@ -119,10 +119,19 @@ class QArrayTest(parameterized.TestCase):
           testcase_name='mxfp4',
           array_shape=(10, 128, 64),
           qtype='mxfp4',
-          channelwise_axes=[],
-          tiled_axes={},
+          channelwise_axes=[0, 1],
+          tiled_axes={2: 32},
           calibration_method='absmax',
           expected_mae=0.10791,
+      ),
+      dict(
+          testcase_name='mxfp8_custom_tile',
+          array_shape=(10, 128, 64),
+          qtype='mxfp8',
+          channelwise_axes=[0, 1],
+          tiled_axes={2: 16},
+          calibration_method='absmax',
+          expected_mae=0.0223389,
       ),
   )
   def test_quantize_dequantize(
@@ -145,16 +154,22 @@ class QArrayTest(parameterized.TestCase):
     q_array = qarray.quantize(array, how)
     dq_array = qarray.dequantize(q_array)
 
+    expected_scale_shape = list(array_shape)
+    effective_tiled_axes = tiled_axes
+    if not effective_tiled_axes and (qtype == 'mxfp8' or qtype == 'mxfp4'):
+      effective_tiled_axes = {len(array_shape) - 1: 32}
+
+    for axis, tile_size in effective_tiled_axes.items():
+      expected_scale_shape[axis] = (
+          expected_scale_shape[axis] + tile_size - 1
+      ) // tile_size
+
     if qtype == 'mxfp8':
       self.assertEqual(q_array.qvalue.dtype, jnp.float8_e4m3fn)
-      expected_scale_shape = list(array_shape)
-      expected_scale_shape[-1] //= 32
       self.assertEqual(q_array.scale.shape, tuple(expected_scale_shape))
       self.assertIsNone(q_array.zero_point)
     elif qtype == 'mxfp4':
       self.assertEqual(q_array.qvalue.dtype, jnp.float4_e2m1fn)
-      expected_scale_shape = list(array_shape)
-      expected_scale_shape[-1] //= 32
       self.assertEqual(q_array.scale.shape, tuple(expected_scale_shape))
       self.assertIsNone(q_array.zero_point)
     else:

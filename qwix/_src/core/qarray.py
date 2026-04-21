@@ -458,13 +458,7 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
     asymmetric quantization, or {'absmax': ...} for symmetric quantization.
     Each value in the dict has the same shape as the (expected) scale.
   """
-  if how.qtype == 'mxfp8' or how.qtype == 'mxfp4':
-    last_axis = array.ndim - 1
-    how = dataclasses.replace(
-        how,
-        channelwise_axes=list(range(last_axis)),
-        tiled_axes={last_axis: 32},
-    )
+
   reduce_axes = []  # axes to calibrate.
   tiled_axes_offset = 0
   for axis, _ in enumerate(array.shape):

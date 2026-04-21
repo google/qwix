@@ -19,6 +19,7 @@ import itertools
 from typing import Any
 import jax
 from jax import numpy as jnp
+from qwix._src.core import mxfp_dot
 from qwix._src.core import numerics
 from qwix._src.core import qarray
 
@@ -55,9 +56,13 @@ def get_how_to_quantize(
 
   channelwise_axes = sorted(set(range(ndim)) - set(contracting_axes))
   tiled_axes = {}
+  qtype = kwargs.get('qtype')
   if tile_size:
     tiled_axes = {contracting_axes[0]: tile_size}
-
+  elif qtype in ('mxfp8', 'mxfp4'):
+    tiled_axes = {contracting_axes[0]: 32}
+  elif qtype == 'nvfp4':
+    tiled_axes = {contracting_axes[0]: 16}
   return qarray.HowToQuantize(
       channelwise_axes=channelwise_axes,
       tiled_axes=tiled_axes,
@@ -418,6 +423,13 @@ def dot_general(
   Returns:
     a floating-point jax.Array.
   """
+  # Try hardware-accelerated MXFP dot first
+  mxfp_result = mxfp_dot.mxfp_dot_general(
+      lhs, rhs, dimension_numbers, precision, preferred_element_type, **kwargs
+  )
+  if mxfp_result is not None:
+    return mxfp_result
+
   # We need to choose between slow_dot_general, which dequantizes first and
   # then computes in floating-point types, and fast_dot_general, which
   # computes in quantized types first and then dequantize.
