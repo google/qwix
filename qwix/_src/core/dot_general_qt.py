@@ -145,6 +145,31 @@ def _apply_rhs_scale_to_lhs(lhs, rhs_scale, dnums):
   return qarray.call_with_generic_broadcast(jnp.multiply, lhs, lhs_scale)
 
 
+def _get_residual_for_backward(
+    config: DotGeneralQtConfig,
+    operand_in: jax.Array,
+    operand_qt: qarray.MaybeQArray,
+) -> qarray.MaybeQArray:
+  """Returns the residual to be used in the backward pass.
+
+  We reuse the quantized residual from the forward pass if possible. However,
+  reusing tiled residuals is mathematically incorrect because the quantization
+  scales (defined for one contraction axis) do not align with the new
+  contraction axis in the backward pass.
+
+  Args:
+    config: The quantization configuration.
+    operand_in: The original, unquantized operand.
+    operand_qt: The potentially quantized operand.
+  """
+  if config.use_original_residuals or (
+      isinstance(operand_qt, qarray.QArray)
+      and qarray.get_tiled_axes(operand_qt)
+  ):
+    return operand_in
+  return operand_qt
+
+
 # See test_scan_custom_vjp in interception_test.py for why we need to manually
 # disable interceptions for dot_general_qt_fwd.
 @interception.disable_interceptions
@@ -203,7 +228,7 @@ def dot_general_qt_bwd(
       g_calibration_method = config.dlhs_grad_calibration_method
       g_noise_fn = config.dlhs_stochastic_rounding_noise_fn
       g_disable_channelwise_axes = config.dlhs_grad_disable_channelwise_axes
-      y = rhs_in if config.use_original_residuals else rhs
+      y = _get_residual_for_backward(config, rhs_in, rhs)
       y_qtype = config.dlhs_residual_qtype
       y_calibration_method = config.dlhs_residual_calibration_method
       y_disable_channelwise_axes = config.dlhs_residual_disable_channelwise_axes
@@ -213,13 +238,14 @@ def dot_general_qt_bwd(
       g_calibration_method = config.drhs_grad_calibration_method
       g_noise_fn = config.drhs_stochastic_rounding_noise_fn
       g_disable_channelwise_axes = config.drhs_grad_disable_channelwise_axes
-      y = lhs_in if config.use_original_residuals else lhs
+      y = _get_residual_for_backward(config, lhs_in, lhs)
       y_qtype = config.drhs_residual_qtype
       y_calibration_method = config.drhs_residual_calibration_method
       y_disable_channelwise_axes = config.drhs_residual_disable_channelwise_axes
 
     if g_qtype and numerics.should_quantize(g.dtype):
-      if isinstance(y, qarray.QArray) and not qarray.get_tiled_axes(y):
+      if isinstance(y, qarray.QArray):
+        # Scale shifting for quantized residuals (use_original_residuals=False)
         # Apply the scale of y to g, this trick avoids requantizing y because
         # the y from fwd pass has different channelwise_axes.
         assert y.zero_point is None and y.qtype == y.qvalue.dtype

@@ -369,6 +369,34 @@ class DotGeneralQtTest(parameterized.TestCase):
     # Outputs should strictly match
     self.assertTrue(jnp.array_equal(result_internal, result_external))
 
+  def test_tiled_residual_fallback(self):
+    """Verifies that tiled residuals correctly fallback to original inputs in bwd pass."""
+    # Test that configurations with tiled residuals correctly fall back
+    # and compute gradients instead of raising an error/assertion.
+    # MXFP8 uses tiled axes (subchannel quantization).
+    config = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='mxfp8',
+        rhs_qtype='mxfp8',
+        dlhs_grad_qtype='mxfp8',
+        drhs_grad_qtype='mxfp8',
+        tile_size=32,
+        use_original_residuals=False,
+    )
+    # Shapes must be compatible with MXFP8 tiling (multiple of 32)
+    # We use 64 instead of 32 to ensure get_tiled_axes detects tiling.
+    lhs = jnp.ones((64, 128), dtype=jnp.float32)
+    rhs = jnp.ones((128, 64), dtype=jnp.float32)
+
+    def f(l, r):
+      return dot_general_qt.dot_general_qt(
+          l, r, (((1,), (0,)), ((), ())), config=config
+      ).sum()
+
+    # This should now succeed (no AssertionError)
+    grad_lhs, grad_rhs = jax.grad(f, argnums=(0, 1))(lhs, rhs)
+    self.assertEqual(grad_lhs.shape, lhs.shape)
+    self.assertEqual(grad_rhs.shape, rhs.shape)
+
 
 if __name__ == '__main__':
   absltest.main()
