@@ -617,6 +617,14 @@ def process_prequantized_params(
       )
 
     # Case 2: checkpoint_param is prequantized (dict), template_param is fp.
+    # We reach this case because Qwix only wraps parameters in WithAux when it
+    # intercepts operations. For non-intercepted operations like Pallas_call,
+    # the template remains fp. We follow the checkpoint's decision here and
+    # return a QArray (e.g., for Qwen 3.5 MoE).
+    # Note: The consumer (e.g., Pallas kernel) must be implemented to handle
+    # receiving a QArray/dict instead of a standard JAX array.
+    # TODO(christinetung): Investigate providing better utilities or guidance
+    # for Pallas kernels to handle both FP and QArray inputs.
     elif isinstance(checkpoint_param, dict) and not isinstance(
         template_param, WithAux
     ):
