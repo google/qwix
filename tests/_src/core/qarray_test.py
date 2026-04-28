@@ -382,6 +382,21 @@ class QArrayTest(parameterized.TestCase):
     expected = jnp.array([[0.0, 0.0, 3.0, 4.0], [0.0, 0.0, 7.0, 8.0]])
     self.assertTrue(jnp.array_equal(y, expected))
 
+  def test_tiling_error_message(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        r'Tiling failed for shape .*axis 1 has size 6, which is not divisible '
+        r'by the required tile size 32.*Note that mxfp4 specs require the last '
+        r'axis \(channel\) to have a block/tile size of 32',
+    ):
+      qarray.get_scale_shape(
+          (64, 6),
+          qarray.HowToQuantize(
+              qtype='mxfp4',
+              tiled_axes={1: 32},
+          ),
+      )
+
 
 if __name__ == '__main__':
   absltest.main()

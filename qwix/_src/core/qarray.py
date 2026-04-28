@@ -321,7 +321,19 @@ def get_scale_shape(array_shape: ShapeT, how: HowToQuantize) -> ShapeT:
       if isinstance(tile_size, float):
         tile_size = round(dim * tile_size)
       if tile_size <= 0 or dim % tile_size != 0:
-        raise ValueError(f'{array_shape} cannot be tiled as {how.tiled_axes}.')
+        extra_info = ''
+        if how.qtype in ('mxfp4', 'mxfp8'):
+          extra_info = (
+              f'Note that {how.qtype} specs require the last axis (channel)'
+              ' to have a block/tile size of 32. '
+          )
+        raise ValueError(
+            f'Tiling failed for shape {array_shape}: axis {axis} has size'
+            f' {dim}, which is not divisible by the required tile size'
+            f' {tile_size}. {extra_info}Please either exclude this layer/tensor'
+            ' from your quantization rule, or pad the dimension to be'
+            ' divisible by the tile size.'
+        )
       scale_shape.append(dim // tile_size)
     else:
       scale_shape.append(1)
@@ -377,7 +389,13 @@ def split_axis(
       if isinstance(tile_size, float):
         tile_size = round(dim * tile_size)
       if dim % tile_size != 0:
-        raise ValueError(f'{array.shape} cannot be tiled as {tiled_axes}.')
+        raise ValueError(
+            f'Tiling failed for shape {array.shape}: axis {axis} has size'
+            f' {dim}, which is not divisible by the required tile size'
+            f' {tile_size}. Please either exclude this layer/tensor from your'
+            ' quantization rule, or pad the dimension to be divisible by the'
+            ' tile size.'
+        )
       new_shape.append(dim // tile_size)
       new_shape.append(tile_size)
     else:
