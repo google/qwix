@@ -122,7 +122,11 @@ class QuantizationProvider:
   def _init_rule(self, rule: QuantizationRule) -> QuantizationRule:
     """Validate and set default values for the rule."""
     if rule.act_qtype is None and rule.act_static_scale is not None:
-      raise ValueError(f'Invalid rule: {rule}.')
+      raise ValueError(
+          f'Invalid rule: act_static_scale is set to {rule.act_static_scale} '
+          'but act_qtype is None. Please either unset act_static_scale, '
+          f'or set act_qtype to enable activation quantization. (Rule: {rule})'
+      )
     if rule.act_static_scale is None:
       rule = dataclasses.replace(rule, act_static_scale=False)
     if rule.act_calibration_method is None:

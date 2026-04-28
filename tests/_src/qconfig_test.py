@@ -112,6 +112,18 @@ class QconfigTest(absltest.TestCase):
     qwix_model.quantize_model(self.model, provider, self.x)
     self.assertEmpty(provider.get_unused_rules())
 
+  def test_invalid_rule_static_scale_without_act_qtype(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        "act_static_scale is set to True but act_qtype is None",
+    ):
+      ptq.PtqProvider([
+          qconfig.QuantizationRule(
+              weight_qtype="int8",
+              act_static_scale=True,
+          )
+      ])
+
 
 if __name__ == "__main__":
   absltest.main()
