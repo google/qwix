@@ -393,6 +393,34 @@ class PrequantizedPtqTest(parameterized.TestCase):
     _assert_trees_allclose(self, processed_params, reference_params)
     nnx.update(abs_ptq_model, processed_params)
 
+  def test_process_prequantized_params_manual_dict_template(self):
+    template_model = nnx.Linear(12, 6, rngs=nnx.Rngs(0))
+    # Override the non-intercepted but pre-quantized kernel with the manual
+    # quantized dictionary structure.
+    template_model.kernel = {
+        "array": {
+            "qvalue": nnx.Param(jax.ShapeDtypeStruct((12, 6), jnp.int8)),
+            "scale": nnx.Param(jax.ShapeDtypeStruct((1, 6), jnp.float32)),
+        }
+    }
+
+    reference_params = {
+        "kernel": {
+            "array": {
+                "qvalue": jnp.ones((12, 6), dtype=jnp.int8),
+                "scale": jnp.ones((1, 6), dtype=jnp.float32),
+            }
+        }
+    }
+    orbax_payload = _to_orbax_payload(reference_params)
+
+    processed_params = ptq.process_prequantized_params(
+        orbax_payload, template_model
+    )
+
+    _assert_trees_allclose(self, processed_params, reference_params)
+    nnx.update(template_model, processed_params)
+
 
 if __name__ == "__main__":
   absltest.main()

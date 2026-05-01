@@ -540,6 +540,26 @@ def quantize_params(
   return flax.traverse_util.unflatten_dict(quantized_params)
 
 
+def _is_template_prequantized(x: Any) -> bool:
+  """Returns whether the template parameter is prequantized."""
+  # Non-intercepted operations are not wrapped in WithAux.
+  # For example, Qwen 3.5 MoE overrides the original fp template for Pallas_call
+  # to be a dict like {'array': {'qvalue': ..., 'scale': ...}}.
+  # Note: The consumer (e.g., Pallas kernel) must be implemented to handle
+  # receiving a QArray/dict instead of a standard JAX array.
+  if isinstance(x, dict):
+    return 'array' in x or 'qvalue' in x
+  # Qwix wraps intercepted operations in WithAux.
+  return isinstance(x, WithAux)
+
+
+def _get_template_field(obj: Any, field_name: str) -> Any:
+  """Gets a field from the template parameter."""
+  if isinstance(obj, dict):
+    return obj.get(field_name)
+  return getattr(obj, field_name, None)
+
+
 def process_prequantized_params(
     checkpoint_params: Any,
     template_params: Any,
@@ -605,9 +625,10 @@ def process_prequantized_params(
       logging.info('Skipping parameter not in template: %s', path)
       continue
 
-    # Case 1: checkpoint_param is prequantized (dict), template_param is WithAux
-    if isinstance(checkpoint_param, dict) and isinstance(
-        template_param, WithAux
+    # Case 1: checkpoint_param is prequantized (dict), template_param is
+    # prequantized (dict or WithAux).
+    if isinstance(checkpoint_param, dict) and _is_template_prequantized(
+        template_param
     ):
       processed = _process_quantized_param(
           checkpoint_param,
@@ -617,16 +638,8 @@ def process_prequantized_params(
       )
 
     # Case 2: checkpoint_param is prequantized (dict), template_param is fp.
-    # We reach this case because Qwix only wraps parameters in WithAux when it
-    # intercepts operations. For non-intercepted operations like Pallas_call,
-    # the template remains fp. We follow the checkpoint's decision here and
-    # return a QArray (e.g., for Qwen 3.5 MoE).
-    # Note: The consumer (e.g., Pallas kernel) must be implemented to handle
-    # receiving a QArray/dict instead of a standard JAX array.
-    # TODO(christinetung): Investigate providing better utilities or guidance
-    # for Pallas kernels to handle both FP and QArray inputs.
-    elif isinstance(checkpoint_param, dict) and not isinstance(
-        template_param, WithAux
+    elif isinstance(checkpoint_param, dict) and not _is_template_prequantized(
+        template_param
     ):
       processed = _create_qarray_from_checkpoint(
           checkpoint_param,
@@ -634,9 +647,9 @@ def process_prequantized_params(
       )
 
     # Case 3: checkpoint_param is fp, template_param is fp.
-    elif not isinstance(checkpoint_param, dict) and not isinstance(
-        template_param, WithAux
-    ):
+    elif not isinstance(
+        checkpoint_param, dict
+    ) and not _is_template_prequantized(template_param):
       processed = _apply_sharding_and_dtype(
           checkpoint_param,
           template_param,
@@ -645,7 +658,7 @@ def process_prequantized_params(
       )
 
     # Handle invalid combinations (e.g., checkpoint is full precision, but
-    # template expects WithAux).
+    # template expects quantized).
     else:
       raise ValueError(
           f'Unhandled or invalid parameter combination for {path}. '
@@ -793,7 +806,7 @@ def _get_sharding(
 
 def _process_quantized_param(
     checkpoint_param: Mapping[str, Any],
-    template_param: WithAux[qarray.QArray],
+    template_param: Any,
     path: tuple[str, ...],
     *,
     use_checkpoint_sharding: bool,
@@ -814,22 +827,25 @@ def _process_quantized_param(
   """
   _validate_prequantized_dict(checkpoint_param, path)
 
-  template_array = template_param.array
+  template_array = _get_template_field(template_param, 'array')
+  if template_array is None:
+    template_array = template_param
+
   qvalue = _apply_sharding_and_dtype(
       checkpoint_param['qvalue'],
-      template_array.qvalue,
+      _get_template_field(template_array, 'qvalue'),
       path,
       use_checkpoint_sharding=use_checkpoint_sharding,
   )
   scale = _apply_sharding_and_dtype(
       checkpoint_param['scale'],
-      template_array.scale,
+      _get_template_field(template_array, 'scale'),
       path,
       allow_broadcast=True,
       use_checkpoint_sharding=use_checkpoint_sharding,
   )
 
-  template_zero_point = template_array.zero_point
+  template_zero_point = _get_template_field(template_array, 'zero_point')
   zero_point = checkpoint_param.get('zero_point')
   if template_zero_point is None and zero_point is not None:
     raise ValueError(
@@ -847,14 +863,25 @@ def _process_quantized_param(
         use_checkpoint_sharding=use_checkpoint_sharding,
     )
 
+  how = _get_template_field(template_param, 'how')
+  qtype = _get_template_field(how, 'qtype')
+  if qtype is None:
+    qtype = _get_template_field(template_array, 'qtype')
+
   qarray_leaf = qarray.QArray(
       qvalue=qvalue,
       scale=scale,
       zero_point=zero_point,
-      qtype=template_param.how.qtype,
+      qtype=qtype,
   )
   qarray.validate_qarray(qarray_leaf)
-  return template_param.replace(array=qarray_leaf)
+
+  if isinstance(template_param, WithAux):
+    return template_param.replace(array=qarray_leaf)
+
+  if not isinstance(how, qarray.HowToQuantize):
+    how = qarray.HowToQuantize(qtype=qarray_leaf.qtype)
+  return WithAux(array=qarray_leaf, how=how)
 
 
 def _create_qarray_from_checkpoint(
