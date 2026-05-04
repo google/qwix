@@ -18,6 +18,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 from jax import numpy as jnp
+from qwix._src.core import numerics
 from qwix._src.core import qarray
 from qwix._src.core import sparsity
 
@@ -381,6 +382,69 @@ class QArrayTest(parameterized.TestCase):
     y = qarray.sparsify(x, how)
     expected = jnp.array([[0.0, 0.0, 3.0, 4.0], [0.0, 0.0, 7.0, 8.0]])
     self.assertTrue(jnp.array_equal(y, expected))
+
+  def test_quantize_nan_reproduction(self):
+    # This test verifies both:
+    # 1. Default Safe Mode: The scale == 0 (or scale < tiny) check prevents NaN.
+    # 2. Unsafe Mode (reproduction): Disabling the safety check triggers NaN.
+    val = jnp.array(1.18e-38, dtype=jnp.bfloat16)
+    self.assertNotEqual(val, 0.0)
+
+    # mxfp8 requires last dimension to be at least 32 (tile size)
+    x = jnp.zeros(32, dtype=jnp.bfloat16)
+    x = x.at[0].set(val)
+
+    original_reciprocal = qarray.USE_RECIPROCAL_FOR_QUANTIZATION
+
+    # ---- Part 1: Verify default behavior (Safe Mode) ----
+    qarray.USE_RECIPROCAL_FOR_QUANTIZATION = False
+    try:
+      how = qarray.HowToQuantize(qtype='mxfp8', calibration_method='absmax')
+      q_array = qarray.quantize(x, how)
+      # Default should be safe (no NaN)
+      self.assertFalse(
+          jnp.isnan(q_array.qvalue).any(),
+          f'Found unexpected NaN in safe mode: {q_array.qvalue}',
+      )
+    finally:
+      qarray.USE_RECIPROCAL_FOR_QUANTIZATION = original_reciprocal
+
+    # ---- Part 2: Verify unsafe behavior ----
+    # (reproduce NaN by monkeypatching to disable safety check)
+    original_compute = qarray.compute_scale_zero_point
+
+    def unsafe_compute_scale_zero_point(calibration, qtype):
+      if 'min' in calibration and 'max' in calibration:
+        qmin, qmax = numerics.get_asymmetric_bound(qtype)
+        scale = (calibration['max'] - calibration['min']) / (qmax - qmin)
+        # scale safety check REMOVED
+        zero_point = qmin - calibration['min'] / scale
+        zero_point = numerics.convert_to(zero_point, qtype)
+      elif 'absmax' in calibration:
+        qmax = numerics.get_symmetric_bound(qtype)
+        scale = calibration['absmax'] / qmax
+        # scale safety check REMOVED
+        zero_point = None
+      else:
+        raise ValueError(f'Unsupported calibration: {calibration}')
+      if qtype == 'mxfp8' or qtype == 'mxfp4':
+        log2_scale = jnp.ceil(jnp.log2(scale))
+        scale = (2**log2_scale).astype(scale.dtype)
+      return scale, zero_point
+
+    qarray.compute_scale_zero_point = unsafe_compute_scale_zero_point
+    qarray.USE_RECIPROCAL_FOR_QUANTIZATION = False
+    try:
+      how = qarray.HowToQuantize(qtype='mxfp8', calibration_method='absmax')
+      q_array = qarray.quantize(x, how)
+      # Unsafe mode should produce NaN
+      self.assertTrue(
+          jnp.isnan(q_array.qvalue).any(),
+          f'Expected NaN in unsafe mode, but got {q_array.qvalue}',
+      )
+    finally:
+      qarray.compute_scale_zero_point = original_compute
+      qarray.USE_RECIPROCAL_FOR_QUANTIZATION = original_reciprocal
 
 
 if __name__ == '__main__':
