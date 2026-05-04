@@ -14,9 +14,11 @@
 
 from absl.testing import absltest
 from absl.testing import parameterized
+from flax import nnx
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+from qwix._src import flax_util
 from qwix._src import model as qwix_model
 from qwix._src.providers import ptq
 from qwix.contrib import gptq
@@ -76,6 +78,58 @@ class GptqTest(parameterized.TestCase):
     # GPTQ should be better than PTQ in terms of the output error.
     mae = lambda x, y: jnp.mean(jnp.abs(x - y))
     self.assertLess(mae(fp_y, gptq_y), mae(fp_y, ptq_y))
+
+  def test_dense_model_nnx(self):
+    """Tests that a dense model is quantized correctly with NNX."""
+
+    class Model(nnx.Module):
+
+      def __init__(self, *, rngs=nnx.Rngs(0)):
+        self.dense1 = nnx.Linear(32, 128, rngs=rngs)
+        self.dense2 = nnx.Linear(128, 64, rngs=rngs)
+
+      def __call__(self, x):
+        x = self.dense1(x)
+        x = nn.gelu(x)
+        x = self.dense2(x)
+        return x
+
+    model = Model()
+    x = jax.random.normal(jax.random.key(0), (5, 32))
+
+    # 1. Calibration.
+    rules = [gptq.GptqRule(module_path='dense1', weight_qtype=jnp.int8)]
+    gptq_calibration_provider = gptq.GptqCalibrationProvider(rules)
+    model_cal = qwix_model.quantize_model(model, gptq_calibration_provider, x)
+
+    # Running the first calibration batch.
+    _ = model_cal(x)
+    gptq_stats = model_cal.dense1.kernel_gptq
+    self.assertEqual(gptq_stats['count'], 1)
+    self.assertEqual(gptq_stats['sum_of_hessian'].shape, (32, 32))
+
+    # Running the second calibration batch to test accumulation.
+    fp_y = model_cal(x)
+    gptq_stats = model_cal.dense1.kernel_gptq
+    self.assertEqual(gptq_stats['count'], 2)
+
+    # 2. Model preparation for inference.
+    ptq_provider = ptq.PtqProvider(rules)
+    model_ptq = qwix_model.quantize_model(model, ptq_provider, x)
+    # Get PTQ baseline output.
+    ptq_y = model_ptq(x)
+
+    # 3. Actual weight transformation using GPTQ.
+    state = nnx.to_pure_dict(nnx.state(model_cal, nnx.Param))
+    quant_stats = nnx.to_pure_dict(nnx.state(model_cal, flax_util.QuantStat))
+    gptq_params = gptq.quantize_params(state, model_ptq, quant_stats)
+    # Apply GPTQ params to model.
+    nnx.update(model_ptq, gptq_params)
+    gptq_y = model_ptq(x)
+
+    # GPTQ should be better than PTQ in terms of the output error.
+    mae = lambda x, y: jnp.mean(jnp.abs(x - y))
+    self.assertLessEqual(mae(fp_y, gptq_y), mae(fp_y, ptq_y))
 
   def test_einsum_model_linen(self):
     """Tests that an einsum model is quantized correctly."""
@@ -137,7 +191,59 @@ class GptqTest(parameterized.TestCase):
     mae = lambda a, b: jnp.mean(jnp.abs(a - b))
     self.assertLess(mae(fp_y, gptq_y), mae(fp_y, ptq_y))
 
-  def test_mixed_model_safety(self):
+  def test_einsum_model_nnx(self):
+    """Tests that an einsum model is quantized correctly with NNX."""
+
+    class EinsumModel(nnx.Module):
+
+      def __init__(self, *, rngs=nnx.Rngs(0)):
+        self.einsum1 = nnx.Einsum('bi,io->bo', (32, 128), rngs=rngs)
+        self.einsum2 = nnx.Einsum('bi,io->bo', (128, 64), rngs=rngs)
+
+      def __call__(self, x):
+        x = self.einsum1(x)
+        x = nn.gelu(x)
+        x = self.einsum2(x)
+        return x
+
+    model = EinsumModel()
+    x = jax.random.normal(jax.random.key(0), (5, 32))
+
+    # 1. Calibration
+    rules = [gptq.GptqRule(module_path='einsum1', weight_qtype=jnp.int8)]
+    gptq_calibration_provider = gptq.GptqCalibrationProvider(rules)
+    model_cal = qwix_model.quantize_model(model, gptq_calibration_provider, x)
+
+    # Running the first calibration batch.
+    _ = model_cal(x)
+    gptq_stats = model_cal.einsum1.kernel_gptq
+    self.assertEqual(gptq_stats['count'], 1)
+    self.assertEqual(gptq_stats['sum_of_hessian'].shape, (32, 32))
+
+    # Running the second calibration batch to test accumulation.
+    fp_y = model_cal(x)
+    gptq_stats = model_cal.einsum1.kernel_gptq
+    self.assertEqual(gptq_stats['count'], 2)
+
+    # 2. Model preparation for inference.
+    ptq_provider = ptq.PtqProvider(rules)
+    model_ptq = qwix_model.quantize_model(model, ptq_provider, x)
+    # Get PTQ baseline output.
+    ptq_y = model_ptq(x)
+
+    # 3. Actual weight transformation using GPTQ.
+    state = nnx.to_pure_dict(nnx.state(model_cal, nnx.Param))
+    quant_stats = nnx.to_pure_dict(nnx.state(model_cal, flax_util.QuantStat))
+    gptq_params = gptq.quantize_params(state, model_ptq, quant_stats)
+    # Apply GPTQ params to model.
+    nnx.update(model_ptq, gptq_params)
+    gptq_y = model_ptq(x)
+
+    # GPTQ should generally match float precision better than blind PTQ
+    mae = lambda a, b: jnp.mean(jnp.abs(a - b))
+    self.assertLessEqual(mae(fp_y, gptq_y), mae(fp_y, ptq_y))
+
+  def test_mixed_model_linen(self):
     """Tests that unsupported einsums (like Attention) are safely ignored."""
 
     class MixedModel(nn.Module):
@@ -177,6 +283,48 @@ class GptqTest(parameterized.TestCase):
     self.assertEqual(gptq_stats['sum_of_hessian'].shape, (32, 32))
     # The dictionary should only contain the keys for the valid modules.
     self.assertLen(variables['quant_stats'], 1)
+
+  def test_mixed_model_nnx(self):
+    """Tests that unsupported einsums are safely ignored in NNX."""
+
+    class MixedModel(nnx.Module):
+
+      def __init__(self, *, rngs=nnx.Rngs(0)):
+        self.key = nnx.Param(
+            jax.random.normal(rngs.params(), (32, 48))
+        )  # Valid weight
+
+      def __call__(self, x):
+        # Valid Operation: Linear Layer (Matrix Mult)
+        k_out = jnp.einsum('bi,io->bo', x, self.key)
+
+        # Invalid Operation: Attention-style Batch Dot
+        q = jax.random.normal(jax.random.key(0), x.shape)
+        attn = jnp.einsum('bi,bi->b', q, x)
+
+        # Invalid Operation: Transpose
+        transposed = jnp.einsum('bi->ib', x)
+
+        return k_out, attn, transposed
+
+    model = MixedModel()
+    x = jax.random.normal(jax.random.key(0), (5, 32))
+
+    rules = [gptq.GptqRule(module_path='.*', weight_qtype=jnp.int8)]
+    gptq_calibration_provider = gptq.GptqCalibrationProvider(rules)
+    model_cal = qwix_model.quantize_model(model, gptq_calibration_provider, x)
+
+    _ = model_cal(x)
+
+    # Verify that only the valid operation got calibration stats.
+    self.assertTrue(hasattr(model_cal, 'key_gptq'))
+    gptq_stats = model_cal.key_gptq
+    self.assertEqual(gptq_stats['count'], 1)
+    self.assertEqual(gptq_stats['sum_of_hessian'].shape, (32, 32))
+
+    # The dictionary should only contain the keys for the valid modules.
+    quant_stats = nnx.state(model_cal, flax_util.QuantStat)
+    self.assertLen(nnx.to_pure_dict(quant_stats), 1)
 
 
 if __name__ == '__main__':
