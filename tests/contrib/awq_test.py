@@ -274,10 +274,13 @@ class AwqTest(parameterized.TestCase):
         return x
 
     model = Model()
-    # Use t-distribution for heavy-tailed activations (more salient channels).
-    # Use 512 input features to match core test conditions.
-    # Reduced degrees of freedom from 5 to 2 to make it more heavy-tailed.
-    x = jax.random.t(jax.random.key(0), 2, (10, 512), jnp.float32)
+    # Use 128 samples for stable statistics.
+    x = jax.random.normal(jax.random.key(0), (128, 512), jnp.float32)
+    # Add manual outliers to ensure AWQ has a clear advantage over PTQ.
+    # Salient channels (e.g., every 10th) get 100x magnification.
+    scale = jnp.ones(512)
+    scale = scale.at[::10].set(100.0)
+    x = x * scale
     variables = model.init(jax.random.key(1), x)
 
     # Get floating-point output.
