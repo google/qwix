@@ -276,7 +276,8 @@ class AwqTest(parameterized.TestCase):
     model = Model()
     # Use t-distribution for heavy-tailed activations (more salient channels).
     # Use 512 input features to match core test conditions.
-    x = jax.random.t(jax.random.key(0), 5, (10, 512), jnp.float32)
+    # Reduced degrees of freedom from 5 to 2 to make it more heavy-tailed.
+    x = jax.random.t(jax.random.key(0), 2, (10, 512), jnp.float32)
     variables = model.init(jax.random.key(1), x)
 
     # Get floating-point output.
