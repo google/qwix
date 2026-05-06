@@ -536,14 +536,16 @@ def compute_scale_zero_point(
   if 'min' in calibration and 'max' in calibration:
     qmin, qmax = numerics.get_asymmetric_bound(qtype)
     scale = (calibration['max'] - calibration['min']) / (qmax - qmin)
-    scale = jnp.where(scale == 0, jnp.ones_like(scale), scale)
+    tiny_sqrt = jnp.sqrt(jnp.finfo(scale.dtype).tiny)
+    scale = jnp.where(scale < tiny_sqrt, jnp.ones_like(scale), scale)
     zero_point = qmin - calibration['min'] / scale
     zero_point = numerics.convert_to(zero_point, qtype)
   elif 'absmax' in calibration:
     qmax = numerics.get_symmetric_bound(qtype)
     scale = calibration['absmax'] / qmax
     # Maybe adding an epsilon (1e-7) is faster?
-    scale = jnp.where(scale == 0, jnp.ones_like(scale), scale)
+    tiny_sqrt = jnp.sqrt(jnp.finfo(scale.dtype).tiny)
+    scale = jnp.where(scale < tiny_sqrt, jnp.ones_like(scale), scale)
     zero_point = None
   else:
     raise ValueError(f'Unsupported calibration: {calibration}')
