@@ -236,11 +236,18 @@ def find_param(x: Any, ptq_array_type=None) -> str | None:
     array_types = nnx.Param | ptq_array_type if ptq_array_type else nnx.Param
     for name, node in module.__dict__.items():
       if isinstance(node, array_types):
-        candidates[name] = node.value
+        candidates[name] = node.value if isinstance(node, nnx.Param) else node
   else:
     raise ValueError('Current module is not known.')
 
   candidates_by_id = {id(c): n for n, c in candidates.items()}
+  for n, c in candidates.items():
+    if type(c).__name__ == 'WithAux' and hasattr(c, 'array'):
+      candidates_by_id[id(c.array)] = n
+
+  # Handle WithAux as the input x.
+  if type(x).__name__ == 'WithAux' and hasattr(x, 'array'):
+    x = x.array
 
   # Approach 0: check if we could find the exact x in the params.
   if id(x) in candidates_by_id:
@@ -255,11 +262,14 @@ def find_param(x: Any, ptq_array_type=None) -> str | None:
         # Allow any unary primitives to be applied to the param, including
         # reshape, with_sharding_constraint, astype, etc.
         x = x.parent.in_tracers[0]
-      elif id(const := x.get_const()) in candidates_by_id:
+      elif (
+          hasattr(x, 'get_const')
+          and id(const := x.get_const()) in candidates_by_id
+      ):
         # Even if x is a tracer, the candidate might be a concrete value.
         return candidates_by_id[id(const)]
       else:
-        return None
+        break
 
   # Approach 2: use heuristics on the shape which may not be accurate.
   candidates = {n: c for n, c in candidates.items() if c.shape == x.shape}
