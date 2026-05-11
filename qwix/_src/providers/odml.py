@@ -189,7 +189,7 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
       op: Type[odml_ops.QuantizedOp]
       intercept_map[name] = op(
           op_full_name=name,
-          get_rule_and_op_id_fn=self._get_current_rule_and_op_id,
+          get_rule_and_op_id_fn=self._get_current_rule_and_op_id,  # pyrefly: ignore[bad-argument-type]
           fake_quant_fn=self._fake_quant,
       )
     return intercept_map
@@ -464,17 +464,17 @@ class OdmlConversionProvider(OdmlQatProvider):
     """Return the attributes for the fake_quant composite."""
     # For dynamic-range quantization, the scale is an empty array.
     if scale is None:
-      scale = np.array([], np.float32)
-    if jnp.isnan(scale).any() or jnp.isinf(scale).any() or (scale == 0).any():
+      scale = np.array([], np.float32)  # pyrefly: ignore[bad-assignment]
+    if jnp.isnan(scale).any() or jnp.isinf(scale).any() or (scale == 0).any():  # pyrefly: ignore[bad-argument-type, missing-attribute]
       raise ValueError(f'Invalid scale: {scale}')
     # Flatten the scale because ODML wants a 1D array.
     quantization_dim = None
-    for dim, length in enumerate(scale.shape):
+    for dim, length in enumerate(scale.shape):  # pyrefly: ignore[missing-attribute]
       if length > 1:
         if quantization_dim is None:
           quantization_dim = dim
         else:
-          raise ValueError(f'Cannot flatten scale with shape {scale.shape}.')
+          raise ValueError(f'Cannot flatten scale with shape {scale.shape}.')  # pyrefly: ignore[missing-attribute]
     match jnp.dtype(dtype):
       case jnp.int8:
         dtype = 'i8'
@@ -495,7 +495,7 @@ class OdmlConversionProvider(OdmlQatProvider):
     }
     if zp is not None:
       # zero_point has to be int64 for ODML.
-      attributes['zero_point'] = np.asarray(zp, np.int64).flatten()
+      attributes['zero_point'] = np.asarray(zp, np.int64).flatten()  # pyrefly: ignore[bad-typed-dict-key]
     if quantization_dim is not None:
-      attributes['quantization_dimension'] = quantization_dim
+      attributes['quantization_dimension'] = quantization_dim  # pyrefly: ignore[bad-typed-dict-key]
     return attributes

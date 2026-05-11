@@ -96,7 +96,7 @@ def quantize_params(
         percdamp=gptq_damping_factor,
     )[0]
     w = ctx.restore_shape(w)
-    return ctx.abs_w.replace(array=w)
+    return ctx.abs_w.replace(array=w)  # pyrefly: ignore[missing-attribute]
 
   return calibration.quantize_params_with_calibration(
       params,

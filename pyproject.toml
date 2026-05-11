@@ -52,3 +52,9 @@ version = {attr = "qwix.version.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["qwix*"]
+
+[tool.pyrefly]
+project-includes = [
+  "**/*.py*",
+  "**/*.ipynb",
+]

@@ -190,8 +190,8 @@ def conv_general_qt_fwd(
         operand, qtype, scale, zero_point
     )
 
-  lhs = _quantize_operand(lhs, for_lhs=True)
-  rhs = _quantize_operand(rhs, for_lhs=False)
+  lhs = _quantize_operand(lhs, for_lhs=True)  # pyrefly: ignore[bad-assignment]
+  rhs = _quantize_operand(rhs, for_lhs=False)  # pyrefly: ignore[bad-assignment]
 
   primal_out = conv_general.conv_general_dilated(
       lhs,

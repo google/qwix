@@ -107,7 +107,7 @@ class SqCalibrationProvider(calibration.SinglePassCalibrationProvider):
         assert module.scope is not None
         kernel = module.scope._collection("params")["kernel"]  # pylint: disable=protected-access
       else:
-        kernel = module.kernel.get_value()
+        kernel = module.kernel.get_value()  # pyrefly: ignore[missing-attribute]
     except KeyError as exc:
       raise NotImplementedError(
           f"Failed to extract kernel from module {module}. Only "
@@ -116,7 +116,7 @@ class SqCalibrationProvider(calibration.SinglePassCalibrationProvider):
 
     # Compute weight scales
     how = qarray.HowToQuantize(
-        qtype=rule.weight_qtype,
+        qtype=rule.weight_qtype,  # pyrefly: ignore[bad-argument-type]
         channelwise_axes=(0,),
         calibration_method=rule.weight_calibration_method,
     )
@@ -136,7 +136,7 @@ class SqCalibrationProvider(calibration.SinglePassCalibrationProvider):
     how = qarray.HowToQuantize(
         qtype=rule.act_qtype,
         channelwise_axes=(0,),
-        calibration_method=rule.act_calibration_method,
+        calibration_method=rule.act_calibration_method,  # pyrefly: ignore[bad-argument-type]
     )
     calib = qarray.calibrate(lhs, how)
     act_scale, zero_point = qarray.compute_scale_zero_point(calib, how.qtype)
@@ -274,11 +274,11 @@ class SqInferenceProvider(ptq.PtqProvider):
     # Handle SQ-quantized weights with per-channel scale compensation.
     if isinstance(rhs, WithSqScale):
       lhs = self._apply_sq_scale(lhs, rhs.inv_sq_scale)
-      rhs = rhs.array
+      rhs = rhs.array  # pyrefly: ignore[bad-assignment]
 
     return dot_general.dot_general(
         lhs,
-        rhs,
+        rhs,  # pyrefly: ignore[bad-argument-type]
         dimension_numbers,
         precision=precision,
         preferred_element_type=preferred_element_type,

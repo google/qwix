@@ -96,25 +96,25 @@ def update_block_specs_for_qarray(block_specs: Any, args: Any) -> Any:
 
     # Calculate block size of the scale array for each axis.
     scale_block_shape = []
-    for v, bv, s in zip(arg.qvalue.shape, spec.block_shape, arg.scale.shape):
+    for v, bv, s in zip(arg.qvalue.shape, spec.block_shape, arg.scale.shape):  # pyrefly: ignore[bad-argument-type]
       if bv is None:
         scale_block_shape.append(None)
       elif s == 1:
         scale_block_shape.append(1)
       else:
-        assert v % bv == 0 and s % (v // bv) == 0, f"{v=} {bv=} {s=}"
-        scale_block_shape.append(s // (v // bv))
+        assert v % bv == 0 and s % (v // bv) == 0, f"{v=} {bv=} {s=}"  # pyrefly: ignore[unsupported-operation]
+        scale_block_shape.append(s // (v // bv))  # pyrefly: ignore[unsupported-operation]
     scale_block_shape = tuple(scale_block_shape)
 
     scale_index_map = lambda *a: tuple(
-        i if s > 1 else 0 for i, s in zip(spec.index_map(*a), arg.scale.shape)
+        i if s > 1 else 0 for i, s in zip(spec.index_map(*a), arg.scale.shape)  # pyrefly: ignore[not-callable]
     )
     scale_block_spec = dataclasses.replace(
         spec, block_shape=scale_block_shape, index_map=scale_index_map
     )
     assert arg.zero_point is None, "Zero point is not supported yet."
 
-    return dataclasses.replace(arg, qvalue=spec, scale=scale_block_spec)
+    return dataclasses.replace(arg, qvalue=spec, scale=scale_block_spec)  # pyrefly: ignore[bad-argument-type]
 
   return jax.tree.map(_update_block_spec, block_specs, args)
 
@@ -155,8 +155,8 @@ def transform_block_specs_for_tpu(
 
     # Solution 1: try to transpose the array to put the longest axis at the end.
     transpose = np.argsort([1 if s is None else s for s in spec.block_shape])
-    block_shape_t = _reorder(spec.block_shape, transpose)
-    if _can_fit_tpu_requirements(block_shape_t, _reorder(arg.shape, transpose)):
+    block_shape_t = _reorder(spec.block_shape, transpose)  # pyrefly: ignore[bad-argument-type]
+    if _can_fit_tpu_requirements(block_shape_t, _reorder(arg.shape, transpose)):  # pyrefly: ignore[bad-argument-type]
       flatten_args[i] = arg.transpose(transpose)
       index_map_t = functools.partial(
           lambda spec, transpose, *a: _reorder(spec.index_map(*a), transpose),
@@ -219,8 +219,8 @@ def _can_fit_tpu_requirements(
 ) -> bool:
   """Check if the block shape can fit the TPU requirements."""
   block_shape = tuple(1 if s is None else s for s in block_shape)
-  return (block_shape[-1] % 128 == 0 or block_shape[-1] == arg_shape[-1]) and (
-      block_shape[-2] % 8 == 0 or block_shape[-2] == arg_shape[-2]
+  return (block_shape[-1] % 128 == 0 or block_shape[-1] == arg_shape[-1]) and (  # pyrefly: ignore[unsupported-operation]
+      block_shape[-2] % 8 == 0 or block_shape[-2] == arg_shape[-2]  # pyrefly: ignore[unsupported-operation]
   )
 
 
@@ -232,8 +232,8 @@ def _is_optimal_for_tpu(
   if not _can_fit_tpu_requirements(block_shape, arg_shape):
     # Not optimal if cannot fit the TPU requirements.
     return False
-  if block_shape[-1] % 128 == 0 and block_shape[-2] % 8 == 0:
+  if block_shape[-1] % 128 == 0 and block_shape[-2] % 8 == 0:  # pyrefly: ignore[unsupported-operation]
     # Optimal if no padding is needed.
     return True
   # Optimal if the block shape is already sorted.
-  return sorted(block_shape) == list(block_shape)
+  return sorted(block_shape) == list(block_shape)  # pyrefly: ignore[bad-specialization]

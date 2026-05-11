@@ -129,7 +129,7 @@ class PtqProvider(qconfig.QuantizationProvider):
     if rule is None or rule.weight_qtype is None:
       return jax.lax.dot_general(
           lhs,
-          rhs,
+          rhs,  # pyrefly: ignore[bad-argument-type]
           dimension_numbers,
           precision=precision,
           preferred_element_type=preferred_element_type,
@@ -145,14 +145,14 @@ class PtqProvider(qconfig.QuantizationProvider):
 
     # Prepare rhs.
     if isinstance(rhs, WithAux):  # weight, already quantized
-      rhs = rhs.array
+      rhs = rhs.array  # pyrefly: ignore[bad-assignment]
     elif weight_name := flax_util.find_param(rhs):  # weight, not quantized
       rhs_how = get_how_to_quantize(
           for_lhs=False,
           qtype=rule.weight_qtype,
           calibration_method=rule.weight_calibration_method,
       )
-      rhs = create_quantized_param(
+      rhs = create_quantized_param(  # pyrefly: ignore[bad-assignment]
           weight_name, rhs, rhs_how, _qarray_module=self._qarray_module
       ).array
     elif rule.act_qtype is not None:  # act
@@ -161,8 +161,8 @@ class PtqProvider(qconfig.QuantizationProvider):
           qtype=rule.act_qtype,
           calibration_method=rule.act_calibration_method,
       )
-      rhs = quantize_act(
-          rhs, rhs_how, rule, op_id + '_rhs', _qarray_module=self._qarray_module
+      rhs = quantize_act(  # pyrefly: ignore[bad-assignment]
+          rhs, rhs_how, rule, op_id + '_rhs', _qarray_module=self._qarray_module  # pyrefly: ignore[unsupported-operation]
       )
 
     # Prepare lhs.
@@ -172,11 +172,11 @@ class PtqProvider(qconfig.QuantizationProvider):
           qtype=rule.act_qtype,
           calibration_method=rule.act_calibration_method,
       )
-      lhs = quantize_act(
-          lhs, lhs_how, rule, op_id + '_lhs', _qarray_module=self._qarray_module
+      lhs = quantize_act(  # pyrefly: ignore[bad-assignment]
+          lhs, lhs_how, rule, op_id + '_lhs', _qarray_module=self._qarray_module  # pyrefly: ignore[unsupported-operation]
       )
     return self._dot_general_fn(
-        lhs, rhs, dimension_numbers, out_sharding=out_sharding
+        lhs, rhs, dimension_numbers, out_sharding=out_sharding  # pyrefly: ignore[bad-argument-type]
     )
 
   def einsum(
@@ -229,7 +229,7 @@ class PtqProvider(qconfig.QuantizationProvider):
           calibration_method=rule.act_calibration_method,
       )
       rhs = quantize_act(
-          rhs, rhs_how, rule, op_id + '_rhs', _qarray_module=self._qarray_module
+          rhs, rhs_how, rule, op_id + '_rhs', _qarray_module=self._qarray_module  # pyrefly: ignore[unsupported-operation]
       )
 
     # Prepare lhs.
@@ -240,7 +240,7 @@ class PtqProvider(qconfig.QuantizationProvider):
           calibration_method=rule.act_calibration_method,
       )
       lhs = quantize_act(
-          lhs, lhs_how, rule, op_id + '_lhs', _qarray_module=self._qarray_module
+          lhs, lhs_how, rule, op_id + '_lhs', _qarray_module=self._qarray_module  # pyrefly: ignore[unsupported-operation]
       )
     return self._einsum_fn(einsum_str, lhs, rhs)
 
@@ -263,7 +263,7 @@ class PtqProvider(qconfig.QuantizationProvider):
     if rule is None or rule.weight_qtype is None:
       return jax.lax.conv_general_dilated(
           lhs,
-          rhs,
+          rhs,  # pyrefly: ignore[bad-argument-type]
           window_strides,
           padding,
           lhs_dilation=lhs_dilation,
@@ -281,7 +281,7 @@ class PtqProvider(qconfig.QuantizationProvider):
 
     # Prepare rhs.
     if isinstance(rhs, WithAux):  # weight, already quantized
-      rhs = rhs.array
+      rhs = rhs.array  # pyrefly: ignore[bad-assignment]
     else:
       weight_name = flax_util.find_param(rhs)
       rhs_how = conv_general.get_how_to_quantize(
@@ -290,8 +290,8 @@ class PtqProvider(qconfig.QuantizationProvider):
           qtype=rule.weight_qtype,
           calibration_method=rule.weight_calibration_method,
       )
-      rhs = create_quantized_param(
-          weight_name, rhs, rhs_how, _qarray_module=self._qarray_module
+      rhs = create_quantized_param(  # pyrefly: ignore[bad-assignment]
+          weight_name, rhs, rhs_how, _qarray_module=self._qarray_module  # pyrefly: ignore[bad-argument-type]
       ).array
 
     # Prepare lhs.
@@ -306,12 +306,12 @@ class PtqProvider(qconfig.QuantizationProvider):
         qtype=rule.act_qtype,
         calibration_method=rule.act_calibration_method,
     )
-    lhs = quantize_act(
-        lhs, lhs_how, rule, op_id + '_lhs', _qarray_module=self._qarray_module
+    lhs = quantize_act(  # pyrefly: ignore[bad-assignment]
+        lhs, lhs_how, rule, op_id + '_lhs', _qarray_module=self._qarray_module  # pyrefly: ignore[unsupported-operation]
     )
     return self._conv_general_dilated_fn(
         lhs,
-        rhs,
+        rhs,  # pyrefly: ignore[bad-argument-type]
         window_strides,
         padding,
         lhs_dilation=lhs_dilation,
@@ -350,7 +350,7 @@ class PtqProvider(qconfig.QuantizationProvider):
     """Intercepts jax.numpy.dot."""
     return dot.dot(
         a,
-        b,
+        b,  # pyrefly: ignore[bad-argument-type]
         precision=precision,
         preferred_element_type=preferred_element_type,
         out_sharding=out_sharding,
@@ -505,7 +505,7 @@ def quantize_params(
       # The param might not be in the shape needed for compute, in case the
       # module reshapes before compute. Abstract param has the compute shape.
       param = param.reshape(abs_param.shape)
-      param = abs_param.replace(
+      param = abs_param.replace(  # pyrefly: ignore[missing-attribute]
           array=_qarray_module.quantize(param, abs_param.how)
       )
     quantized_params[path] = param
@@ -529,7 +529,7 @@ def quantize_params(
     scale, zero_point = _qarray_module.compute_scale_zero_point(
         calibration, act_qtype
     )
-    quantized_params[scale_path] = abs_scale.replace(array=scale)
+    quantized_params[scale_path] = abs_scale.replace(array=scale)  # pyrefly: ignore[missing-attribute]
     if zero_point is not None:
       quantized_params[(*path[:-1], path[-1] + '_zero_point')] = zero_point
 
@@ -854,7 +854,7 @@ def _process_quantized_param(
       qtype=template_param.how.qtype,
   )
   qarray.validate_qarray(qarray_leaf)
-  return template_param.replace(array=qarray_leaf)
+  return template_param.replace(array=qarray_leaf)  # pyrefly: ignore[missing-attribute]
 
 
 def _create_qarray_from_checkpoint(
@@ -909,5 +909,5 @@ def get_value_from_path(obj: Any, path: tuple[str | int, ...]) -> Any:
     elif isinstance(obj, (list, nnx.List)) and isinstance(key, int):
       obj = obj[key] if 0 <= key < len(obj) else None
     else:
-      obj = getattr(obj, key, None)
+      obj = getattr(obj, key, None)  # pyrefly: ignore[no-matching-overload]
   return obj

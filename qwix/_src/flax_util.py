@@ -39,7 +39,7 @@ def should_update_quant_stats() -> bool:
         return False  # Don't update quant_stats during initialization.
       return module.is_mutable_collection('quant_stats')
     case nnx.Module():
-      return not module.disable_quant_stats_update
+      return not module.disable_quant_stats_update  # pyrefly: ignore[missing-attribute]
 
 
 def get_current_module() -> nn.Module | nnx.Module:
@@ -83,7 +83,7 @@ def get_current_module_path() -> tuple[str, ...]:
       return module.path
     case nnx.Module():
       # Paths of nnx modules are set when they are quantized.
-      return module.qwix_path
+      return module.qwix_path  # pyrefly: ignore[missing-attribute]
 
 
 def get_or_create_variable(
@@ -181,7 +181,7 @@ def get_or_create_param(
       _check_shape(param.value, init_fn)
     else:
       if need_rng:
-        if not isinstance(module.qwix_rngs, nnx.Rngs):
+        if not isinstance(module.qwix_rngs, nnx.Rngs):  # pyrefly: ignore[missing-attribute]
           raise ValueError(
               'Cannot find rngs in the current module. Please set rngs via'
               ' model.set_attributes(qwix_rngs=nnx.Rngs(...)).'
@@ -349,7 +349,7 @@ def update_sharding(
   if is_pspec:
     return jax.sharding.PartitionSpec(*spec)
 
-  return spec
+  return spec  # pyrefly: ignore[bad-return]
 
 
 def update_boxed(
@@ -389,7 +389,7 @@ def update_boxed(
         axes = update_sharding(
             axes, shape=shape, split=split, merge=merge, transpose=transpose
         )
-        boxed = dataclasses.replace(boxed, **{possible_field: axes})
+        boxed = dataclasses.replace(boxed, **{possible_field: axes})  # pyrefly: ignore[bad-specialization]
   elif isinstance(boxed, nnx.Variable):
     if value is not None:
       boxed = boxed.replace(value)
@@ -443,7 +443,7 @@ def make_rng(rng_stream: str) -> jax.Array:
   if isinstance(module, nn.Module):
     return module.make_rng(rng_stream)
   elif isinstance(module, nnx.Module):
-    if not isinstance(module.qwix_rngs, nnx.Rngs):
+    if not isinstance(module.qwix_rngs, nnx.Rngs):  # pyrefly: ignore[missing-attribute]
       raise ValueError(
           'Cannot find rngs in the current module. Please set rngs via'
           ' model.set_attributes(qwix_rngs=nnx.Rngs(...)).'

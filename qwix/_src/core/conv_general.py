@@ -58,11 +58,11 @@ def get_transpose(
   transpose = [None] * len(dimension_numbers.out_spec)
   if for_lhs:
     # Only batch dimension can be channelwise thus transposed.
-    transpose[dimension_numbers.out_spec[0]] = dimension_numbers.lhs_spec[0]
+    transpose[dimension_numbers.out_spec[0]] = dimension_numbers.lhs_spec[0]  # pyrefly: ignore[unsupported-operation]
   else:
     # Only out feature dimension can be channelwise thus transposed.
-    transpose[dimension_numbers.out_spec[1]] = dimension_numbers.rhs_spec[0]
-  return transpose
+    transpose[dimension_numbers.out_spec[1]] = dimension_numbers.rhs_spec[0]  # pyrefly: ignore[unsupported-operation]
+  return transpose  # pyrefly: ignore[bad-return]
 
 
 def _slow_conv_general_dilated(

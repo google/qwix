@@ -185,17 +185,17 @@ def dot_general_qt_fwd(
   lhs_in, rhs_in = lhs, rhs
   if lhs_calibration is not None:
     scale, zero_point = qarray.compute_scale_zero_point(
-        lhs_calibration, config.lhs_qtype
+        lhs_calibration, config.lhs_qtype  # pyrefly: ignore[bad-argument-type]
     )
-    lhs = qarray.quantize_with_scale_zero_point(
-        lhs, config.lhs_qtype, scale, zero_point
+    lhs = qarray.quantize_with_scale_zero_point(  # pyrefly: ignore[bad-assignment]
+        lhs, config.lhs_qtype, scale, zero_point  # pyrefly: ignore[bad-argument-type]
     )
   if rhs_calibration is not None:
     scale, zero_point = qarray.compute_scale_zero_point(
-        rhs_calibration, config.rhs_qtype
+        rhs_calibration, config.rhs_qtype  # pyrefly: ignore[bad-argument-type]
     )
-    rhs = qarray.quantize_with_scale_zero_point(
-        rhs, config.rhs_qtype, scale, zero_point
+    rhs = qarray.quantize_with_scale_zero_point(  # pyrefly: ignore[bad-assignment]
+        rhs, config.rhs_qtype, scale, zero_point  # pyrefly: ignore[bad-argument-type]
     )
   residuals = (lhs_in, rhs_in, lhs, rhs, lhs_calibration, rhs_calibration)
   return dot_general.dot_general(lhs, rhs, dimension_numbers), residuals
@@ -264,7 +264,7 @@ def dot_general_qt_bwd(
       if g_disable_channelwise_axes:
         g_how = dataclasses.replace(g_how, channelwise_axes=[])
 
-      g = qarray.quantize(g, g_how)
+      g = qarray.quantize(g, g_how)  # pyrefly: ignore[bad-assignment]
 
     if (
         isinstance(y, jax.Array)

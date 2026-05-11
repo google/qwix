@@ -107,7 +107,7 @@ def _preprocess_interceptor(
       new_path = target_path + "._fun"
       interceptor_mapping[new_path] = interceptor_mapping.pop(target_path)
       target_path = new_path
-      function_to_modify = function_to_modify._fun  # pylint: disable=protected-access
+      function_to_modify = function_to_modify._fun  # pylint: disable=protected-access  # pyrefly: ignore[missing-attribute]
 
     # 2. Rewrite `Function` to its code object for bytecode patching.
     if (
@@ -169,7 +169,7 @@ def wrap_func_intercepted(
     interception_manager.activate_interceptor(interceptor)
     context_manager = (
         jax.disable_jit()
-        if (not jax.config.jax_disable_jit and disable_jit)
+        if (not jax.config.jax_disable_jit and disable_jit)  # pyrefly: ignore[missing-attribute]
         else contextlib.nullcontext()
     )
     try:

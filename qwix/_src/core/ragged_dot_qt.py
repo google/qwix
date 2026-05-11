@@ -49,12 +49,12 @@ def ragged_dot_qt_fwd(
   qlhs = qarray.quantize(
       # lhs shape [M, K]: contracting axis=1, channelwise axis=0
       lhs,
-      qarray.HowToQuantize(qtype=config.lhs_qtype, channelwise_axes=[0]),
+      qarray.HowToQuantize(qtype=config.lhs_qtype, channelwise_axes=[0]),  # pyrefly: ignore[bad-argument-type]
   )
   qrhs = qarray.quantize(
       # rhs shape [G, K, N]: contracting axis=1, channelwise axes=2
       rhs,
-      qarray.HowToQuantize(qtype=config.rhs_qtype, channelwise_axes=[2]),
+      qarray.HowToQuantize(qtype=config.rhs_qtype, channelwise_axes=[2]),  # pyrefly: ignore[bad-argument-type]
   )
   primal_out = ragged_dot.ragged_dot(
       qlhs, qrhs, group_sizes, precision, preferred_element_type, group_offset

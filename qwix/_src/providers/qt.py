@@ -92,7 +92,7 @@ class QtProvider(qconfig.QuantizationProvider):
           preferred_element_type=preferred_element_type,
           out_sharding=out_sharding,
       )
-    config = self._create_dot_general_qt_config(rule, op_id, lhs, rhs)
+    config = self._create_dot_general_qt_config(rule, op_id, lhs, rhs)  # pyrefly: ignore[bad-argument-type]
     return dot_general_qt.dot_general_qt(lhs, rhs, dimension_numbers, config)
 
   def einsum(
@@ -135,7 +135,7 @@ class QtProvider(qconfig.QuantizationProvider):
           dimension_numbers,
           # lhs and rhs might be flipped by einsum so we cannot use the operands
           # from the einsum call.
-          self._create_dot_general_qt_config(rule, op_id, lhs, rhs),
+          self._create_dot_general_qt_config(rule, op_id, lhs, rhs),  # pyrefly: ignore[bad-argument-type]
       )
 
     with jax.disable_jit():
@@ -182,7 +182,7 @@ class QtProvider(qconfig.QuantizationProvider):
       )
     if rule.tile_size:
       raise ValueError('subchannel is not supported for conv_general_dilated.')
-    config = self._create_conv_general_qt_config(rule, op_id, lhs, rhs)
+    config = self._create_conv_general_qt_config(rule, op_id, lhs, rhs)  # pyrefly: ignore[bad-argument-type]
     return conv_general_qt.conv_general_qt(
         lhs,
         rhs,
@@ -282,7 +282,7 @@ class QtProvider(qconfig.QuantizationProvider):
         # fwd configs.
         lhs_qtype=rule.act_qtype,
         rhs_qtype=rule.weight_qtype,
-        lhs_calibration_method=rule.act_calibration_method,
+        lhs_calibration_method=rule.act_calibration_method,  # pyrefly: ignore[bad-argument-type]
         rhs_calibration_method=rule.weight_calibration_method,
         lhs_collect_quant_stat=lhs_collect_quant_stat,
         rhs_collect_quant_stat=None,
@@ -369,8 +369,8 @@ class QtProvider(qconfig.QuantizationProvider):
         lhs_qtype=lhs_qtype,
         rhs_qtype=rhs_qtype,
         tile_size=rule.tile_size,
-        lhs_calibration_method=lhs_calibration_method,
-        rhs_calibration_method=rhs_calibration_method,
+        lhs_calibration_method=lhs_calibration_method,  # pyrefly: ignore[bad-argument-type]
+        rhs_calibration_method=rhs_calibration_method,  # pyrefly: ignore[bad-argument-type]
         lhs_collect_quant_stat=lhs_collect_quant_stat,
         rhs_collect_quant_stat=rhs_collect_quant_stat,
         lhs_disable_channelwise_axes=rule.disable_channelwise_axes,
@@ -379,14 +379,14 @@ class QtProvider(qconfig.QuantizationProvider):
         dlhs_grad_qtype=rule.bwd_qtype,
         dlhs_grad_calibration_method=rule.bwd_calibration_method,
         dlhs_tile_size=dlhs_tile_size,
-        dlhs_stochastic_rounding_noise_fn=bwd_stochastic_rounding_noise_fn,
+        dlhs_stochastic_rounding_noise_fn=bwd_stochastic_rounding_noise_fn,  # pyrefly: ignore[bad-argument-type]
         dlhs_grad_disable_channelwise_axes=rule.disable_channelwise_axes,
         # drhs configs.
         use_original_residuals=fwd_quantized and not bwd_quantized,
         drhs_grad_qtype=rule.bwd_qtype,
         drhs_grad_calibration_method=rule.bwd_calibration_method,
         drhs_tile_size=drhs_tile_size,
-        drhs_stochastic_rounding_noise_fn=bwd_stochastic_rounding_noise_fn,
+        drhs_stochastic_rounding_noise_fn=bwd_stochastic_rounding_noise_fn,  # pyrefly: ignore[bad-argument-type]
         drhs_grad_disable_channelwise_axes=rule.disable_channelwise_axes,
     )
 

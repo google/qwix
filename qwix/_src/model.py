@@ -51,13 +51,13 @@ def quantize_model(
   if isinstance(model, nn.Module):
     if model_inputs or model_inputs_kwargs:
       raise ValueError("Model inputs must not be provided for linen models.")
-    return quantize_linen_model(model, provider, methods)
+    return quantize_linen_model(model, provider, methods)  # pyrefly: ignore[bad-return]
   elif isinstance(model, nnx.Module):
     if not model_inputs and not model_inputs_kwargs:
       raise ValueError("Model inputs must be provided for nnx models.")
     if len(methods) != 1:
       raise ValueError("Only one method is supported for nnx models.")
-    return quantize_nnx_model(
+    return quantize_nnx_model(  # pyrefly: ignore[bad-return]
         model,
         provider,
         *model_inputs,
@@ -76,8 +76,8 @@ def quantize_linen_model(
   """Quantize a linen model."""
 
   def _is_in_nn_module() -> bool:
-    nn_module: nn.Module = nn.module._context.module_stack[-1]  # pylint: disable=protected-access
-    return nn_module and nn_module.scope is not None
+    nn_module: nn.Module = nn.module._context.module_stack[-1]  # pylint: disable=protected-access  # pyrefly: ignore[bad-assignment]
+    return nn_module and nn_module.scope is not None  # pyrefly: ignore[bad-return]
 
   # Make a copy of the model to avoid modifying the original model.
   model = model.copy()
@@ -185,12 +185,12 @@ def quantize_nnx_model(
   # Unlike linen module, nnx module does not have scope or path attribute, we
   # need to iterate over all modules and set the path for them.
   for path, module in model.iter_modules():
-    module.qwix_path = path
+    module.qwix_path = path  # pyrefly: ignore[missing-attribute]
     # Disable quant_stats update for the first call.
-    module.disable_quant_stats_update = True
+    module.disable_quant_stats_update = True  # pyrefly: ignore[missing-attribute]
     # Set the rngs, which is shared by all modules and useful for lora weights
     # initialization.
-    module.qwix_rngs = rngs
+    module.qwix_rngs = rngs  # pyrefly: ignore[missing-attribute]
 
   # Because nnx modules are stateful, we need to call them once to initialize
   # them (convert weights, create quant_stats) unless users explicitly opt out.

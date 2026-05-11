@@ -286,7 +286,7 @@ class QuantizedOp:
     obj = sys.modules[name_parts[0]]
     for attr in name_parts[1:]:
       obj = getattr(obj, attr)
-    return obj(*args, **kwargs)
+    return obj(*args, **kwargs)  # pyrefly: ignore[not-callable]
 
   def _fake_quant_inputs(
       self,
@@ -357,7 +357,7 @@ class QuantizedOp:
             tiled_axes={},
             # Use act_calibration_method because it is more like an activation,
             # i.e., asymmetric rather than symmetric.
-            calibration_method=rule.act_calibration_method,
+            calibration_method=rule.act_calibration_method,  # pyrefly: ignore[bad-argument-type]
         )
         fq_array = self._fake_quant_fn(array, how, None)
         aux_data.set(array, AuxDataKey.FQ_ARRAY, fq_array)
@@ -412,7 +412,7 @@ class QuantizedOp:
         # Use per-channel scales for batch axes, which will be reduced later
         # in _update_and_get_quant_stat.
         channelwise_axes=effective_rule.act_batch_axes,
-        calibration_method=effective_rule.act_calibration_method,
+        calibration_method=effective_rule.act_calibration_method,  # pyrefly: ignore[bad-argument-type]
     )
 
     fq_array = self._fake_quant_fn(array, how, quant_stat_name)
@@ -614,7 +614,7 @@ class PrimitiveBindOp(QuantizedOp):
   def __init__(self, **kwargs):
     super().__init__(
         op_full_name=interception.PRIMITIVE_BIND_KEY,
-        get_rule_and_op_id_fn=lambda x: (None, ''),
+        get_rule_and_op_id_fn=lambda x: (None, ''),  # pyrefly: ignore[bad-argument-type]
         fake_quant_fn=lambda x, y, z: x,
         **kwargs,
     )
@@ -866,7 +866,7 @@ class DotEinsumConv(QuantizedOp):
       lhs_how = self._get_how_to_quantize(
           for_lhs=True,
           qtype=rule.act_qtype,
-          calibration_method=rule.act_calibration_method,
+          calibration_method=rule.act_calibration_method,  # pyrefly: ignore[bad-argument-type]
           args=args,
           kwargs=kwargs,
       )

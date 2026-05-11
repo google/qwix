@@ -121,14 +121,14 @@ def quantize(array: jax.Array, how: HowToQuantize) -> PaddedQArray:
   original_shape = array.shape
   array = pad_to_shape(array, get_padded_shape(array.shape, how.tiled_axes))
   padded_shape = array.shape
-  array = qarray.quantize(array, how)
+  array = qarray.quantize(array, how)  # pyrefly: ignore[bad-assignment]
   if not QARRAY_KEEP_PADDED_SHAPE:
-    array = dataclasses.replace(
+    array = dataclasses.replace(  # pyrefly: ignore[bad-specialization]
         array,
-        qvalue=array.qvalue[tuple(slice(0, dim) for dim in original_shape)],
+        qvalue=array.qvalue[tuple(slice(0, dim) for dim in original_shape)],  # pyrefly: ignore[missing-attribute]
     )
   return PaddedQArray(
-      **dataclasses.asdict(array),
+      **dataclasses.asdict(array),  # pyrefly: ignore[bad-argument-type]
       padded_shape=padded_shape,
       original_shape=original_shape,
   )
@@ -277,7 +277,7 @@ def quantize_act(
 ):
   """Wrapper to reuse PTQ.quantize_act with this module as qarray backend."""
   return _ptq.quantize_act(
-      array, how, rule, act_name, _qarray_module=sys.modules[__name__]
+      array, how, rule, act_name, _qarray_module=sys.modules[__name__]  # pyrefly: ignore[bad-argument-type]
   )
 
 

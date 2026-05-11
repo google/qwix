@@ -688,7 +688,7 @@ def _quantize_weight(
       percdamp=gptq_damping_factor,
   )[0]
   weight = ctx.restore_shape(weight)
-  return ctx.abs_w.replace(array=weight)
+  return ctx.abs_w.replace(array=weight)  # pyrefly: ignore[missing-attribute]
 
 
 def quantize(

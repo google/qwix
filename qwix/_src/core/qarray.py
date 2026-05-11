@@ -654,10 +654,10 @@ def quantize_api(
       tiled_axes=tiled_axes or {},
       calibration_method=calibration_method,
   )
-  array = quantize(array, how)
+  array = quantize(array, how)  # pyrefly: ignore[bad-assignment]
   if scale_dtype is not None:
-    array = dataclasses.replace(array, scale=array.scale.astype(scale_dtype))
-  return array
+    array = dataclasses.replace(array, scale=array.scale.astype(scale_dtype))  # pyrefly: ignore[bad-specialization, missing-attribute]
+  return array  # pyrefly: ignore[bad-return]
 
 
 def dequantize(array: QArray) -> jax.Array:
