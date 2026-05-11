@@ -14,6 +14,7 @@
 """Stochastic rounding utilities."""
 
 from typing import Callable, Sequence
+import flax.struct
 import jax
 import jax.numpy as jnp
 
@@ -71,26 +72,57 @@ def uniform_noise(
   return jax.random.uniform(key, shape, jnp.float32, -0.5, 0.5)
 
 
+def _get_noise_shape(
+    channelwise_noise_axes: Sequence[int], shape: tuple[int, ...]
+) -> tuple[int, ...]:
+  return tuple(
+      dim if axis in channelwise_noise_axes else 1
+      for axis, dim in enumerate(shape)
+  )
+
+
+@flax.struct.dataclass
+class NoiseFn:
+  """Noise function for stochastic rounding that is JAX PyTree compatible."""
+
+  key: jax.Array
+  method: str = flax.struct.field(pytree_node=False)
+  channelwise_noise_axes: Sequence[int] = flax.struct.field(pytree_node=False)
+
+  def __call__(self, shape: tuple[int, ...]) -> jax.Array:
+    if self.method == "uniform":
+      return uniform_noise(
+          self.key, _get_noise_shape(self.channelwise_noise_axes, shape)
+      )
+    elif self.method == "low_bit_uniform":
+      return low_bit_uniform_noise(
+          self.key, _get_noise_shape(self.channelwise_noise_axes, shape)
+      )
+    else:
+      raise ValueError(f"Unknown method: {self.method}")
+
+
 def get_noise_fn(
     method: str,
     key: jax.Array,
     channelwise_noise_axes: Sequence[int] = (0,),
 ) -> Callable[[tuple[int, ...]], jax.Array]:
-  """Returns a noise function for stochastic rounding."""
-  if method == 'uniform':
-    fn = uniform_noise
-  elif method == 'low_bit_uniform':
-    fn = low_bit_uniform_noise
-  else:
-    raise ValueError(f'Unsupported stochastic rounding method: {method}')
+  """Returns a noise function for stochastic rounding.
 
-  def noise_fn(shape: tuple[int, ...]) -> jax.Array:
-    # Apply channelwise_noise_axes to get the noise shape. This significantly
-    # reduces the overhead of creating a full noise array.
-    noise_shape = tuple(
-        dim if axis in channelwise_noise_axes else 1
-        for axis, dim in enumerate(shape)
-    )
-    return fn(key, noise_shape)
+  Args:
+    method: The stochastic rounding method ('uniform' or 'low_bit_uniform').
+    key: The RNG key.
+    channelwise_noise_axes: Axes for channelwise noise.
 
-  return noise_fn
+  NOTE: This function returns a `NoiseFn` object which is registered as a
+  JAX PyTree node (via `@flax.struct.dataclass`). This is crucial to avoid
+  tracer leakage when this function is captured inside another JAX PyTree (like
+  `DotGeneralQtConfig`) and passed through JIT compilation boundaries. The RNG
+  key is treated as a dynamic child, while the method and
+  channelwise_noise_axes are treated as static auxiliary data.
+  """
+  return NoiseFn(
+      method=method,
+      key=key,
+      channelwise_noise_axes=channelwise_noise_axes,
+  )
