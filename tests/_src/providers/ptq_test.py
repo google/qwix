@@ -545,5 +545,78 @@ class PtqTest(parameterized.TestCase):
     self.assertNotIn("ssl_loss_layer", ptq_params["params"])
 
 
+def test_asarray_interception(self):
+  """asarray should not dequantize WithAux/QArray."""
+
+  class AsArrayModule(nnx.Module):
+
+    def __call__(self, x, dtype=None):
+      return jnp.asarray(x, dtype=dtype)
+
+  q_rules = [qconfig.QuantizationRule(weight_qtype=jnp.int8)]
+  provider = ptq.PtqProvider(q_rules)
+  model = AsArrayModule()
+  qwix_model.quantize_model(model, provider)
+
+  # Case 1: WithAux
+  wa = ptq.WithAux(
+      jnp.ones((2, 2)),
+      qconfig.QuantizationRule(weight_qtype=jnp.int8).weight_qtype,
+  )
+  res_wa = model(wa)
+  self.assertEqual(jax.tree.map(id, res_wa), jax.tree.map(id, wa))
+
+  # Case 1.1: WithAux with non-array content
+  wa_list = ptq.WithAux(
+      [1.0, 2.0],
+      qconfig.QuantizationRule(weight_qtype=jnp.int8).weight_qtype,
+  )
+  res_wa_list = model(wa_list)
+  self.assertIsInstance(res_wa_list.array, jax.Array)
+  self.assertIsInstance(res_wa_list, ptq.WithAux)
+
+  # Case 1.2: WithAux with explicit dtype
+  res_wa_f16 = model(wa, dtype=jnp.float16)
+  self.assertEqual(res_wa_f16.dtype, jnp.float16)
+  self.assertIsInstance(res_wa_f16, ptq.WithAux)
+
+  # Case 1.3: Grouped properties (shape, ndim, dtype)
+  self.assertEqual(wa.shape, (2, 2))
+  self.assertEqual(wa.ndim, 2)
+  self.assertEqual(wa.dtype, jnp.float32)
+
+  # Case 1.4: Metadata preservation in astype
+  wa_partitioned = ptq.WithAux(
+      nn.Partitioned(jnp.ones((2, 2)), names=("a", "b")),
+      qconfig.QuantizationRule(weight_qtype=jnp.int8).weight_qtype,
+  )
+  wa_casted = wa_partitioned.astype(jnp.float16)
+  self.assertEqual(wa_casted.dtype, jnp.float16)
+  self.assertIsInstance(wa_casted.array, nn.Partitioned)
+  self.assertEqual(wa_casted.array.names, ("a", "b"))
+
+  # Case 2: QArray
+  qa = ptq.qarray.QArray(jnp.ones((2, 2), jnp.int8), jnp.ones((1, 1)))
+  self.assertIs(jnp.asarray(qa), qa)
+
+  # Case 3: regular nnx.State (unboxing)
+  state = nnx.State({"value": jnp.ones(5)})
+  self.assertIsInstance(jnp.asarray(state.value), jax.Array)
+
+  # Case 4: Reconstruction from State with zero_point
+  state_with_zp = nnx.State({
+      "array": nnx.State({
+          "qvalue": nnx.Variable(jnp.ones((2, 2), jnp.int8)),
+          "scale": nnx.Variable(jnp.ones((1, 1))),
+          "zero_point": nnx.Variable(jnp.ones((1, 1), jnp.int8)),
+      })
+  })
+  # Note: asarray on State is handled by PtqProvider.asarray
+  # To trigger it, we can just call jnp.asarray inside an intercepted context.
+  res_qa_zp = model(state_with_zp)
+  self.assertIsInstance(res_qa_zp, ptq.qarray.QArray)
+  self.assertIsNotNone(res_qa_zp.zero_point)
+
+
 if __name__ == "__main__":
   absltest.main()

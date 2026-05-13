@@ -58,6 +58,11 @@ class WithAux(Generic[ArrayTypeVar]):
   shape = property(lambda self: flax_util.unbox(self.array).shape)
   ndim = property(lambda self: flax_util.unbox(self.array).ndim)
   __getitem__ = lambda self, key: jax.tree.map(lambda x: x[key], self.value)
+  dtype = property(lambda self: flax_util.unbox(self.array).dtype)
+
+  def astype(self, dtype):
+    new_value = flax_util.unbox(self.array).astype(dtype)
+    return self.replace(array=flax_util.update_boxed(self.array, value=new_value))  # pyrefly: ignore[missing-attribute]
 
   def reshape(self, *shape):
     if len(shape) == 1:
@@ -357,11 +362,35 @@ class PtqProvider(qconfig.QuantizationProvider):
         _qwix_dot_general=self.dot_general,
     )
 
+  def asarray(self, a, dtype=None, order=None, **kwargs):
+    """Intercepts jax.numpy.asarray to prevent dequantization of WithAux/QArray."""
+    if isinstance(a, nnx.State) and 'array' in a:
+      a = a['array']
+      if isinstance(a, nnx.State) and 'qvalue' in a and 'scale' in a:
+        qkwargs = {'qvalue': a['qvalue'].value, 'scale': a['scale'].value}
+        if 'zero_point' in a:
+          qkwargs['zero_point'] = a['zero_point'].value
+        a = qarray.QArray(**qkwargs)
+
+    if isinstance(a, WithAux):
+      return a.replace(  # pyrefly: ignore[missing-attribute]
+          array=jnp.asarray(a.array, dtype=dtype, order=order, **kwargs)
+      )
+
+    if isinstance(a, qarray.QArray):
+      if dtype is not None and a.dtype != dtype:
+        return a.astype(dtype)
+      return a
+    if isinstance(a, (jax.Array, jnp.ndarray)):
+      return jnp.asarray(a, dtype=dtype, order=order, **kwargs)
+    return jnp.asarray(flax_util.unbox(a), dtype=dtype, order=order, **kwargs)
+
   def get_intercept_map(self):
     """Used for interception."""
     return super().get_intercept_map() | {
         'jax.lax.conv_general_dilated': self.conv_general_dilated,
         'jax.lax.dot_general': self.dot_general,
+        'jax.numpy.asarray': self.asarray,
         'jax.numpy.dot': self.dot,
         'jax.numpy.einsum': self.einsum,
         'flax.linen.Module.param': self.nn_param,

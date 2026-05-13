@@ -318,6 +318,27 @@ class FlaxUtilTest(parameterized.TestCase):
 
     nnx.jit(MyModule())()
 
+  def test_find_param_with_aux(self):
+    t = self
+
+    class WithAux:
+
+      def __init__(self, array):
+        self.array = array
+
+    class MyModule(nnx.Module):
+
+      def __init__(self):
+        self.w = WithAux(jnp.ones((4, 5)))
+
+      def __call__(self):
+        t.assertEqual(
+            flax_util.find_param(self.w.array, ptq_array_type=WithAux), "w"
+        )
+        t.assertEqual(flax_util.find_param(self.w, ptq_array_type=WithAux), "w")
+
+    MyModule()()
+
 
 if __name__ == "__main__":
   absltest.main()
