@@ -33,11 +33,14 @@ Hardware Support Summary:
 - CPU: Currently raises NotImplementedError in JAX.
 """
 
+
 from absl import logging
 from absl.testing import absltest
 import jax
 import jax.numpy as jnp
 import numpy as np
+from qwix._src.core import mxfp_dot
+from qwix._src.core import qarray
 
 
 def reference_scaled_matmul(lhs, rhs, lhs_scale, rhs_scale):
@@ -257,6 +260,39 @@ class MxfpNumericsTest(absltest.TestCase):
         scale_type=jnp.float8_e4m3fn,
         block_size=16,
     )
+
+
+class MxfpDotTest(absltest.TestCase):
+  """Tests for mxfp_dot dispatcher and shape handling."""
+
+  def test_flatten_to_3d(self):
+    val = jnp.ones((2, 3, 4, 5))
+    scale = jnp.ones((2, 3, 4, 1))
+    ca = (3,)
+    ba = (0, 1)
+
+    val_3d, scale_3d = mxfp_dot._flatten_to_3d(val, scale, ca, ba)
+    self.assertEqual(val_3d.shape, (6, 4, 5))
+    self.assertEqual(scale_3d.shape, (6, 4, 1))
+
+  def test_mxfp_dot_general_emulation_fallback(self):
+    lhs = qarray.QArray(
+        qvalue=jnp.ones((2, 32), jnp.float8_e4m3fn),
+        scale=jnp.ones((2, 1)),
+        qtype="mxfp8",
+    )
+    rhs = qarray.QArray(
+        qvalue=jnp.ones((2, 32), jnp.float8_e4m3fn),
+        scale=jnp.ones((2, 1)),
+        qtype="mxfp8",
+    )
+
+    platform = jax.devices()[0].platform
+    if platform == "cpu":
+      res = mxfp_dot.mxfp_dot_general(
+          lhs, rhs, dimension_numbers=(((1,), (1,)), ((), ()))
+      )
+      self.assertIsNone(res)
 
 
 if __name__ == "__main__":

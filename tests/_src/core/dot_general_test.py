@@ -56,6 +56,12 @@ class DotGeneralTest(parameterized.TestCase):
           expected_output_dtype=jnp.float32,
       ),
       dict(
+          testcase_name='mxfp8_mxfp8',
+          lhs_dtype=(jnp.float8_e4m3fn, jnp.bfloat16, 'mxfp8'),
+          rhs_dtype=(jnp.float8_e4m3fn, jnp.bfloat16, 'mxfp8'),
+          expected_output_dtype=jnp.bfloat16,
+      ),
+      dict(
           testcase_name='bool_i8bf16',
           lhs_dtype=jnp.bool_,
           rhs_dtype=(jnp.int8, jnp.bfloat16),
@@ -64,16 +70,24 @@ class DotGeneralTest(parameterized.TestCase):
   )
   def test_output_dtype(self, lhs_dtype, rhs_dtype, expected_output_dtype):
     if isinstance(lhs_dtype, tuple):
+      kwargs = {}
+      if len(lhs_dtype) > 2:
+        kwargs['qtype'] = lhs_dtype[2]
       lhs = qarray.QArray(
           jnp.ones((10, 10), lhs_dtype[0]),
           jnp.ones((1, 1), lhs_dtype[1]),
+          **kwargs,
       )
     else:
       lhs = jnp.ones((10, 10), lhs_dtype)
     if isinstance(rhs_dtype, tuple):
+      kwargs = {}
+      if len(rhs_dtype) > 2:
+        kwargs['qtype'] = rhs_dtype[2]
       rhs = qarray.QArray(
           jnp.ones((10, 10), rhs_dtype[0]),
           jnp.ones((1, 1), rhs_dtype[1]),
+          **kwargs,
       )
     else:
       rhs = jnp.ones((10, 10), rhs_dtype)
@@ -108,6 +122,14 @@ class DotGeneralTest(parameterized.TestCase):
                 preferred_element_type=preferred_element_type,  # pylint: disable=cell-var-from-loop
             )
         )
+        dot_general_output = jax.eval_shape(
+            lambda: dot_general.dot_general(
+                lhs,
+                rhs,
+                dnums,
+                preferred_element_type=preferred_element_type,  # pylint: disable=cell-var-from-loop
+            )
+        )
         einsum_output = jax.eval_shape(
             lambda: einsum.einsum(
                 'ab,bc->ac',
@@ -120,6 +142,7 @@ class DotGeneralTest(parameterized.TestCase):
         self.assertEqual(fast_output.dtype, expected_output_dtype)
         self.assertEqual(loop_output.dtype, expected_output_dtype)
         self.assertEqual(einsum_output.dtype, expected_output_dtype)
+        self.assertEqual(dot_general_output.dtype, expected_output_dtype)
 
 
 if __name__ == '__main__':
