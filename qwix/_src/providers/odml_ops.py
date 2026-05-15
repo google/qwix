@@ -13,6 +13,7 @@
 # limitations under the License.
 """ODML ops for QAT."""
 
+import copy
 import dataclasses
 import enum
 import functools
@@ -148,6 +149,9 @@ class AuxDataKey(str, enum.Enum):
   # softmax.
   FIXED_RANGE = 'fixed_range'  # tuple[float, float]
 
+  # Generic bucket for custom transformation tags/markers.
+  REWRITE_TAG = 'rewrite_tag'  # dict[str, Any]
+
 
 # Metadata keys that depend on the value being preserved.
 # If the value changes (e.g. add, mul), these keys become invalid.
@@ -156,6 +160,7 @@ _VALUE_DEPENDENT_METADATA = (
     AuxDataKey.FQ_RULE,
     AuxDataKey.FIXED_RANGE,
     AuxDataKey.ALLOW_FUSION,
+    AuxDataKey.REWRITE_TAG,
 )
 
 # These ops only change the tensor view or layout, not the values.
@@ -205,6 +210,15 @@ def _copy_for_isolation(original_array: jax.Array) -> jax.Array:
     aux_data.set(array_copy, AuxDataKey.FIXED_RANGE, fixed_range)
   if aux_data.get(original_array, AuxDataKey.ALLOW_FUSION, False):
     aux_data.set(array_copy, AuxDataKey.ALLOW_FUSION, True)
+  rewrite_tag = aux_data.get(original_array, AuxDataKey.REWRITE_TAG, None)
+  if rewrite_tag is not None:
+    aux_data.set(
+        array_copy,
+        AuxDataKey.REWRITE_TAG,
+        copy.deepcopy(rewrite_tag)
+        if isinstance(rewrite_tag, dict)
+        else rewrite_tag,
+    )
   return array_copy
 
 
@@ -523,7 +537,7 @@ class FinalOutput(QuantizedOp):
     return self._maybe_fake_quant(x, previous_rule, op_id)
 
 
-def _forward_metadata(inputs: Any, outputs: Any, is_value_preserving_op: bool):
+def forward_metadata(inputs: Any, outputs: Any, is_value_preserving_op: bool):
   """Forwards metadata from inputs to outputs.
 
   Args:
@@ -589,6 +603,8 @@ def _forward_metadata(inputs: Any, outputs: Any, is_value_preserving_op: bool):
   if metadata:
     for x in jax.tree.leaves(outputs):
       for key, val in metadata.items():
+        if key == AuxDataKey.REWRITE_TAG and isinstance(val, dict):
+          val = copy.deepcopy(val)
         aux_data.set(x, key, val)
 
 
@@ -604,7 +620,7 @@ class Dropout(QuantizedOp):
 
   def __call__(self, *args, **kwargs):
     out = self._call_original_op(*args, **kwargs)
-    _forward_metadata(args[self.input_idx[0]], out, is_value_preserving_op=True)
+    forward_metadata(args[self.input_idx[0]], out, is_value_preserving_op=True)
     return out
 
 
@@ -621,7 +637,7 @@ class PrimitiveBindOp(QuantizedOp):
 
   def __call__(self, primitive, *args, **params):
     out = self._call_original_op(primitive, *args, **params)
-    _forward_metadata(
+    forward_metadata(
         args,
         out,
         is_value_preserving_op=primitive.name in _VALUE_PRESERVING_PRIMITIVES,

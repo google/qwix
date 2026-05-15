@@ -28,6 +28,7 @@ from qwix._src import averaging
 from qwix._src import flax_util
 from qwix._src import interception
 from qwix._src import qconfig
+from qwix._src.core import einsum_info
 from qwix._src.core import qarray
 from qwix._src.providers import odml_ops
 
@@ -380,6 +381,10 @@ class OdmlConversionProvider(OdmlQatProvider):
         self._flatten_dot_general,
         _dot_general=intercept_map['jax.lax.dot_general'],
     )
+    intercept_map['jax.numpy.einsum'] = functools.partial(
+        self._flatten_einsum,
+        _einsum=intercept_map['jax.numpy.einsum'],
+    )
     return intercept_map
 
   def _flatten_dot_general(self, *args, _dot_general, **kwargs):
@@ -393,10 +398,83 @@ class OdmlConversionProvider(OdmlQatProvider):
     ):
       args = list(args)
       dout = args[1].shape[1:]
+      original_weight = args[1]
       args[1] = jax.lax.reshape(args[1], (args[1].shape[0], np.prod(dout)))
+      odml_ops.forward_metadata(
+          original_weight, args[1], is_value_preserving_op=True
+      )
       out = _dot_general(*args, **kwargs)
-      return jax.lax.reshape(out, out.shape[:-1] + dout)
+      res = jax.lax.reshape(out, out.shape[:-1] + dout)
+      odml_ops.forward_metadata(out, res, is_value_preserving_op=True)
+      return res
     return _dot_general(*args, **kwargs)
+
+  def _flatten_einsum(self, *args, _einsum, **kwargs):
+    """Flatten 3D RHS weights to 2-D when contracting in the middle.
+
+    This handles a limited einsum family:
+      ...D,NDH->...NH
+
+    Examples include 'TD,NDH->TNH', 'BTD,NDH->BTNH', 'BSTD,NDH->BSTNH', etc.,
+    where LHS may have any number of non-contracting dimensions.
+
+    Args:
+      *args: Positional arguments to the original einsum operation.
+      _einsum: The original einsum function being intercepted.
+      **kwargs: Keyword arguments to the original einsum operation.
+
+    Returns:
+      The result of the einsum operation.
+    """
+
+    if len(args) == 3:
+      einsum_str, lhs, rhs = args
+      weight_name = aux_data.get(rhs, odml_ops.AuxDataKey.WEIGHT_NAME, None)
+      if (
+          isinstance(einsum_str, str)
+          and weight_name is not None
+          and rhs.ndim == 3
+      ):
+        try:
+          info = einsum_info.EinsumInfo.parse(
+              einsum_str, ndims=(lhs.ndim, rhs.ndim)
+          )
+        except (NotImplementedError, ValueError):
+          return _einsum(*args, **kwargs)
+        if (
+            info.lhs
+            and len(info.rhs) == 3
+            and info.contract_chars == [info.lhs[-1]]
+            and info.rhs[1] == info.lhs[-1]
+            and not info.batch_chars
+            and info.out == info.lhs[:-1] + info.rhs[0] + info.rhs[2]
+        ):
+          # Matches 3D RHS weight with mid contracting dim. Rewrite as matmul:
+          #   lhs (..., D) -> (prod(...), D)
+          #   rhs (N, D, H) -> (D, N*H)
+          # and then reshape the output back to (..., N, H).
+          args = list(args)
+          args[1] = jax.lax.reshape(
+              lhs, (np.prod(lhs.shape[:-1]), lhs.shape[-1])
+          )
+          odml_ops.forward_metadata(lhs, args[1], is_value_preserving_op=True)
+          args[2] = jax.lax.reshape(
+              jax.lax.transpose(rhs, (1, 0, 2)),
+              (rhs.shape[1], rhs.shape[0] * rhs.shape[2]),
+          )
+          odml_ops.forward_metadata(rhs, args[2], is_value_preserving_op=True)
+          attrs = aux_data.get(args[2], odml_ops.AuxDataKey.REWRITE_TAG, {})
+          attrs = dict(attrs)
+          attrs['flattened_einsum_weight'] = True
+          aux_data.set(args[2], odml_ops.AuxDataKey.REWRITE_TAG, attrs)
+          out = _einsum('ab,bc->ac', args[1], args[2], **kwargs)
+          res = jax.lax.reshape(
+              out, lhs.shape[:-1] + (rhs.shape[0], rhs.shape[2])
+          )
+          odml_ops.forward_metadata(out, res, is_value_preserving_op=True)
+          return res
+
+    return _einsum(*args, **kwargs)
 
   def _fake_quant(
       self,
@@ -414,12 +492,23 @@ class OdmlConversionProvider(OdmlQatProvider):
         assert quant_stat_name is None
         mdl_path = flax_util.get_current_module_path()
         weight = self._flatten_params[mdl_path + (weight_name,)]
-        if weight.shape != array.shape:  # when _flatten_dot_general is used.
+        rewrite_attrs = aux_data.get(array, odml_ops.AuxDataKey.REWRITE_TAG, {})
+        if rewrite_attrs.get('flattened_einsum_weight', False):
+          # Apply the same layout as _flatten_einsum to the static weight.
+          weight = jax.lax.reshape(
+              jax.lax.transpose(weight, (1, 0, 2)), array.shape
+          )
+        elif weight.shape != array.shape:  # when _flatten_dot_general is used.
           weight = weight.reshape(array.shape)
         calibration = qarray.calibrate(weight, how)
         scale, zp = qarray.compute_scale_zero_point(calibration, how.qtype)
       elif quant_stat_name is not None:  # Static-range activations.
         scale, zp = self._compute_static_scale_zero_point(how, quant_stat_name)
+        # Match scale/zp rank to the activation flattened by _flatten_einsum.
+        if scale.ndim != array.ndim and scale.size == 1:
+          scale = scale.reshape((1,) * array.ndim)
+        if zp and zp.ndim != array.ndim and zp.size == 1:
+          zp = zp.reshape((1,) * array.ndim)
       else:  # Dynamic-range activations.
         scale, zp = None, None
 
