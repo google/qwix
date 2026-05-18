@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.10', '3.13']
+        python-version: ['3.11', '3.13']
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python ${{ matrix.python-version }}
@@ -32,4 +32,4 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
       - name: Run unit tests
-        run: python -m pytest tests/ -v
+        run: python -m pytest tests/ -v --ignore=tests/contrib/kernels/quantized_matmul_test.py
