@@ -59,7 +59,7 @@ def load_nested_safetensors(
     with ocp.Context(
         checkpoint_layout=ocp.options.CheckpointLayout.SAFETENSORS
     ):
-      meta = ocp.pytree_metadata(path)
+      meta = ocp.metadata(path)
     sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
     flat_abstract = {
         k: jax.ShapeDtypeStruct(shape=v.shape, dtype=v.dtype, sharding=sharding)
@@ -67,7 +67,7 @@ def load_nested_safetensors(
     }
 
   with ocp.Context(checkpoint_layout=ocp.options.CheckpointLayout.SAFETENSORS):
-    flat_tree = ocp.load_pytree(path, abstract_pytree=flat_abstract)
+    flat_tree = ocp.load(path, abstract_state=flat_abstract)
 
   if rename_rules:
     rename_transform = renaming.rename_by_regex(rename_rules)
