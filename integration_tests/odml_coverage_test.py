@@ -253,8 +253,6 @@ class DenseConcatenateResidual(nn.Module):
       'Dense_0/dot_general0_lhs',
       # No Dense_0/add0_input0 because add is fused.
       'Dense_1/dot_general0_lhs',
-      # add0_lhs is collected now due to isolation.
-      'add0_lhs',
       'add0_rhs',
       'final_output0',
   }
