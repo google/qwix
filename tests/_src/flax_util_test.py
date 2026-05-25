@@ -21,6 +21,7 @@ from jax import numpy as jnp
 from jax.nn import initializers
 import numpy as np
 from qwix._src import flax_util
+from qwix._src.providers.ptq import WithAux
 
 
 class FlaxUtilTest(parameterized.TestCase):
@@ -293,9 +294,11 @@ class FlaxUtilTest(parameterized.TestCase):
       @nn.compact
       def __call__(self):
         w = self.param("w", nn.initializers.ones, (4, 5), jnp.float32)
+        _ = self.param("w2", nn.initializers.ones, (4, 5), jnp.float32)
         t.assertEqual(flax_util.find_param(w), "w")
         t.assertEqual(flax_util.find_param(w.astype(jnp.bfloat16)), "w")
         t.assertEqual(flax_util.find_param(w.reshape((2, 2, 5))), "w")
+        t.assertEqual(flax_util.find_param(WithAux(w, None)), "w")
 
     model = MyModule()
     variables = jax.jit(model.init)(jax.random.key(0))
@@ -308,6 +311,7 @@ class FlaxUtilTest(parameterized.TestCase):
 
       def __init__(self):
         self.w = nnx.Param(jnp.ones((4, 5), jnp.float32))
+        self.w2 = nnx.Param(jnp.ones((4, 5), jnp.float32))
 
       def __call__(self):
         print(self.w.value)
@@ -315,6 +319,7 @@ class FlaxUtilTest(parameterized.TestCase):
         t.assertEqual(flax_util.find_param(self.w.value), "w")
         t.assertEqual(flax_util.find_param(self.w.astype(jnp.bfloat16)), "w")
         t.assertEqual(flax_util.find_param(self.w.reshape((2, 2, 5))), "w")
+        t.assertEqual(flax_util.find_param(WithAux(self.w.value, None)), "w")
 
     nnx.jit(MyModule())()
 
