@@ -58,6 +58,11 @@ class WithAux(Generic[ArrayTypeVar]):
   shape = property(lambda self: flax_util.unbox(self.array).shape)
   ndim = property(lambda self: flax_util.unbox(self.array).ndim)
   __getitem__ = lambda self, key: jax.tree.map(lambda x: x[key], self.value)
+  dtype = property(lambda self: flax_util.unbox(self.array).dtype)
+
+  def astype(self, dtype):
+    new_value = flax_util.unbox(self.array).astype(dtype)
+    return self.replace(array=flax_util.update_boxed(self.array, value=new_value))  # pyrefly: ignore[missing-attribute]
 
   def reshape(self, *shape):
     if len(shape) == 1:
@@ -357,11 +362,65 @@ class PtqProvider(qconfig.QuantizationProvider):
         _qwix_dot_general=self.dot_general,
     )
 
+  def asarray(self, a, dtype=None, order=None, **kwargs):
+    """Intercepts jax.numpy.asarray to correctly handle WithAux and QArray.
+
+    Without this interception, calling `jax.numpy.asarray` on these custom
+    PyTree
+    structures would result in a crash, as JAX cannot natively convert them into
+    flat arrays.
+
+    This function covers the following cases:
+      - nnx.State containing QArray components (unboxes into QArray).
+      - ptq.WithAux (propagates to the underlying array).
+      - ptq.QArray (preserves QArray, casting dtype if requested).
+
+    For all other types, including linen Variables, this falls back to calling
+    `jax.numpy.asarray` on the unboxed value.
+
+    Args:
+      a: Input data.
+      dtype: The desired data type.
+      order: The desired memory layout.
+      **kwargs: Additional keyword arguments.
+
+    Returns:
+      The converted array. Could be a QArray, WithAux or a JAX Array.
+    """
+    # 1. Unbox early to handle nnx.Param, Linen variables, etc.
+    a = flax_util.unbox(a)
+
+    # 2. Handle nnx.State reconstruction
+    if isinstance(a, nnx.State) and 'array' in a:
+      a = a['array']
+      if isinstance(a, nnx.State) and 'qvalue' in a and 'scale' in a:
+        # Since we already unboxed, the values inside the state are no longer
+        # nnx.Variable
+        qkwargs = {'qvalue': a['qvalue'], 'scale': a['scale']}
+        if 'zero_point' in a:
+          qkwargs['zero_point'] = a['zero_point']
+        a = qarray.QArray(**qkwargs)
+
+    # 3. Handle custom types
+    if isinstance(a, WithAux):
+      return a.replace(  # pyrefly: ignore[missing-attribute]
+          array=self.asarray(a.array, dtype=dtype, order=order, **kwargs)
+      )
+
+    if isinstance(a, qarray.QArray):
+      if dtype is not None and a.dtype != dtype:
+        return a.astype(dtype)
+      return a
+
+    # 4. Fallback for standard JAX arrays
+    return jnp.asarray(a, dtype=dtype, order=order, **kwargs)
+
   def get_intercept_map(self):
     """Used for interception."""
     return super().get_intercept_map() | {
         'jax.lax.conv_general_dilated': self.conv_general_dilated,
         'jax.lax.dot_general': self.dot_general,
+        'jax.numpy.asarray': self.asarray,
         'jax.numpy.dot': self.dot,
         'jax.numpy.einsum': self.einsum,
         'flax.linen.Module.param': self.nn_param,
