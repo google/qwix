@@ -220,16 +220,16 @@ class OrbaxSafetensorsIntegrationTest(absltest.TestCase):
 
     # Save fake flat model for prequantized state (CustomTestModel shape)
     flat_tree = {
-        "model.language_model.embed_tokens.weight.qvalue": np.ones(
+        "model.language_model.embed_tokens.weight.array.qvalue": np.ones(
             (128, 128), dtype=np.int8
         ),
-        "model.language_model.embed_tokens.weight.scale": np.ones(
+        "model.language_model.embed_tokens.weight.array.scale": np.ones(
             (1, 128), dtype=np.float32
         ),
-        "model.language_model.layers.0.linear_attn.q_proj.weight.qvalue": (
-            np.ones((128, 128), dtype=np.int8)
+        "model.language_model.layers.0.linear_attn.q_proj.weight.array.qvalue": np.ones(
+            (128, 128), dtype=np.int8
         ),
-        "model.language_model.layers.0.linear_attn.q_proj.weight.scale": (
+        "model.language_model.layers.0.linear_attn.q_proj.weight.array.scale": (
             np.ones((1, 128), dtype=np.float32)
         ),
     }
@@ -286,22 +286,22 @@ class OrbaxSafetensorsIntegrationTest(absltest.TestCase):
     qvalue = np.random.randint(-128, 127, size=(128, 128), dtype=np.int8)
 
     flat_tree_1d = {
-        "model.language_model.embed_tokens.weight.qvalue": qvalue,
-        "model.language_model.embed_tokens.weight.scale": scales_1d,
-        "model.language_model.layers.0.linear_attn.q_proj.weight.qvalue": (
+        "model.language_model.embed_tokens.weight.array.qvalue": qvalue,
+        "model.language_model.embed_tokens.weight.array.scale": scales_1d,
+        "model.language_model.layers.0.linear_attn.q_proj.weight.array.qvalue": (
             qvalue
         ),
-        "model.language_model.layers.0.linear_attn.q_proj.weight.scale": (
+        "model.language_model.layers.0.linear_attn.q_proj.weight.array.scale": (
             scales_1d
         ),
     }
     flat_tree_2d = {
-        "model.language_model.embed_tokens.weight.qvalue": qvalue,
-        "model.language_model.embed_tokens.weight.scale": scales_2d,
-        "model.language_model.layers.0.linear_attn.q_proj.weight.qvalue": (
+        "model.language_model.embed_tokens.weight.array.qvalue": qvalue,
+        "model.language_model.embed_tokens.weight.array.scale": scales_2d,
+        "model.language_model.layers.0.linear_attn.q_proj.weight.array.qvalue": (
             qvalue
         ),
-        "model.language_model.layers.0.linear_attn.q_proj.weight.scale": (
+        "model.language_model.layers.0.linear_attn.q_proj.weight.array.scale": (
             scales_2d
         ),
     }
@@ -379,8 +379,8 @@ class OrbaxSafetensorsIntegrationTest(absltest.TestCase):
     mesh = jax.sharding.Mesh(np.array(devices), ("x",))
 
     rename_rules = [
-        (r"\.scale_inv$", ".scale"),
-        (r"\.param$", ".qvalue"),
+        (r"\.scale_inv$", ".array.scale"),
+        (r"\.param$", ".array.qvalue"),
     ]
 
     loaded_quant_params = load_nested_safetensors(

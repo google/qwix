@@ -48,14 +48,9 @@ def _get_canonical_named_sharding(x: jax.Array) -> jax.sharding.Sharding:
 
 def _to_orbax_payload(tree: Any) -> Any:
   if isinstance(tree, dict):
-    if set(tree) == {"array"} and isinstance(tree["array"], dict):
-      array_payload = tree["array"]
-      if set(array_payload) <= {"qvalue", "scale", "zero_point"}:
-        return {
-            key: _to_orbax_payload(value)
-            for key, value in array_payload.items()
-        }
     return {key: _to_orbax_payload(value) for key, value in tree.items()}
+  if isinstance(tree, (list, tuple)):
+    return type(tree)(_to_orbax_payload(x) for x in tree)
   return (
       np.asarray(jax.device_get(tree)) if isinstance(tree, jax.Array) else tree
   )
@@ -123,25 +118,6 @@ class PrequantizedPtqTest(parameterized.TestCase):
         ValueError, "Unhandled or invalid parameter combination"
     ):
       ptq.process_prequantized_params(full_precision_payload, abs_ptq_linear)
-
-  def test_process_prequantized_params_fp_template(self):
-    q_rules = [
-        qconfig.QuantizationRule(
-            module_path=".*", weight_qtype=jnp.int8, tile_size=4
-        ),
-    ]
-    model_input = jnp.ones((10, 12))
-    fp_linear = nnx.Linear(12, 6, rngs=nnx.Rngs(0))
-
-    _, _, reference_params = _build_linear_reference(q_rules, model_input)
-    orbax_payload = _to_orbax_payload(reference_params)
-
-    processed_params = ptq.process_prequantized_params(orbax_payload, fp_linear)
-
-    self.assertIsInstance(processed_params["kernel"], dict)
-    self.assertIn("qvalue", processed_params["kernel"])
-    self.assertIn("scale", processed_params["kernel"])
-    self.assertNotIsInstance(processed_params["bias"], dict)
 
   def test_process_prequantized_params_nnx_einsum_sharding(self):
     mesh = jax.make_mesh(
@@ -228,21 +204,22 @@ class PrequantizedPtqTest(parameterized.TestCase):
   @parameterized.named_parameters(
       dict(
           testcase_name="missing_scale",
-          modify_payload_fn=lambda p: p["kernel"].pop("scale"),
+          modify_payload_fn=lambda p: p["kernel"]["array"].pop("scale"),
           expected_regex="scale",
       ),
       dict(
           testcase_name="wrong_shape",
-          modify_payload_fn=lambda p: p["kernel"].update(
-              {"qvalue": p["kernel"]["qvalue"][:-1]}
+          modify_payload_fn=lambda p: p["kernel"]["array"].update(
+              {"qvalue": p["kernel"]["array"]["qvalue"][:-1]}
           ),
           expected_regex="shape",
       ),
       dict(
           testcase_name="rejects_unexpected_zero_point",
-          modify_payload_fn=lambda p: p["kernel"].update({
+          modify_payload_fn=lambda p: p["kernel"]["array"].update({
               "zero_point": np.zeros_like(
-                  p["kernel"]["scale"], dtype=p["kernel"]["qvalue"].dtype
+                  p["kernel"]["array"]["scale"],
+                  dtype=p["kernel"]["array"]["qvalue"].dtype,
               )
           }),
           expected_regex="unexpected",
@@ -392,6 +369,34 @@ class PrequantizedPtqTest(parameterized.TestCase):
 
     _assert_trees_allclose(self, processed_params, reference_params)
     nnx.update(abs_ptq_model, processed_params)
+
+  def test_process_prequantized_params_manual_dict_template(self):
+    template_model = nnx.Linear(12, 6, rngs=nnx.Rngs(0))
+    # Override the non-intercepted but pre-quantized kernel with the manual
+    # quantized dictionary structure.
+    template_model.kernel = {
+        "array": {
+            "qvalue": nnx.Param(jax.ShapeDtypeStruct((12, 6), jnp.int8)),
+            "scale": nnx.Param(jax.ShapeDtypeStruct((1, 6), jnp.float32)),
+        }
+    }
+
+    reference_params = {
+        "kernel": {
+            "array": {
+                "qvalue": jnp.ones((12, 6), dtype=jnp.int8),
+                "scale": jnp.ones((1, 6), dtype=jnp.float32),
+            }
+        }
+    }
+    orbax_payload = _to_orbax_payload(reference_params)
+
+    processed_params = ptq.process_prequantized_params(
+        orbax_payload, template_model
+    )
+
+    _assert_trees_allclose(self, processed_params, reference_params)
+    nnx.update(template_model, processed_params)
 
 
 if __name__ == "__main__":
