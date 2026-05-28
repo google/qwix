@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   verify:
-    if: github.repository == 'google/qwix'
+    if: github.repository == 'google/qwix' && github.event.pull_request.user.login != 'copybara-service[bot]'
     runs-on: 'ubuntu-latest'
     steps:
       - name: 'Verify contributor agreement'
