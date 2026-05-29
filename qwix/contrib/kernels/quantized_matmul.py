@@ -13,6 +13,11 @@
 # limitations under the License.
 """Implements a quantized matmul kernel.
 
+Motivation:
+- This kernel overlaps MXU and VPU work with communication to maximize TPU
+    utilization.
+- Sub-block processing minimizes data movement between vmem and vregs.
+
 Info:
 This is being actively developed and features will be added over time.
 
@@ -60,13 +65,25 @@ def can_use_qmm(x, sx, y, sy, *, bm, bk, bn):
     return False
 
   # Check the scales reduction axis
+  if sx.ndim != 2 or sy.ndim != 2:
+    return False
   if sx.shape[1] != sy.shape[0]:
     # Number of tiles must match for the scales on the reduction axis.
     return False
 
   # Scale tile sizes are sufficiently large.
-  sm, sk, sn = sx.shape
+  sm, sk = sx.shape
+  _, sn = sy.shape
   if mdim // sm < 128 or kdim // sk < 128 or ndim // sn < 128:
+    return False
+
+  # Check that the grid size divides the scale shapes or scale shape is 1.
+  mg, kg, ng = pl.cdiv(mdim, bm), pl.cdiv(kdim, bk), pl.cdiv(ndim, bn)
+  if sm > 1 and sm % mg != 0:
+    return False
+  if sk > 1 and sk % kg != 0:
+    return False
+  if sn > 1 and sn % ng != 0:
     return False
 
   # TODO(chapmanjames): Improve this for bfloat16 scales.
@@ -129,6 +146,9 @@ def quantized_matmul_kernel(
     bm: int,
     bk: int,
     bn: int,
+    max_sublock_size_m: int = 128,
+    max_sublock_size_n: int = 128,
+    max_sublock_size_k: int = 128,
 ):
   """Quantized matmul kernel.
 
@@ -142,6 +162,9 @@ def quantized_matmul_kernel(
     bm: blockspec for the m dimension
     bk: blockspec for the k dimension
     bn: blockspec for the n dimension
+    max_sublock_size_m: maximum size of the sublock for the m dimension
+    max_sublock_size_n: maximum size of the sublock for the n dimension
+    max_sublock_size_k: maximum size of the sublock for the k dimension
   """
 
   sm_global, sk_global, *_ = sx_hbm.shape
@@ -159,15 +182,60 @@ def quantized_matmul_kernel(
 
   # Blockspecs for the kernel
   x_spec = pl.BlockSpec((bm, bk), lambda a, b, c: (a, c))
-  sx_spec = pl.BlockSpec((sm, sk, 1, 1), lambda a, b, c: (a, c, 0, 0))
+  sx_spec = pl.BlockSpec(
+      (sm, sk, 1, 1),
+      lambda a, b, c: (
+          a if sm_global > 1 else 0,
+          c if sk_global > 1 else 0,
+          0,
+          0,
+      ),
+  )
   y_spec = pl.BlockSpec((bk, bn), lambda a, b, c: (c, b))
-  sy_spec = pl.BlockSpec((sk, sn, 1, 1), lambda a, b, c: (c, b, 0, 0))
+  sy_spec = pl.BlockSpec(
+      (sk, sn, 1, 1),
+      lambda a, b, c: (
+          c if sk_global > 1 else 0,
+          b if sn_global > 1 else 0,
+          0,
+          0,
+      ),
+  )
   o_spec = pl.BlockSpec((bm, bn), lambda a, b, c: (a, b))
 
   # Tile sizes corresponding to scale entries
   m_tile_size = pl.cdiv(bm, sm)
   k_tile_size = pl.cdiv(bk, sk)
   n_tile_size = pl.cdiv(bn, sn)
+
+  # Subblock info
+  subblock_size_m = min((m_tile_size, max_sublock_size_m))
+  subblock_size_n = min((n_tile_size, max_sublock_size_n))
+  subblock_size_k = min((k_tile_size, max_sublock_size_k))
+
+  if m_tile_size % subblock_size_m != 0:
+    raise ValueError(
+        f'Subblock size must divide tile size, {m_tile_size=}'
+        f' {subblock_size_m=}'
+    )
+  if n_tile_size % subblock_size_n != 0:
+    raise ValueError(
+        f'Subblock size must divide tile size, {n_tile_size=}'
+        f' {subblock_size_n=}'
+    )
+  if k_tile_size % subblock_size_k != 0:
+    raise ValueError(
+        f'Subblock size must divide tile size, {k_tile_size=}'
+        f' {subblock_size_k=}'
+    )
+
+  subblock_iters_m = pl.cdiv(bm, subblock_size_m)
+  subblock_iters_n = pl.cdiv(bn, subblock_size_n)
+  subblock_iters_k = pl.cdiv(bk, subblock_size_k)
+
+  m_scale_reuse = subblock_iters_m // sm
+  n_scale_reuse = subblock_iters_n // sn
+  k_scale_reuse = subblock_iters_k // sk
 
   # Kernel body
   def quantized_matmul_body(
@@ -184,15 +252,18 @@ def quantized_matmul_kernel(
     def _init():
       accum_vmem[...] = jnp.zeros_like(accum_vmem)
 
-    for mloop in range(sm):
-      data_m_slc = pl.Slice(mloop * m_tile_size, m_tile_size)
+    # Subblock loops
+    for mloop in range(subblock_iters_m):
+      data_m_slc = pl.Slice(mloop * subblock_size_m, subblock_size_m)
+      scale_m_ind = mloop // m_scale_reuse
 
-      for nloop in range(sn):
-        data_n_slc = pl.Slice(nloop * n_tile_size, n_tile_size)
+      for nloop in range(subblock_iters_n):
+        data_n_slc = pl.Slice(nloop * subblock_size_n, subblock_size_n)
+        scale_n_ind = nloop // n_scale_reuse
 
-        # Loop over subchannel axis
-        for kloop in range(sk):
-          data_k_slc = pl.Slice(kloop * k_tile_size, k_tile_size)
+        for kloop in range(subblock_iters_k):
+          data_k_slc = pl.Slice(kloop * subblock_size_k, subblock_size_k)
+          scale_k_ind = kloop // k_scale_reuse
 
           # Load lhs and rhs
           x = x_vmem[data_m_slc, data_k_slc]
@@ -202,8 +273,8 @@ def quantized_matmul_kernel(
           xy = jnp.matmul(x, y, preferred_element_type=reduction_dtype)
 
           # Access the scales we need
-          sx = sx_vmem[mloop, kloop, :, :]
-          sy = sy_vmem[kloop, nloop, :, :]
+          sx = sx_vmem[scale_m_ind, scale_k_ind, :, :]
+          sy = sy_vmem[scale_k_ind, scale_n_ind, :, :]
 
           # Dequantize
           xys = (xy * sx) * sy
@@ -239,6 +310,9 @@ def quantized_matmul(
     bm: int,
     bk: int,
     bn: int,
+    max_sublock_size_m: int = 128,
+    max_sublock_size_n: int = 128,
+    max_sublock_size_k: int = 128,
     accum_dtype=jnp.float32,
     dtype,
 ):
@@ -260,6 +334,9 @@ def quantized_matmul(
     bm: blockspec for the m dimension
     bk: blockspec for the k dimension
     bn: blockspec for the n dimension
+    max_sublock_size_m: maximum size of the sublock for the m dimension
+    max_sublock_size_n: maximum size of the sublock for the n dimension
+    max_sublock_size_k: maximum size of the sublock for the k dimension
     accum_dtype: The dtype of the accumulation buffer
     dtype: The dtype of the output array
 
@@ -293,24 +370,8 @@ def quantized_matmul(
     )
 
   # Pre-process the scales
-  min_size = 128
   sx = jnp.expand_dims(sx, axis=(-1, -2))
   sy = jnp.expand_dims(sy, axis=(-1, -2))
-
-  # Tile sizes corresponding to scale entries
-  # e.g. shape of the submatrix in x or y that each scale entry covers.
-  m_tile_size = m // sx.shape[0]
-  k_tile_size = k // sx.shape[1]
-  n_tile_size = n // sy.shape[1]
-
-  # Expand scale shapes to make scale indexing easier
-  if m_tile_size > min_size:
-    sx = jnp.repeat(sx, repeats=m_tile_size // min_size, axis=0)
-  if k_tile_size > min_size:
-    sx = jnp.repeat(sx, repeats=k_tile_size // min_size, axis=1)
-    sy = jnp.repeat(sy, repeats=k_tile_size // min_size, axis=0)
-  if n_tile_size > min_size:
-    sy = jnp.repeat(sy, repeats=n_tile_size // min_size, axis=1)
 
   # Create the tensor core mesh
   tc_mesh = pltpu.create_tensorcore_mesh(axis_name=_CORE_AXIS_NAME)
@@ -324,6 +385,9 @@ def quantized_matmul(
       bm=bm,
       bk=bk,
       bn=bn,
+      max_sublock_size_m=max_sublock_size_m,
+      max_sublock_size_n=max_sublock_size_n,
+      max_sublock_size_k=max_sublock_size_k,
   )
 
   if sx.dtype != jnp.float32 or sy.dtype != jnp.float32:

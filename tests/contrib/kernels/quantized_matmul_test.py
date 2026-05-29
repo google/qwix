@@ -66,6 +66,50 @@ class QuantizedMatmulTest(parameterized.TestCase):
     qwix_answer = QuantizedMatmulTest.jax_answer(lhs[0], lhs[1], rhs[0], rhs[1])
     np.testing.assert_allclose(kernel_answer, qwix_answer, rtol=1e-2, atol=1e-2)
 
+  def test_can_use_qmm_1(self):
+    m, k, n = 1024, 1024, 1024
+    sm, sk, sn = 8, 8, 8
+    bm, bk, bn = 256, 512, 1024
+
+    x = jax.ShapeDtypeStruct((m, k), jnp.int8)
+    sx = jax.ShapeDtypeStruct((sm, sk), jnp.float32)
+    y = jax.ShapeDtypeStruct((k, n), jnp.int8)
+    sy = jax.ShapeDtypeStruct((sk, sn), jnp.float32)
+
+    self.assertTrue(
+        quantized_matmul.can_use_qmm(
+            x,
+            sx,
+            y,
+            sy,
+            bm=bm,
+            bk=bk,
+            bn=bn,
+        )
+    )
+
+  def test_can_use_qmm_2(self):
+    m, k, n = 256, 512, 1024
+    sk = 8
+    bm, bk, bn = 256, 512, 1024
+
+    x = jax.ShapeDtypeStruct((m, k), jnp.int8)
+    sx = jax.ShapeDtypeStruct((sk,), jnp.float32)
+    y = jax.ShapeDtypeStruct((k, n), jnp.int8)
+    sy = jax.ShapeDtypeStruct((sk,), jnp.float32)
+
+    self.assertFalse(
+        quantized_matmul.can_use_qmm(
+            x,
+            sx,
+            y,
+            sy,
+            bm=bm,
+            bk=bk,
+            bn=bn,
+        )
+    )
+
 
 if __name__ == "__main__":
   absltest.main()
