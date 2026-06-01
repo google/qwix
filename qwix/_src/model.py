@@ -16,15 +16,36 @@
 from collections.abc import Collection
 import functools
 import inspect
-from typing import Any, TypeVar
+from typing import Any, overload
 
 from flax import linen as nn
 from flax import nnx
 from qwix._src import interception
 from qwix._src import qconfig
 
+ModelType = nn.Module | nnx.Module
 
-ModelType = TypeVar("ModelType")
+
+@overload
+def quantize_model(
+    model: nn.Module,
+    provider: qconfig.QuantizationProvider,
+    *model_inputs: Any,
+    methods: Collection[str] = ("__call__",),
+    **model_inputs_kwargs: Any,
+) -> nn.Module:
+  ...
+
+
+@overload
+def quantize_model(
+    model: nnx.Module,
+    provider: qconfig.QuantizationProvider,
+    *model_inputs: Any,
+    methods: Collection[str] = ("__call__",),
+    **model_inputs_kwargs: Any,
+) -> nnx.Module:
+  ...
 
 
 def quantize_model(
@@ -51,13 +72,13 @@ def quantize_model(
   if isinstance(model, nn.Module):
     if model_inputs or model_inputs_kwargs:
       raise ValueError("Model inputs must not be provided for linen models.")
-    return quantize_linen_model(model, provider, methods)  # pyrefly: ignore[bad-return]
+    return quantize_linen_model(model, provider, methods)
   elif isinstance(model, nnx.Module):
     if not model_inputs and not model_inputs_kwargs:
       raise ValueError("Model inputs must be provided for nnx models.")
     if len(methods) != 1:
       raise ValueError("Only one method is supported for nnx models.")
-    return quantize_nnx_model(  # pyrefly: ignore[bad-return]
+    return quantize_nnx_model(
         model,
         provider,
         *model_inputs,
@@ -76,8 +97,10 @@ def quantize_linen_model(
   """Quantize a linen model."""
 
   def _is_in_nn_module() -> bool:
-    nn_module: nn.Module = nn.module._context.module_stack[-1]  # pylint: disable=protected-access  # pyrefly: ignore[bad-assignment]
-    return nn_module and nn_module.scope is not None  # pyrefly: ignore[bad-return]
+    nn_module = nn.module._context.module_stack[-1]  # pylint: disable=protected-access
+    if nn_module is None:
+      return False
+    return nn_module.scope is not None
 
   # Make a copy of the model to avoid modifying the original model.
   model = model.copy()

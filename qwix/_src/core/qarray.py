@@ -23,7 +23,6 @@ from jax import numpy as jnp
 from qwix._src.core import numerics
 from qwix._src.core import sparsity
 
-
 # ---------------------------------------------
 # QArray definition and common functions.
 # ---------------------------------------------
@@ -98,6 +97,7 @@ class QArray:
 
   def swapaxes(self, axis1: int, axis2: int) -> 'QArray':
     return jax.tree.map(lambda x: x.swapaxes(axis1, axis2), self)
+
 
 # Register as NNX data to allow JAX arrays in Module attributes.
 nnx.register_data_type(QArray)
@@ -654,10 +654,10 @@ def quantize_api(
       tiled_axes=tiled_axes or {},
       calibration_method=calibration_method,
   )
-  array = quantize(array, how)  # pyrefly: ignore[bad-assignment]
+  qarray = quantize(array, how)
   if scale_dtype is not None:
-    array = dataclasses.replace(array, scale=array.scale.astype(scale_dtype))  # pyrefly: ignore[bad-specialization, missing-attribute]
-  return array  # pyrefly: ignore[bad-return]
+    qarray = dataclasses.replace(qarray, scale=qarray.scale.astype(scale_dtype))
+  return qarray
 
 
 def dequantize(array: QArray) -> jax.Array:

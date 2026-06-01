@@ -32,8 +32,8 @@ class DotGeneralQtConfig:
   """Configuration for dot_general_qt."""
 
   # Forward pass.
-  lhs_qtype: jax.typing.DTypeLike | None = None
-  rhs_qtype: jax.typing.DTypeLike | None = None
+  lhs_qtype: jax.typing.DTypeLike
+  rhs_qtype: jax.typing.DTypeLike
   tile_size: int | float | None = None
   lhs_calibration_method: str = 'absmax'
   rhs_calibration_method: str = 'absmax'
@@ -185,20 +185,24 @@ def dot_general_qt_fwd(
   lhs_in, rhs_in = lhs, rhs
   if lhs_calibration is not None:
     scale, zero_point = qarray.compute_scale_zero_point(
-        lhs_calibration, config.lhs_qtype  # pyrefly: ignore[bad-argument-type]
+        lhs_calibration, config.lhs_qtype
     )
-    lhs = qarray.quantize_with_scale_zero_point(  # pyrefly: ignore[bad-assignment]
-        lhs, config.lhs_qtype, scale, zero_point  # pyrefly: ignore[bad-argument-type]
+    qlhs = qarray.quantize_with_scale_zero_point(
+        lhs, config.lhs_qtype, scale, zero_point
     )
+  else:
+    qlhs = lhs
   if rhs_calibration is not None:
     scale, zero_point = qarray.compute_scale_zero_point(
-        rhs_calibration, config.rhs_qtype  # pyrefly: ignore[bad-argument-type]
+        rhs_calibration, config.rhs_qtype
     )
-    rhs = qarray.quantize_with_scale_zero_point(  # pyrefly: ignore[bad-assignment]
-        rhs, config.rhs_qtype, scale, zero_point  # pyrefly: ignore[bad-argument-type]
+    qrhs = qarray.quantize_with_scale_zero_point(
+        rhs, config.rhs_qtype, scale, zero_point
     )
-  residuals = (lhs_in, rhs_in, lhs, rhs, lhs_calibration, rhs_calibration)
-  return dot_general.dot_general(lhs, rhs, dimension_numbers), residuals
+  else:
+    qrhs = rhs
+  residuals = (lhs_in, rhs_in, qlhs, qrhs, lhs_calibration, rhs_calibration)
+  return dot_general.dot_general(qlhs, qrhs, dimension_numbers), residuals
 
 
 def dot_general_qt_bwd(

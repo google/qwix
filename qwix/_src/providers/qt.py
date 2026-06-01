@@ -366,8 +366,8 @@ class QtProvider(qconfig.QuantizationProvider):
 
     qt_config = dot_general_qt.DotGeneralQtConfig(
         # fwd configs.
-        lhs_qtype=lhs_qtype,
-        rhs_qtype=rhs_qtype,
+        lhs_qtype=lhs_qtype,  # pyrefly: ignore[bad-argument-type]
+        rhs_qtype=rhs_qtype,  # pyrefly: ignore[bad-argument-type]
         tile_size=rule.tile_size,
         lhs_calibration_method=lhs_calibration_method,  # pyrefly: ignore[bad-argument-type]
         rhs_calibration_method=rhs_calibration_method,  # pyrefly: ignore[bad-argument-type]
@@ -403,8 +403,8 @@ class QtProvider(qconfig.QuantizationProvider):
     # Assume LHS is an activation and RHS is a weight.
     return ragged_dot_qt.RaggedDotQtConfig(
         # fwd configs.
-        lhs_qtype=rule.act_qtype,
-        rhs_qtype=rule.weight_qtype,
+        lhs_qtype=rule.act_qtype,  # pyrefly: ignore[bad-argument-type]
+        rhs_qtype=rule.weight_qtype,  # pyrefly: ignore[bad-argument-type]
         # bwd configs.
         dlhs_grad_qtype=rule.bwd_qtype,
         drhs_grad_qtype=rule.bwd_qtype,

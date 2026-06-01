@@ -190,12 +190,12 @@ def conv_general_qt_fwd(
         operand, qtype, scale, zero_point
     )
 
-  lhs = _quantize_operand(lhs, for_lhs=True)  # pyrefly: ignore[bad-assignment]
-  rhs = _quantize_operand(rhs, for_lhs=False)  # pyrefly: ignore[bad-assignment]
+  quantized_lhs = _quantize_operand(lhs, for_lhs=True)
+  quantized_rhs = _quantize_operand(rhs, for_lhs=False)
 
   primal_out = conv_general.conv_general_dilated(
-      lhs,
-      rhs,
+      quantized_lhs,
+      quantized_rhs,
       window_strides,
       padding,
       lhs_dilation,
@@ -205,7 +205,7 @@ def conv_general_qt_fwd(
       batch_group_count,
       out_sharding,
   )
-  residuals = (lhs, rhs)
+  residuals = (quantized_lhs, quantized_rhs)
 
   return primal_out, residuals
 

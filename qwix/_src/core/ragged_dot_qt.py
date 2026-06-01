@@ -27,8 +27,8 @@ class RaggedDotQtConfig:
   """Configuration for ragged_dot_qt."""
 
   # Forward pass settings
-  lhs_qtype: jax.typing.DTypeLike | None = None
-  rhs_qtype: jax.typing.DTypeLike | None = None
+  lhs_qtype: jax.typing.DTypeLike
+  rhs_qtype: jax.typing.DTypeLike
 
   # Backward pass settings
   dlhs_grad_qtype: jax.typing.DTypeLike | None = None
@@ -46,16 +46,13 @@ def ragged_dot_qt_fwd(
     group_offset: jax.Array | None = None,
 ):
   """Forward pass for ragged_dot_qt custom VJP."""
-  qlhs = qarray.quantize(
-      # lhs shape [M, K]: contracting axis=1, channelwise axis=0
-      lhs,
-      qarray.HowToQuantize(qtype=config.lhs_qtype, channelwise_axes=[0]),  # pyrefly: ignore[bad-argument-type]
-  )
-  qrhs = qarray.quantize(
-      # rhs shape [G, K, N]: contracting axis=1, channelwise axes=2
-      rhs,
-      qarray.HowToQuantize(qtype=config.rhs_qtype, channelwise_axes=[2]),  # pyrefly: ignore[bad-argument-type]
-  )
+  # lhs shape [M, K]: contracting axis=1, channelwise axis=0
+  lhs_how = qarray.HowToQuantize(qtype=config.lhs_qtype, channelwise_axes=[0])
+  qlhs = qarray.quantize(lhs, lhs_how)
+
+  # rhs shape [G, K, N]: contracting axis=1, channelwise axes=2
+  rhs_how = qarray.HowToQuantize(qtype=config.rhs_qtype, channelwise_axes=[2])
+  qrhs = qarray.quantize(rhs, rhs_how)
   primal_out = ragged_dot.ragged_dot(
       qlhs, qrhs, group_sizes, precision, preferred_element_type, group_offset
   )
@@ -73,7 +70,7 @@ def ragged_dot_qt_bwd(
     g: jax.Array,
 ) -> tuple[jax.Array, jax.Array, None]:
   """Backward pass for ragged_dot_qt custom VJP."""
-  (lhs, rhs, group_sizes) = residuals  # lhs [M, K], rhs [G, K, N], g [M, N]
+  lhs, rhs, group_sizes = residuals  # lhs [M, K], rhs [G, K, N], g [M, N]
 
   # dlhs = ragged_dot(g, rhs.swapaxes(1, 2))
   # [M, K] = [M, N] @ [G, N, K]

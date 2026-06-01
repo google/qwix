@@ -142,8 +142,11 @@ def einsum(
     if len(operand_indices) == 1:
       # Fallback to dequantization for unary ops.
       op0 = operands.pop(operand_indices[0])
-      op0 = qarray.dequantize(op0)  # pyrefly: ignore[bad-argument-type]
-      res = jnp.einsum(einsum_str, op0)
+      if isinstance(op0, qarray.QArray):
+        dequantized_op0 = qarray.dequantize(op0)
+      else:
+        dequantized_op0 = op0
+      res = jnp.einsum(einsum_str, dequantized_op0)
       operands.append(res)
     elif len(operand_indices) == 2:
       idx0, idx1 = operand_indices
