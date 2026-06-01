@@ -186,9 +186,9 @@ def quantize_params(
   quantized_params = {}
   not_quantized_params = {}
   for path, w in flax.traverse_util.flatten_dict(params).items():
-    abs_w = ptq.get_value_from_path(abstract_quantized_params, path)
+    abs_w = flax_util.get_value_from_path(abstract_quantized_params, path)
     sq_stats_path = (*path[:-1], path[-1] + "_sq")
-    sq_stats = ptq.get_value_from_path(sq_quant_stats, sq_stats_path)
+    sq_stats = flax_util.get_value_from_path(sq_quant_stats, sq_stats_path)
 
     if not isinstance(abs_w, ptq.WithAux) or sq_stats is None:
       # Not quantized by SQ.

@@ -30,11 +30,11 @@ from qwix._src.providers.lora import LoraProvider, LoraRule, apply_lora_to_model
 from qwix._src.providers.odml import OdmlConversionProvider, OdmlQatProvider
 from qwix._src.providers.ptq import (
     PtqProvider,
-    process_prequantized_params,
     quantize_params,
 )
 from qwix._src.providers.qt import QtProvider, QtRule
 from qwix._src.qconfig import QuantizationProvider, QuantizationRule
+from qwix._src.utils.checkpoint_util import process_prequantized_params
 
 __version__: str = version.__version__
 del version

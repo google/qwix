@@ -461,3 +461,30 @@ def make_rng(rng_stream: str) -> jax.Array:
     return module.qwix_rngs[rng_stream]()
   else:
     raise ValueError('Current module is not known.')
+
+
+def get_value_from_path(obj: Any, path: tuple[str | int, ...]) -> Any:
+  """Helper that returns the value from the path in the object.
+
+  Args:
+    obj: The object to traverse (e.g., an NNX Module, dict, or list).
+    path: A tuple of keys to traverse. Keys can be strings (for dict keys or
+      object attributes) or integers (for list indices).
+
+  Returns:
+    The value found at the specified path, or None if not found.
+
+  Example:
+    If path is ('layers', 0, 'mlp', 'weight'), this function will return:
+    obj.layers[0].mlp.weight
+  """
+  for key in path:
+    if obj is None:
+      return None
+    if isinstance(obj, dict):
+      obj = obj.get(key)
+    elif isinstance(obj, (list, nnx.List)) and isinstance(key, int):
+      obj = obj[key] if 0 <= key < len(obj) else None
+    else:
+      obj = getattr(obj, key, None)  # pyrefly: ignore[no-matching-overload]
+  return obj

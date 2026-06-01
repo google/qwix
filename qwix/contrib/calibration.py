@@ -334,9 +334,9 @@ def quantize_params_with_calibration(
   quantized_params = {}
   not_quantized_params = {}
   for path, w in flax.traverse_util.flatten_dict(params).items():
-    abs_w = ptq.get_value_from_path(abstract_quantized_params, path)
+    abs_w = flax_util.get_value_from_path(abstract_quantized_params, path)
     stats_path = (*path[:-1], path[-1] + stats_suffix)
-    stats = ptq.get_value_from_path(quant_stats, stats_path)
+    stats = flax_util.get_value_from_path(quant_stats, stats_path)
 
     if not isinstance(abs_w, ptq.WithAux) or stats is None:
       not_quantized_params[path] = w

@@ -1,4 +1,4 @@
-# Copyright 2024 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import numpy as np
 from qwix._src import model as qwix_model
 from qwix._src import qconfig
 from qwix._src.providers import ptq
+from qwix._src.utils import checkpoint_util
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 
@@ -90,7 +91,7 @@ class PrequantizedPtqTest(parameterized.TestCase):
     )
 
     orbax_payload = _to_orbax_payload(reference_params)
-    processed_params = ptq.process_prequantized_params(
+    processed_params = checkpoint_util.process_prequantized_params(
         orbax_payload, abs_ptq_linear
     )
 
@@ -117,7 +118,9 @@ class PrequantizedPtqTest(parameterized.TestCase):
     with self.assertRaisesRegex(
         ValueError, "Unhandled or invalid parameter combination"
     ):
-      ptq.process_prequantized_params(full_precision_payload, abs_ptq_linear)
+      checkpoint_util.process_prequantized_params(
+          full_precision_payload, abs_ptq_linear
+      )
 
   def test_process_prequantized_params_nnx_einsum_sharding(self):
     mesh = jax.make_mesh(
@@ -162,7 +165,7 @@ class PrequantizedPtqTest(parameterized.TestCase):
     orbax_payload = _to_orbax_payload(reference_params)
 
     with jax.set_mesh(mesh):
-      processed_params = ptq.process_prequantized_params(
+      processed_params = checkpoint_util.process_prequantized_params(
           orbax_payload, abs_ptq_einsum
       )
     _assert_trees_allclose(self, processed_params, reference_params)
@@ -195,7 +198,7 @@ class PrequantizedPtqTest(parameterized.TestCase):
 
     self.assertIn("zero_point", reference_params["kernel"]["array"])
     orbax_payload = _to_orbax_payload(reference_params)
-    processed_params = ptq.process_prequantized_params(
+    processed_params = checkpoint_util.process_prequantized_params(
         orbax_payload, abs_ptq_linear
     )
 
@@ -237,7 +240,7 @@ class PrequantizedPtqTest(parameterized.TestCase):
     modify_payload_fn(orbax_payload)
 
     with self.assertRaisesRegex(ValueError, expected_regex):
-      ptq.process_prequantized_params(orbax_payload, abs_ptq_linear)
+      checkpoint_util.process_prequantized_params(orbax_payload, abs_ptq_linear)
 
   def test_process_prequantized_params_allow_extra_params(self):
     q_rules = [qconfig.QuantizationRule(weight_qtype=jnp.int8)]
@@ -249,13 +252,13 @@ class PrequantizedPtqTest(parameterized.TestCase):
     orbax_payload["extra"] = np.ones((1,), dtype=np.float32)
 
     with self.assertRaisesRegex(ValueError, "extra"):
-      ptq.process_prequantized_params(
+      checkpoint_util.process_prequantized_params(
           orbax_payload,
           abs_ptq_linear,
           allow_extra_params=False,
       )
 
-    processed_params = ptq.process_prequantized_params(
+    processed_params = checkpoint_util.process_prequantized_params(
         orbax_payload,
         abs_ptq_linear,
         allow_extra_params=True,
@@ -267,7 +270,9 @@ class PrequantizedPtqTest(parameterized.TestCase):
     model_input = jnp.ones((10, 12))
     abs_ptq_linear, _, _ = _build_linear_reference(q_rules, model_input)
 
-    processed_params = ptq.process_prequantized_params({}, abs_ptq_linear)
+    processed_params = checkpoint_util.process_prequantized_params(
+        {}, abs_ptq_linear
+    )
     self.assertEqual(processed_params, {})
 
   def test_process_prequantized_params_nested_modules(self):
@@ -297,7 +302,7 @@ class PrequantizedPtqTest(parameterized.TestCase):
     reference_params = ptq.quantize_params(orig_params, abs_ptq_mlp)
     orbax_payload = _to_orbax_payload(reference_params)
 
-    processed_params = ptq.process_prequantized_params(
+    processed_params = checkpoint_util.process_prequantized_params(
         orbax_payload, abs_ptq_mlp
     )
 
@@ -314,7 +319,7 @@ class PrequantizedPtqTest(parameterized.TestCase):
     self.assertIn("bias", orbax_payload)
     del orbax_payload["bias"]
 
-    processed_params = ptq.process_prequantized_params(
+    processed_params = checkpoint_util.process_prequantized_params(
         orbax_payload, abs_ptq_linear
     )
 
@@ -330,7 +335,7 @@ class PrequantizedPtqTest(parameterized.TestCase):
     )["params"]
 
     with self.assertRaisesRegex(TypeError, "NNX PTQ models"):
-      ptq.process_prequantized_params({}, abs_ptq_params)
+      checkpoint_util.process_prequantized_params({}, abs_ptq_params)
 
   def test_process_prequantized_params_with_lists(self):
     class ListModel(nnx.Module):
@@ -363,7 +368,7 @@ class PrequantizedPtqTest(parameterized.TestCase):
     reference_params = ptq.quantize_params(orig_params, abs_ptq_model)
     orbax_payload = _to_orbax_payload(reference_params)
 
-    processed_params = ptq.process_prequantized_params(
+    processed_params = checkpoint_util.process_prequantized_params(
         orbax_payload, abs_ptq_model
     )
 
@@ -391,7 +396,7 @@ class PrequantizedPtqTest(parameterized.TestCase):
     }
     orbax_payload = _to_orbax_payload(reference_params)
 
-    processed_params = ptq.process_prequantized_params(
+    processed_params = checkpoint_util.process_prequantized_params(
         orbax_payload, template_model
     )
 

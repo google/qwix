@@ -14,9 +14,8 @@
 """Post-training quantization (PTQ)."""
 
 import functools
-from typing import Any, Callable, Generic, Mapping, Sequence, TypeVar
+from typing import Any, Callable, Generic, Sequence, TypeVar
 
-from absl import logging
 from flax import linen as nn
 from flax import nnx
 import flax.linen.dtypes
@@ -30,7 +29,6 @@ from qwix._src.core import dot
 from qwix._src.core import dot_general
 from qwix._src.core import einsum
 from qwix._src.core import qarray
-
 
 ArrayTypeVar = TypeVar('ArrayTypeVar', jax.Array, qarray.QArray)
 
@@ -80,9 +78,6 @@ class WithAux(Generic[ArrayTypeVar]):
 
 # Register as NNX data to allow JAX arrays in Module attributes.
 nnx.register_data_type(WithAux)
-
-
-_PREQUANTIZED_ARRAY_LEAF_NAMES = frozenset(('qvalue', 'scale', 'zero_point'))
 
 
 class PtqProvider(qconfig.QuantizationProvider):
@@ -555,7 +550,7 @@ def quantize_params(
   for path, param in flax.traverse_util.flatten_dict(params).items():
     if not isinstance(param, jax.Array):
       raise TypeError(f'params is not a pure dict of jax.Array: {type(param)}')
-    abs_param = get_value_from_path(abstract_quantized_params, path)
+    abs_param = flax_util.get_value_from_path(abstract_quantized_params, path)
     if abs_param is None:
       if allow_extra_params:
         continue
@@ -574,13 +569,15 @@ def quantize_params(
       path[:-1] for path in flax.traverse_util.flatten_dict(quant_stats)
   }
   for path in all_quant_stats_paths:
-    quant_stat = get_value_from_path(quant_stats, path)
+    quant_stat = flax_util.get_value_from_path(quant_stats, path)
     if quant_stat['count'] == 0:
       raise ValueError(f'quant_stats is not initialized for {path}.')
 
     # Get the act_qtype from the scale, which is a WithAux[jax.Array].
     scale_path = (*path[:-1], path[-1] + '_scale')
-    abs_scale = get_value_from_path(abstract_quantized_params, scale_path)
+    abs_scale = flax_util.get_value_from_path(
+        abstract_quantized_params, scale_path
+    )
     assert isinstance(abs_scale, WithAux)
     act_qtype = abs_scale.how.qtype
 
@@ -597,346 +594,3 @@ def quantize_params(
     quantized_params = nnx.to_pure_dict(nnx.state(quantized_params))
 
   return flax.traverse_util.unflatten_dict(quantized_params)
-
-
-def _get_template_field(obj: Any, field_name: str) -> Any:
-  """Gets a field from the template parameter."""
-  if isinstance(obj, dict):
-    return obj.get(field_name)
-  return getattr(obj, field_name, None)
-
-
-def process_prequantized_params(
-    checkpoint_params: Any,
-    template_params: Any,
-    *,
-    allow_extra_params: bool = False,
-    use_checkpoint_sharding: bool = False,
-) -> Any:
-  """Converts external pre-quantized params into an `nnx.update`-friendly pure dict.
-
-  Args:
-    checkpoint_params: A nested dict matching NNX state paths (without `.value`
-      suffixes). Leaves must be either a `jax.Array` or a dict containing
-      `'qvalue'`, `'scale'`, and optional `'zero_point'`.
-    template_params: An NNX PTQ model, possibly abstract (e.g., from
-      `nnx.eval_shape`).
-    allow_extra_params: If True, ignore payload entries not present in
-      `template_params`.
-    use_checkpoint_sharding: If True, use sharding from checkpoint_params
-      instead of template_params.
-
-  Returns:
-    A nested pure dict consumable by `nnx.update`. The nested key paths will
-    include `'value'` at the end, pointing to either a dict or a JAX array.
-  """
-  if not isinstance(template_params, nnx.Module):
-    raise TypeError(
-        'process_prequantized_params only supports NNX PTQ models. Got'
-        f' {type(template_params)}.'
-    )
-
-  def _is_leaf(path, x):
-    """Checks if x is a pre-quantized leaf.
-
-    Stop at dicts that contain the 'qvalue' key. This identifies them
-    as pre-quantized weight payloads.
-
-    Args:
-      path: The parameter path. Unused.
-      x: The value to check.
-
-    Returns:
-      True if x is a pre-quantized leaf, False otherwise.
-    """
-    del path
-    return isinstance(x, dict) and 'qvalue' in x
-
-  # Value: QArray(Case 1) or a JAX array(Case 2).
-  flat_processed = {}
-  # Value: dict containing 'qvalue'(quantized) or a JAX array(fp).
-  flat_checkpoint = flax.traverse_util.flatten_dict(
-      checkpoint_params, is_leaf=_is_leaf
-  )
-  # tuple path example: ('layers', 0, 'mlp', 'experts_gate_up_proj_weight').
-  for path, checkpoint_param in flat_checkpoint.items():
-    # Value: WithAux(quantized) or jax.ShapeDtypeStruct / jax.Array (fp)
-    template_param = get_value_from_path(template_params, path)
-    if template_param is None:
-      if not allow_extra_params:
-        raise ValueError(
-            'Found extra parameters in prequantized_params not present in'
-            f' template: {path}'
-        )
-      logging.info('Skipping parameter not in template: %s', path)
-      continue
-
-    # Gets the template array, which may be a dict or a QArray.
-    # Qwix wraps intercepted operations in WithAux.QArray. For non-intercepted
-    # operations, users will need to modify the abstract model state to match
-    # their expectations. For example, Qwen 3.5 MoE overrides the original fp
-    # template to be a dict like {'array': {'qvalue': ..., 'scale': ...}}.
-    # Note: The consumer (e.g., Pallas kernel) must be implemented to handle
-    # receiving a QArray/dict instead of a standard JAX array.
-    template_array = _get_template_field(template_param, 'array')
-    if template_array is not None:
-      template_param = template_array
-
-    # Case 1: checkpoint_param is prequantized (dict), template_param is
-    # prequantized (dict or QArray).
-    if isinstance(checkpoint_param, dict) and isinstance(
-        template_param, (dict, qarray.QArray)
-    ):
-      processed = _process_quantized_param(
-          checkpoint_param,
-          template_param,
-          path,
-          use_checkpoint_sharding=use_checkpoint_sharding,
-      )
-
-    # Case 2: checkpoint_param is fp, template_param is fp.
-    elif not isinstance(checkpoint_param, dict) and not isinstance(
-        template_param, (dict, qarray.QArray)
-    ):
-      processed = _apply_sharding_and_dtype(
-          checkpoint_param,
-          template_param,
-          path,
-          use_checkpoint_sharding=use_checkpoint_sharding,
-      )
-
-    # Handle invalid combinations (e.g., checkpoint is full precision, but
-    # template expects quantized).
-    else:
-      raise ValueError(
-          f'Unhandled or invalid parameter combination for {path}. '
-          f'checkpoint_param is {type(checkpoint_param)}, '
-          f'template_param is {type(template_param)}.'
-      )
-
-    flat_processed[path] = processed
-
-  # Key: nested key path.
-  # Value: QArray(Case 1) or a JAX array(Case 2).
-  nested_processed = flax.traverse_util.unflatten_dict(flat_processed)
-  # Key: nested key path and ['value'].
-  # Value: Dict(Case 1) or a JAX array(Case 2).
-  #   - Case 1: dict {"qvalue": ..., "scale": ...}
-  #   - Case 2: <jax.Array>
-  return nnx.to_pure_dict(nnx.state(nested_processed))
-
-
-def _validate_prequantized_dict(
-    checkpoint_param: Any,
-    path: tuple[str, ...],
-) -> None:
-  """Validates the flat quantized parameter dictionary format.
-
-  Checks that all the keys in the input dictionary are in
-  _PREQUANTIZED_ARRAY_LEAF_NAMES.
-
-  Args:
-    checkpoint_param: A dict containing quantized leaves (`qvalue`, `scale`, and
-      optional `zero_point`).
-    path: The parameter path for error messages.
-  """
-  if not isinstance(checkpoint_param, dict):
-    raise ValueError(
-        f'{path} is quantized in the template_params. Expected a'
-        ' dict containing qvalue/scale leaves.'
-    )
-
-  unsupported_keys = set(checkpoint_param) - _PREQUANTIZED_ARRAY_LEAF_NAMES
-  if unsupported_keys:
-    raise ValueError(
-        f'{path} has unsupported quantized leaves'
-        f' {sorted(unsupported_keys)}. Expected only'
-        f' {sorted(_PREQUANTIZED_ARRAY_LEAF_NAMES)}.'
-    )
-
-  if 'qvalue' not in checkpoint_param or 'scale' not in checkpoint_param:
-    param_summary = {
-        k: (type(v), getattr(v, 'shape', None))
-        for k, v in checkpoint_param.items()
-    }
-    raise ValueError(
-        f'{path} is missing required "qvalue" or "scale" in pre-quantized'
-        f' dictionary. Found keys: {list(checkpoint_param.keys())}, summary:'
-        f' {param_summary}'
-    )
-
-
-def _apply_sharding_and_dtype(
-    checkpoint_value: Any,
-    template_value: Any,
-    path: tuple[str, ...],
-    allow_broadcast: bool = False,
-    use_checkpoint_sharding: bool = False,
-) -> jax.Array:
-  """Converts a host/device array-like value into the template's array shape."""
-  template_value = flax_util.unbox(template_value)
-  if not isinstance(template_value, (jax.Array, jax.ShapeDtypeStruct)):
-    raise TypeError(
-        f'{path} does not resolve to a JAX array or ShapeDtypeStruct in the'
-        ' template_params.'
-    )
-
-  target_dtype = template_value.dtype
-  template_shape = template_value.shape
-  if use_checkpoint_sharding:
-    sharding = _get_sharding(getattr(checkpoint_value, 'sharding', None), path)
-  else:
-    sharding = _get_sharding(getattr(template_value, 'sharding', None), path)
-
-  # Handle sharding.
-  if sharding is not None:
-    checkpoint_value = jax.device_put(checkpoint_value, sharding)
-  else:
-    checkpoint_value = jnp.asarray(checkpoint_value)
-
-  # Handle dtype promotion to match template dtype.
-  if checkpoint_value.dtype != target_dtype:
-    checkpoint_value = checkpoint_value.astype(target_dtype)
-
-  # Handle shape promotion.
-  if checkpoint_value.shape != template_shape:
-    # For scales and zero_point(allow_broadcast), broadcast 2d blocksize
-    # scales/zero_points into 1d.
-    if allow_broadcast:
-      try:
-        checkpoint_value = qarray.broadcast_to(checkpoint_value, template_shape)
-      except Exception as e:
-        raise ValueError(
-            f'{path} has shape {checkpoint_value.shape}, expected'
-            f' {template_shape}.'
-        ) from e
-    # For qvalue (not allow_broadcast), it should match the template shape.
-    else:
-      raise ValueError(
-          f'{path} has shape {checkpoint_value.shape}, expected'
-          f' {template_shape}.'
-      )
-
-  return checkpoint_value
-
-
-def _get_sharding(
-    sharding: Any,
-    path: tuple[str, ...],
-) -> jax.sharding.Sharding | None:
-  """Resolves abstract mesh shardings into concrete device shardings.
-
-  Args:
-    sharding: The abstract or concrete sharding definition. If it is a
-      NamedSharding with an AbstractMesh, it will be resolved to use the active
-      mesh.
-    path: The parameter path for error messages.
-
-  Returns:
-    A concrete `jax.sharding.Sharding` object, or None if the input was None.
-  """
-  if sharding is None:
-    return None
-  if isinstance(sharding, jax.sharding.NamedSharding) and isinstance(
-      sharding.mesh, jax.sharding.AbstractMesh
-  ):
-    concrete_mesh = jax.sharding.get_mesh()
-    if concrete_mesh.empty:
-      raise ValueError(
-          f'{path} requires an active mesh to place pre-quantized'
-          ' arrays. Run process_prequantized_params inside the same'
-          ' jax.set_mesh(...) context used for the sharded PTQ model.'
-      )
-    return jax.sharding.NamedSharding(concrete_mesh, sharding.spec)
-  return sharding
-
-
-def _process_quantized_param(
-    checkpoint_param: Mapping[str, Any],
-    template_param: Any,
-    path: tuple[str, ...],
-    *,
-    use_checkpoint_sharding: bool,
-) -> qarray.QArray:
-  """Builds a QArray leaf from a quantized parameter dictionary and a quantized template.
-
-  Args:
-    checkpoint_param: A dictionary containing quantized leaves (`qvalue`,
-      `scale`, and optional `zero_point`).
-    template_param: An abstract template parameter containing the target shapes
-      and types for coercion.
-    path: The parameter path for error messages.
-    use_checkpoint_sharding: Whether to use sharding from the checkpoint.
-
-  Returns:
-    A new `QArray` leaf whose contents have been coerced to the correct
-    device placement, shape, and dtype.
-  """
-  _validate_prequantized_dict(checkpoint_param, path)
-
-  qvalue = _apply_sharding_and_dtype(
-      checkpoint_param['qvalue'],
-      _get_template_field(template_param, 'qvalue'),
-      path,
-      use_checkpoint_sharding=use_checkpoint_sharding,
-  )
-  scale = _apply_sharding_and_dtype(
-      checkpoint_param['scale'],
-      _get_template_field(template_param, 'scale'),
-      path,
-      allow_broadcast=True,
-      use_checkpoint_sharding=use_checkpoint_sharding,
-  )
-
-  template_zero_point = _get_template_field(template_param, 'zero_point')
-  zero_point = checkpoint_param.get('zero_point')
-  if template_zero_point is None and zero_point is not None:
-    raise ValueError(
-        f'{path} provided an unexpected "zero_point" for a symmetric'
-        ' quantized param.'
-    )
-  if template_zero_point is not None and zero_point is None:
-    raise ValueError(f'{path} is missing required quantized leaf "zero_point".')
-  if template_zero_point is not None:
-    zero_point = _apply_sharding_and_dtype(
-        zero_point,
-        template_zero_point,
-        path,
-        allow_broadcast=True,
-        use_checkpoint_sharding=use_checkpoint_sharding,
-    )
-
-  qarray_leaf = qarray.QArray(
-      qvalue=qvalue,
-      scale=scale,
-      zero_point=zero_point,
-  )
-  qarray.validate_qarray(qarray_leaf)
-  return qarray_leaf
-
-
-def get_value_from_path(obj: Any, path: tuple[str | int, ...]) -> Any:
-  """Helper that returns the value from the path in the object.
-
-  Args:
-    obj: The object to traverse (e.g., an NNX Module, dict, or list).
-    path: A tuple of keys to traverse. Keys can be strings (for dict keys or
-      object attributes) or integers (for list indices).
-
-  Returns:
-    The value found at the specified path, or None if not found.
-
-  Example:
-    If path is ('layers', 0, 'mlp', 'weight'), this function will return:
-    obj.layers[0].mlp.weight
-  """
-  for key in path:
-    if obj is None:
-      return None
-    if isinstance(obj, dict):
-      obj = obj.get(key)
-    elif isinstance(obj, (list, nnx.List)) and isinstance(key, int):
-      obj = obj[key] if 0 <= key < len(obj) else None
-    else:
-      obj = getattr(obj, key, None)  # pyrefly: ignore[no-matching-overload]
-  return obj
