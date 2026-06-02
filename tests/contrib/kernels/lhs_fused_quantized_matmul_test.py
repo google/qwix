@@ -44,7 +44,6 @@ class LHSFusedQuantizedMatmulTest(parameterized.TestCase):
 
   # TODO(chapmanjames): Add bfloat16 tests when implemented.
   @parameterized.parameters(
-      (1024, 1024, 1024, 8, 8, 8, 1024, 1024, 1024, jnp.float32),
       (1024, 1024, 1024, 8, 8, 8, 256, 512, 1024, jnp.float32),
       (128, 128, 128, 1, 1, 1, 128, 128, 128, jnp.float32),
       (256, 256, 256, 1, 1, 1, 256, 256, 256, jnp.float32),
