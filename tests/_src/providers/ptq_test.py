@@ -22,11 +22,11 @@ import jax
 from jax import export
 from jax import numpy as jnp
 from jax.experimental import pallas as pl
-from qwix._src import flax_util
 from qwix._src import model as qwix_model
 from qwix._src import qconfig
 from qwix._src.providers import ptq
 from qwix._src.providers import qt
+from qwix._src.utils import flax_util
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 

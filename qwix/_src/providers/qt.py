@@ -20,12 +20,12 @@ from typing import Any, Callable, Mapping, Sequence
 import jax
 from jax import numpy as jnp
 from qwix._src import averaging
-from qwix._src import flax_util
 from qwix._src import qconfig
 from qwix._src.core import conv_general_qt
 from qwix._src.core import dot_general_qt
 from qwix._src.core import ragged_dot_qt
 from qwix._src.core import stochastic_rounding
+from qwix._src.utils import flax_util
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

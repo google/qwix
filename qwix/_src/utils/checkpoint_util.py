@@ -20,8 +20,8 @@ import flax
 from flax import nnx
 import jax
 from jax import numpy as jnp
-from qwix._src import flax_util
 from qwix._src.core import qarray
+from qwix._src.utils import flax_util
 
 _PREQUANTIZED_ARRAY_LEAF_NAMES = frozenset(('qvalue', 'scale', 'zero_point'))
 

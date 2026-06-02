@@ -28,11 +28,11 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 from qwix._src import averaging
-from qwix._src import flax_util
 from qwix._src import qconfig
 from qwix._src.core import dot_general
 from qwix._src.core import qarray
 from qwix._src.providers import ptq
+from qwix._src.utils import flax_util
 from qwix.contrib import calibration
 
 

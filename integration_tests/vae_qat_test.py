@@ -22,11 +22,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-from qwix._src import flax_util
 from qwix._src import model as qwix_model
 from qwix._src import qconfig
 from qwix._src.providers import ptq
 from qwix._src.providers import qt
+from qwix._src.utils import flax_util
 import tensorflow_datasets as tfds
 
 

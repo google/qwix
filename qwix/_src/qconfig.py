@@ -24,8 +24,8 @@ from flax import nnx
 import jax
 from jax.experimental import pallas as pl
 from qwix._src import aux_data
-from qwix._src import flax_util
 from qwix._src import interception
+from qwix._src.utils import flax_util
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

@@ -25,11 +25,11 @@ from jax import numpy as jnp
 import numpy as np
 from qwix._src import aux_data
 from qwix._src import averaging
-from qwix._src import flax_util
 from qwix._src import interception
 from qwix._src import qconfig
 from qwix._src.core import qarray
 from qwix._src.providers import odml_ops
+from qwix._src.utils import flax_util
 
 
 class OdmlQatProvider(qconfig.QuantizationProvider):

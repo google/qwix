@@ -22,13 +22,13 @@ import flax.linen.dtypes
 import jax
 from jax import numpy as jnp
 from qwix._src import averaging
-from qwix._src import flax_util
 from qwix._src import qconfig
 from qwix._src.core import conv_general
 from qwix._src.core import dot
 from qwix._src.core import dot_general
 from qwix._src.core import einsum
 from qwix._src.core import qarray
+from qwix._src.utils import flax_util
 
 ArrayTypeVar = TypeVar('ArrayTypeVar', jax.Array, qarray.QArray)
 

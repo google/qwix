@@ -24,7 +24,6 @@ from qwix._src.core.dot_general import dot_general
 from qwix._src.core.einsum import einsum
 from qwix._src.core.qarray import QArray, dequantize, quantize_api as quantize
 from qwix._src.core.ragged_dot import ragged_dot, ragged_dot_general
-from qwix._src.flax_util import QuantStat
 from qwix._src.model import quantize_model
 from qwix._src.providers.lora import LoraProvider, LoraRule, apply_lora_to_model
 from qwix._src.providers.odml import OdmlConversionProvider, OdmlQatProvider
@@ -35,6 +34,7 @@ from qwix._src.providers.ptq import (
 from qwix._src.providers.qt import QtProvider, QtRule
 from qwix._src.qconfig import QuantizationProvider, QuantizationRule
 from qwix._src.utils.checkpoint_util import process_prequantized_params
+from qwix._src.utils.flax_util import QuantStat
 
 __version__: str = version.__version__
 del version

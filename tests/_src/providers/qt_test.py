@@ -17,11 +17,11 @@ from flax import linen as nn
 from flax import nnx
 import jax
 from jax import numpy as jnp
-from qwix._src import flax_util
 from qwix._src import model as qwix_model
 from qwix._src import qconfig
 from qwix._src.core import sparsity
 from qwix._src.providers import qt
+from qwix._src.utils import flax_util
 
 
 class QtTest(absltest.TestCase):

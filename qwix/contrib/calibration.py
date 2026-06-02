@@ -22,9 +22,9 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 from qwix._src import averaging
-from qwix._src import flax_util
 from qwix._src import qconfig
 from qwix._src.providers import ptq
+from qwix._src.utils import flax_util
 
 
 class CalibrationProvider(qconfig.QuantizationProvider, metaclass=abc.ABCMeta):
