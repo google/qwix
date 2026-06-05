@@ -222,6 +222,113 @@ def _process_quantized_param(
   return qarray_leaf
 
 
+def _dequantize_quantized_param(
+    checkpoint_param: Mapping[str, Any],
+    template_param: Any,
+    path: tuple[str, ...],
+    *,
+    use_checkpoint_sharding: bool,
+) -> jax.Array:
+  """Dequantizes a prequantized parameter dictionary to a JAX array.
+
+  Args:
+    checkpoint_param: A dictionary containing quantized leaves (`qvalue`,
+      `scale`, and optional `zero_point`).
+    template_param: An abstract template parameter containing the target shapes
+      and types for coercion.
+    path: The parameter path for error messages.
+    use_checkpoint_sharding: Whether to use sharding from the checkpoint.
+
+  Returns:
+    A JAX array whose contents have been dequantized and coerced to the
+    correct device placement, shape, and dtype.
+  """
+  _validate_prequantized_dict(checkpoint_param, path)
+  ckpt_qvalue = checkpoint_param['qvalue']
+  ckpt_scale = checkpoint_param['scale']
+  ckpt_zero_point = checkpoint_param.get('zero_point')
+
+  if use_checkpoint_sharding:
+    sharding = _get_sharding(getattr(ckpt_qvalue, 'sharding', None), path)
+  else:
+    sharding = _get_sharding(getattr(template_param, 'sharding', None), path)
+  if isinstance(sharding, jax.sharding.NamedSharding):
+    # Handle multi-device sharding.
+    qvalue = jax.device_put(ckpt_qvalue, sharding)
+    scale_ndim = jnp.ndim(ckpt_scale)
+    scale_sharding = jax.sharding.NamedSharding(
+        sharding.mesh, jax.sharding.PartitionSpec(*[None] * scale_ndim)
+    )
+    scale = jax.device_put(ckpt_scale, scale_sharding)
+    if ckpt_zero_point is not None:
+      zp_ndim = jnp.ndim(ckpt_zero_point)
+      zp_sharding = jax.sharding.NamedSharding(
+          sharding.mesh, jax.sharding.PartitionSpec(*[None] * zp_ndim)
+      )
+      zero_point = jax.device_put(ckpt_zero_point, zp_sharding)
+    else:
+      zero_point = None
+  elif sharding is not None and hasattr(sharding, 'device'):
+    # Handle single-device sharding.
+    qvalue = jax.device_put(ckpt_qvalue, sharding)
+    scale = jax.device_put(ckpt_scale, sharding.device)
+    if ckpt_zero_point is not None:
+      zero_point = jax.device_put(ckpt_zero_point, sharding.device)
+    else:
+      zero_point = None
+  else:
+    qvalue = jnp.asarray(ckpt_qvalue)
+    scale = jnp.asarray(ckpt_scale)
+    if ckpt_zero_point is not None:
+      zero_point = jnp.asarray(ckpt_zero_point)
+    else:
+      zero_point = None
+
+  qarray_leaf = qarray.QArray(
+      qvalue=qvalue,
+      scale=scale,
+      zero_point=zero_point,
+  )
+  dequantized = qarray.dequantize(qarray_leaf)
+  return _apply_sharding_and_dtype(
+      dequantized,
+      template_param,
+      path,
+      use_checkpoint_sharding=use_checkpoint_sharding,
+  )
+
+
+def _resolve_template_param(
+    path: tuple[str, ...],
+    template_params: Any,
+) -> tuple[tuple[str, ...], Any]:
+  """Resolves the template parameter and its path.
+
+  For QT models, Qwix doesn't convert JAX arrays to WithAux so the template
+  parameters don't have the 'array' suffix in their paths.
+
+  Args:
+    path: The path from the checkpoint.
+    template_params: The template parameters of the NNX PTQ/QT model.
+
+  Returns:
+    A tuple of (resolved_path, template_param).
+  """
+  template_param = flax_util.get_value_from_path(template_params, path)
+  if template_param is not None or not path:
+    return path, template_param
+
+  *_, last_key = path
+  if last_key == 'array':
+    parent_path = path[:-1]
+    parent_param = flax_util.get_value_from_path(template_params, parent_path)
+    unboxed_parent = flax_util.unbox(parent_param)
+    if isinstance(unboxed_parent, (jax.Array, jax.ShapeDtypeStruct)):
+      return parent_path, parent_param
+
+  return path, template_param
+
+
 def process_prequantized_params(
     checkpoint_params: Any,
     template_params: Any,
@@ -235,7 +342,7 @@ def process_prequantized_params(
     checkpoint_params: A nested dict matching NNX state paths (without `.value`
       suffixes). Leaves must be either a `jax.Array` or a dict containing
       `'qvalue'`, `'scale'`, and optional `'zero_point'`.
-    template_params: An NNX PTQ model, possibly abstract (e.g., from
+    template_params: An NNX PTQ/QT model, possibly abstract (e.g., from
       `nnx.eval_shape`).
     allow_extra_params: If True, ignore payload entries not present in
       `template_params`.
@@ -248,7 +355,7 @@ def process_prequantized_params(
   """
   if not isinstance(template_params, nnx.Module):
     raise TypeError(
-        'process_prequantized_params only supports NNX PTQ models. Got'
+        'process_prequantized_params only supports NNX PTQ/QT models. Got'
         f' {type(template_params)}.'
     )
 
@@ -268,7 +375,7 @@ def process_prequantized_params(
     del path
     return isinstance(x, dict) and 'qvalue' in x
 
-  # Value: QArray(Case 1) or a JAX array(Case 2).
+  # Value: QArray(Case 1) or a JAX array(Case 2 and 3).
   flat_processed = {}
   # Value: dict containing 'qvalue'(quantized) or a JAX array(fp).
   flat_checkpoint = flax.traverse_util.flatten_dict(
@@ -277,14 +384,16 @@ def process_prequantized_params(
   # tuple path example: ('layers', 0, 'mlp', 'experts_gate_up_proj_weight').
   for path, checkpoint_param in flat_checkpoint.items():
     # Value: WithAux(quantized) or jax.ShapeDtypeStruct / jax.Array (fp)
-    template_param = flax_util.get_value_from_path(template_params, path)
+    resolved_path, template_param = _resolve_template_param(
+        path, template_params
+    )
     if template_param is None:
       if not allow_extra_params:
         raise ValueError(
             'Found extra parameters in prequantized_params not present in'
-            f' template: {path}'
+            f' template: {resolved_path}'
         )
-      logging.info('Skipping parameter not in template: %s', path)
+      logging.info('Skipping parameter not in template: %s', resolved_path)
       continue
 
     # Gets the template array, which may be a dict or a QArray.
@@ -306,18 +415,29 @@ def process_prequantized_params(
       processed = _process_quantized_param(
           checkpoint_param,
           template_param,
-          path,
+          resolved_path,
           use_checkpoint_sharding=use_checkpoint_sharding,
       )
 
-    # Case 2: checkpoint_param is fp, template_param is fp.
+    # Case 2: checkpoint_param is prequantized (dict), template_param is fp.
+    elif isinstance(checkpoint_param, dict) and not isinstance(
+        template_param, (dict, qarray.QArray)
+    ):
+      processed = _dequantize_quantized_param(
+          checkpoint_param,
+          template_param,
+          resolved_path,
+          use_checkpoint_sharding=use_checkpoint_sharding,
+      )
+
+    # Case 3: checkpoint_param is fp, template_param is fp.
     elif not isinstance(checkpoint_param, dict) and not isinstance(
         template_param, (dict, qarray.QArray)
     ):
       processed = _apply_sharding_and_dtype(
           checkpoint_param,
           template_param,
-          path,
+          resolved_path,
           use_checkpoint_sharding=use_checkpoint_sharding,
       )
 
@@ -325,18 +445,19 @@ def process_prequantized_params(
     # template expects quantized).
     else:
       raise ValueError(
-          f'Unhandled or invalid parameter combination for {path}. '
+          f'Unhandled or invalid parameter combination for {resolved_path}. '
           f'checkpoint_param is {type(checkpoint_param)}, '
           f'template_param is {type(template_param)}.'
       )
 
-    flat_processed[path] = processed
+    flat_processed[resolved_path] = processed
 
   # Key: nested key path.
-  # Value: QArray(Case 1) or a JAX array(Case 2).
+  # Value: QArray(Case 1) or a JAX array(Case 2 and 3).
   nested_processed = flax.traverse_util.unflatten_dict(flat_processed)
   # Key: nested key path and ['value'].
-  # Value: Dict(Case 1) or a JAX array(Case 2).
+  # Value: Dict(Case 1) or a JAX array(Case 2 and 3).
   #   - Case 1: dict {"qvalue": ..., "scale": ...}
   #   - Case 2: <jax.Array>
+  #   - Case 3: <jax.Array>
   return nnx.to_pure_dict(nnx.state(nested_processed))
