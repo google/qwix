@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Quantized jax.lax.dot_general with subchannel support."""
+
 # pylint: disable=line-too-long
 
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 import itertools
 from typing import Any
 import jax
@@ -28,19 +29,21 @@ def get_how_to_quantize(
     dimension_numbers: jax.lax.DotDimensionNumbers,
     ndims: tuple[int, int],
     for_lhs: bool,
-    tile_size: int | float | None,
+    tile_size: Mapping[int, int | float] | int | float | None,
     **kwargs: Any,
 ) -> qarray.HowToQuantize:
   """Get how to quantize from dimension_numbers and remaining_dims.
 
   By default, use channelwise for all non-contraction axes, and subchannel
-  for contraction axes if a tile_size is given.
+  for the first contraction axes if a tile_size is given.
 
   Args:
     dimension_numbers: The dimension numbers passed to dot_general.
     ndims: The number of dimensions for lhs and rhs.
     for_lhs: Whether to quantize lhs or rhs.
-    tile_size: The tile size for subchannel quantization.
+    tile_size: The tile size for subchannel quantization. If the tile_size is a
+      Mapping, then this uses the tiling specified by tile_size. Otherwise this
+      is interpreted as the tile size for the first axis in contracting_axes.
     **kwargs: Additional keyword arguments to HowToQuantize.
 
   Returns:
@@ -53,10 +56,16 @@ def get_how_to_quantize(
     ndim = ndims[1]
     contracting_axes = dimension_numbers[0][1]
 
-  channelwise_axes = sorted(set(range(ndim)) - set(contracting_axes))
-  tiled_axes = {}
-  if tile_size:
-    tiled_axes = {contracting_axes[0]: tile_size}
+  if isinstance(tile_size, Mapping):
+    tiled_axes = tile_size
+  else:
+    tiled_axes = {}
+    if tile_size:
+      tiled_axes = {contracting_axes[0]: tile_size}
+
+  channelwise_axes = sorted(
+      set(range(ndim)) - set(contracting_axes) - set(tiled_axes.keys())
+  )
 
   return qarray.HowToQuantize(
       channelwise_axes=channelwise_axes,
