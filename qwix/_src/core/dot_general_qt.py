@@ -25,15 +25,17 @@ from qwix._src.core import dot_general
 from qwix._src.core import numerics
 from qwix._src.core import qarray
 from qwix._src.core import sparsity
+from qwix._src.core import stochastic_rounding
 
 
+@jax.tree_util.register_pytree_node_class
 @dataclasses.dataclass(slots=True, frozen=True, kw_only=True)
 class DotGeneralQtConfig:
   """Configuration for dot_general_qt."""
 
   # Forward pass.
-  lhs_qtype: jax.typing.DTypeLike
-  rhs_qtype: jax.typing.DTypeLike
+  lhs_qtype: jax.typing.DTypeLike | None = None
+  rhs_qtype: jax.typing.DTypeLike | None = None
   tile_size: int | float | None = None
   lhs_calibration_method: str = 'absmax'
   rhs_calibration_method: str = 'absmax'
@@ -46,14 +48,14 @@ class DotGeneralQtConfig:
   dlhs_grad_qtype: jax.typing.DTypeLike | None = None  # incoming gradient
   dlhs_grad_calibration_method: str = 'absmax'
   dlhs_tile_size: int | float | None = None
-  dlhs_stochastic_rounding_noise_fn: numerics.NoiseFn | None = None
+  dlhs_stochastic_rounding_noise_fn: stochastic_rounding.NoiseFn | None = None
   dlhs_grad_disable_channelwise_axes: bool = False
 
   # Backward pass (drhs).
   drhs_grad_qtype: jax.typing.DTypeLike | None = None  # incoming gradient
   drhs_grad_calibration_method: str = 'absmax'
   drhs_tile_size: int | float | None = None
-  drhs_stochastic_rounding_noise_fn: numerics.NoiseFn | None = None
+  drhs_stochastic_rounding_noise_fn: stochastic_rounding.NoiseFn | None = None
   drhs_grad_disable_channelwise_axes: bool = False
 
   # Whether not to clip the gradients to the calibration ranges of the quantized
@@ -81,6 +83,27 @@ class DotGeneralQtConfig:
   drhs_residual_disable_channelwise_axes: bool = False
 
   sparsity_rule: sparsity.SparsityRule | None = None
+
+  def tree_flatten(self):
+    children = (
+        self.dlhs_stochastic_rounding_noise_fn,
+        self.drhs_stochastic_rounding_noise_fn,
+    )
+    aux_data = {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
+    del aux_data['dlhs_stochastic_rounding_noise_fn']
+    del aux_data['drhs_stochastic_rounding_noise_fn']
+    return children, aux_data
+
+  @classmethod
+  def tree_unflatten(cls, aux_data, children):
+    dlhs_stochastic_rounding_noise_fn, drhs_stochastic_rounding_noise_fn = (
+        children
+    )
+    return cls(
+        dlhs_stochastic_rounding_noise_fn=dlhs_stochastic_rounding_noise_fn,
+        drhs_stochastic_rounding_noise_fn=drhs_stochastic_rounding_noise_fn,
+        **aux_data,
+    )
 
 
 def _ranges_like(*xs):
@@ -185,29 +208,32 @@ def dot_general_qt_fwd(
   lhs_in, rhs_in = lhs, rhs
   if lhs_calibration is not None:
     scale, zero_point = qarray.compute_scale_zero_point(
-        lhs_calibration, config.lhs_qtype
+        lhs_calibration, config.lhs_qtype  # pyrefly: ignore[bad-argument-type]
     )
-    qlhs = qarray.quantize_with_scale_zero_point(
-        lhs, config.lhs_qtype, scale, zero_point
+    lhs = qarray.quantize_with_scale_zero_point(  # pyrefly: ignore[bad-assignment]
+        lhs, config.lhs_qtype, scale, zero_point  # pyrefly: ignore[bad-argument-type]
     )
-  else:
-    qlhs = lhs
   if rhs_calibration is not None:
     scale, zero_point = qarray.compute_scale_zero_point(
-        rhs_calibration, config.rhs_qtype
+        rhs_calibration, config.rhs_qtype  # pyrefly: ignore[bad-argument-type]
     )
-    qrhs = qarray.quantize_with_scale_zero_point(
-        rhs, config.rhs_qtype, scale, zero_point
+    rhs = qarray.quantize_with_scale_zero_point(  # pyrefly: ignore[bad-assignment]
+        rhs, config.rhs_qtype, scale, zero_point  # pyrefly: ignore[bad-argument-type]
     )
-  else:
-    qrhs = rhs
-  residuals = (lhs_in, rhs_in, qlhs, qrhs, lhs_calibration, rhs_calibration)
-  return dot_general.dot_general(qlhs, qrhs, dimension_numbers), residuals
+  residuals = (
+      lhs_in,
+      rhs_in,
+      lhs,
+      rhs,
+      lhs_calibration,
+      rhs_calibration,
+      config,
+  )
+  return dot_general.dot_general(lhs, rhs, dimension_numbers), residuals
 
 
 def dot_general_qt_bwd(
     fwd_dimension_numbers: jax.lax.DotDimensionNumbers,
-    config: DotGeneralQtConfig,
     residuals: tuple[
         jax.Array,
         jax.Array,
@@ -215,11 +241,12 @@ def dot_general_qt_bwd(
         qarray.MaybeQArray,
         dict[str, jax.Array] | None,
         dict[str, jax.Array] | None,
+        DotGeneralQtConfig,
     ],
     g: jax.Array,
 ):
   """Backward pass for dot_general_qt custom VJP."""
-  lhs_in, rhs_in, lhs, rhs, lhs_calibration, rhs_calibration = residuals
+  lhs_in, rhs_in, lhs, rhs, lhs_calibration, rhs_calibration, config = residuals
 
   def _compute_gradient_for_operand(g: jax.Array, *, for_dlhs: bool):
     """Compute dot_general for gradient and other_fwd_operand."""
@@ -303,10 +330,10 @@ def dot_general_qt_bwd(
           drhs, rhs_in, rhs_calibration, config.rhs_calibration_method
       )
 
-  return dlhs, drhs, None, None
+  return dlhs, drhs, None, None, None
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(4, 5))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(4,))
 def dot_general_qt_fwd_bwd(
     lhs: jax.Array,
     rhs: jax.Array,

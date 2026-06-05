@@ -49,6 +49,27 @@ class StochasticRoundingTest(parameterized.TestCase):
     self.assertTrue(jnp.all(noise > -0.5))
     self.assertTrue(jnp.all(noise < 0.5))
 
+  def test_noise_fn_jit_compatible(self):
+    key = jax.random.PRNGKey(0)
+    shape = (2, 3)
+    noise_fn = stochastic_rounding.get_noise_fn(
+        "uniform", key=key, channelwise_noise_axes=(0,)
+    )
+
+    # A function that takes the noise function as an argument and uses it
+    # inside JIT
+    @jax.jit(static_argnums=(1,))
+    def apply_noise(fn, s):
+      return fn(s)
+
+    # This would have failed with the previous closure implementation
+    try:
+      noise = apply_noise(noise_fn, shape)
+    except jax.errors.UnexpectedTracerError as e:
+      self.fail(f"Noise function is not JIT compatible: {e}")
+
+    self.assertEqual(noise.shape, (2, 1))
+
 
 if __name__ == "__main__":
   absltest.main()

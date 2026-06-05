@@ -13,7 +13,7 @@
 # limitations under the License.
 """Numerics for quantization."""
 
-from typing import Callable, Sequence
+from typing import Callable
 import jax
 from jax import numpy as jnp
 
@@ -22,7 +22,7 @@ from jax import numpy as jnp
 #   shape: The requested shape of the noise to generate.
 # returns: Noise as a jax.Array whose shape is broadcastable to the requested
 #   shape, and whose dtype can be promoted to fp32 implicitly.
-NoiseFn = Callable[[Sequence[int]], jax.Array]
+NoiseFn = Callable[[tuple[int, ...]], jax.Array]
 _QUANTIZE_DTYPES = (jnp.bfloat16, jnp.float16, jnp.float32, jnp.float64)
 
 
