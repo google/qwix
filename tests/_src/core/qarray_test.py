@@ -110,8 +110,8 @@ class QArrayTest(parameterized.TestCase):
           testcase_name='mxfp8',
           array_shape=(10, 128, 64),
           qtype='mxfp8',
-          channelwise_axes=[],
-          tiled_axes={},
+          channelwise_axes=[0, 1],
+          tiled_axes={2: 32},
           calibration_method='absmax',
           expected_mae=0.0223389,
       ),
@@ -119,10 +119,19 @@ class QArrayTest(parameterized.TestCase):
           testcase_name='mxfp4',
           array_shape=(10, 128, 64),
           qtype='mxfp4',
-          channelwise_axes=[],
-          tiled_axes={},
+          channelwise_axes=[0, 1],
+          tiled_axes={2: 32},
           calibration_method='absmax',
           expected_mae=0.10791,
+      ),
+      dict(
+          testcase_name='nvfp4',
+          array_shape=(10, 128, 64),
+          qtype='nvfp4',
+          channelwise_axes=[0, 1],
+          tiled_axes={2: 16},
+          calibration_method='absmax',
+          expected_mae=0.0893555,
       ),
   )
   def test_quantize_dequantize(
@@ -145,16 +154,18 @@ class QArrayTest(parameterized.TestCase):
     q_array = qarray.quantize(array, how)
     dq_array = qarray.dequantize(q_array)
 
+    expected_scale_shape = list(array_shape)
+    for axis, tile_size in tiled_axes.items():
+      expected_scale_shape[axis] = (
+          expected_scale_shape[axis] + tile_size - 1
+      ) // tile_size
+
     if qtype == 'mxfp8':
       self.assertEqual(q_array.qvalue.dtype, jnp.float8_e4m3fn)
-      expected_scale_shape = list(array_shape)
-      expected_scale_shape[-1] //= 32
       self.assertEqual(q_array.scale.shape, tuple(expected_scale_shape))
       self.assertIsNone(q_array.zero_point)
-    elif qtype == 'mxfp4':
+    elif qtype in ('mxfp4', 'nvfp4'):
       self.assertEqual(q_array.qvalue.dtype, jnp.float4_e2m1fn)
-      expected_scale_shape = list(array_shape)
-      expected_scale_shape[-1] //= 32
       self.assertEqual(q_array.scale.shape, tuple(expected_scale_shape))
       self.assertIsNone(q_array.zero_point)
     else:
@@ -399,7 +410,9 @@ class QArrayTest(parameterized.TestCase):
     # ---- Part 1: Verify default behavior (Safe Mode) ----
     qarray.USE_RECIPROCAL_FOR_QUANTIZATION = False
     try:
-      how = qarray.HowToQuantize(qtype='mxfp8', calibration_method='absmax')
+      how = qarray.HowToQuantize(
+          qtype='mxfp8', calibration_method='absmax', tiled_axes={0: 32}
+      )
       q_array = qarray.quantize(x, how)
       # Default should be safe (no NaN)
       self.assertFalse(
@@ -435,7 +448,9 @@ class QArrayTest(parameterized.TestCase):
     qarray.compute_scale_zero_point = unsafe_compute_scale_zero_point
     qarray.USE_RECIPROCAL_FOR_QUANTIZATION = False
     try:
-      how = qarray.HowToQuantize(qtype='mxfp8', calibration_method='absmax')
+      how = qarray.HowToQuantize(
+          qtype='mxfp8', calibration_method='absmax', tiled_axes={0: 32}
+      )
       q_array = qarray.quantize(x, how)
       # Unsafe mode should produce NaN
       self.assertTrue(
@@ -445,6 +460,33 @@ class QArrayTest(parameterized.TestCase):
     finally:
       qarray.compute_scale_zero_point = original_compute
       qarray.USE_RECIPROCAL_FOR_QUANTIZATION = original_reciprocal
+
+  def test_mxfp_tile_size_validation(self):
+    with self.assertRaisesRegex(
+        ValueError, 'Format mxfp8 requires `tiled_axes` to be specified.'
+    ):
+      qarray.HowToQuantize(qtype='mxfp8')
+
+    with self.assertRaisesRegex(
+        ValueError, 'Format mxfp8 requires a tile size of 32, but axis 1 got 64'
+    ):
+      qarray.HowToQuantize(
+          qtype='mxfp8',
+          tiled_axes={1: 64},
+      )
+
+    with self.assertRaisesRegex(
+        ValueError, 'Format nvfp4 requires `tiled_axes` to be specified.'
+    ):
+      qarray.HowToQuantize(qtype='nvfp4')
+
+    with self.assertRaisesRegex(
+        ValueError, 'Format nvfp4 requires a tile size of 16, but axis 1 got 32'
+    ):
+      qarray.HowToQuantize(
+          qtype='nvfp4',
+          tiled_axes={1: 32},
+      )
 
 
 if __name__ == '__main__':

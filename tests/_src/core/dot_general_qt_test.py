@@ -380,6 +380,8 @@ class DotGeneralQtTest(parameterized.TestCase):
         dlhs_grad_qtype='mxfp8',
         drhs_grad_qtype='mxfp8',
         tile_size=32,
+        dlhs_tile_size=32,
+        drhs_tile_size=32,
         use_original_residuals=False,
     )
     # Shapes must be compatible with MXFP8 tiling (multiple of 32)

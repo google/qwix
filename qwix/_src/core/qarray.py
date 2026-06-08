@@ -303,6 +303,26 @@ class HowToQuantize:
   # Noise function to use for stochastic rounding.
   noise_fn: numerics.NoiseFn | None = None
 
+  def __post_init__(self):
+    if isinstance(self.qtype, str) and self.qtype in (
+        'mxfp8',
+        'mxfp4',
+        'nvfp4',
+    ):
+      resolved_tile_size = 32 if self.qtype in ('mxfp8', 'mxfp4') else 16
+
+      if not self.tiled_axes:
+        raise ValueError(
+            f'Format {self.qtype} requires `tiled_axes` to be specified.'
+        )
+
+      for axis, size in self.tiled_axes.items():
+        if size != resolved_tile_size:
+          raise ValueError(
+              f'Format {self.qtype} requires a tile size of'
+              f' {resolved_tile_size}, but axis {axis} got {size}.'
+          )
+
 
 ShapeT: TypeAlias = Sequence[int]
 MaybeQArray: TypeAlias = jax.Array | QArray
@@ -458,13 +478,6 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
     asymmetric quantization, or {'absmax': ...} for symmetric quantization.
     Each value in the dict has the same shape as the (expected) scale.
   """
-  if how.qtype == 'mxfp8' or how.qtype == 'mxfp4':
-    last_axis = array.ndim - 1
-    how = dataclasses.replace(
-        how,
-        channelwise_axes=list(range(last_axis)),
-        tiled_axes={last_axis: 32},
-    )
   reduce_axes = []  # axes to calibrate.
   tiled_axes_offset = 0
   for axis, _ in enumerate(array.shape):
@@ -552,6 +565,8 @@ def compute_scale_zero_point(
   if qtype == 'mxfp8' or qtype == 'mxfp4':
     log2_scale = jnp.ceil(jnp.log2(scale))
     scale = (2**log2_scale).astype(scale.dtype)
+  elif qtype == 'nvfp4':
+    scale = numerics.convert_to(scale, jnp.float8_e4m3fn).astype(scale.dtype)
   return scale, zero_point
 
 

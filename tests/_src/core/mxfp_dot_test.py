@@ -33,11 +33,14 @@ Hardware Support Summary:
 - CPU: Currently raises NotImplementedError in JAX.
 """
 
+from unittest import mock
 from absl import logging
 from absl.testing import absltest
 import jax
 import jax.numpy as jnp
 import numpy as np
+from qwix._src.core import mxfp_dot
+from qwix._src.core import qarray
 
 
 def reference_scaled_matmul(lhs, rhs, lhs_scale, rhs_scale):
@@ -257,6 +260,89 @@ class MxfpNumericsTest(absltest.TestCase):
         scale_type=jnp.float8_e4m3fn,
         block_size=16,
     )
+
+
+class MxfpDotTest(absltest.TestCase):
+  """Tests for mxfp_dot dispatcher and shape handling."""
+
+  def test_flatten_to_3d(self):
+    val = jnp.ones((2, 3, 4, 5))
+    scale = jnp.ones((2, 3, 4, 1))
+    ca = (3,)
+    ba = (0, 1)
+
+    operand = qarray.QArray(val, scale, qtype="mxfp8")
+    val_3d, scale_3d = mxfp_dot._flatten_to_3d(operand, ca, ba)
+    self.assertEqual(val_3d.shape, (6, 4, 5))
+    self.assertEqual(scale_3d.shape, (6, 4, 1))
+
+  def test_flatten_to_3d_with_broadcasting(self):
+    val = jnp.ones((2, 4, 5))
+    scale = jnp.ones((1, 4, 1))
+    ca = (2,)
+    ba = (0,)
+
+    operand = qarray.QArray(val, scale, qtype="mxfp8")
+    val_3d, scale_3d = mxfp_dot._flatten_to_3d(operand, ca, ba)
+    self.assertEqual(val_3d.shape, (2, 4, 5))
+    self.assertEqual(scale_3d.shape, (2, 4, 1))
+
+  def test_unflatten_from_3d(self):
+    out_3d = jnp.ones((6, 4, 6))
+    lhs = qarray.QArray(
+        qvalue=jnp.ones((2, 3, 4, 5)),
+        scale=jnp.ones((2, 3, 4, 1)),
+        qtype="mxfp8",
+    )
+    rhs = qarray.QArray(
+        qvalue=jnp.ones((2, 3, 6, 5)),
+        scale=jnp.ones((2, 3, 6, 1)),
+        qtype="mxfp8",
+    )
+    dnums = (((3,), (3,)), ((0, 1), (0, 1)))
+    res = mxfp_dot._unflatten_from_3d(out_3d, lhs, rhs, dnums)
+    self.assertEqual(res.shape, (2, 3, 4, 6))
+
+  def test_mxfp_dot_general_emulation_fallback(self):
+    lhs = qarray.QArray(
+        qvalue=jnp.ones((2, 32), jnp.float8_e4m3fn),
+        scale=jnp.ones((2, 1)),
+        qtype="mxfp8",
+    )
+    rhs = qarray.QArray(
+        qvalue=jnp.ones((2, 32), jnp.float8_e4m3fn),
+        scale=jnp.ones((2, 1)),
+        qtype="mxfp8",
+    )
+
+    platform = jax.devices()[0].platform
+    if platform == "cpu":
+      res = mxfp_dot.mxfp_dot_general(
+          lhs, rhs, dimension_numbers=(((1,), (1,)), ((), ()))
+      )
+      self.assertIsNone(res)
+
+  @mock.patch.object(jax, "devices")
+  def test_one_side_mxfp_fallback(self, mock_devices):
+    mock_device = mock.MagicMock()
+    mock_device.platform = "gpu"
+    mock_devices.return_value = [mock_device]
+
+    mxfp_dot._get_primary_platform.cache_clear()
+    try:
+      lhs = qarray.QArray(
+          qvalue=jnp.ones((2, 32), jnp.float8_e4m3fn),
+          scale=jnp.ones((2, 1)),
+          qtype="mxfp8",
+      )
+      rhs = jnp.ones((2, 32), jnp.float32)
+
+      res = mxfp_dot.mxfp_dot_general(
+          lhs, rhs, dimension_numbers=(((1,), (1,)), ((), ()))
+      )
+      self.assertIsNone(res)
+    finally:
+      mxfp_dot._get_primary_platform.cache_clear()
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ import itertools
 from typing import Any
 import jax
 from jax import numpy as jnp
+from qwix._src.core import mxfp_dot
 from qwix._src.core import numerics
 from qwix._src.core import qarray
 
@@ -418,6 +419,13 @@ def dot_general(
   Returns:
     a floating-point jax.Array.
   """
+  # Try hardware-accelerated MXFP dot first
+  mxfp_result = mxfp_dot.mxfp_dot_general(
+      lhs, rhs, dimension_numbers, preferred_element_type
+  )
+  if mxfp_result is not None:
+    return mxfp_result
+
   # We need to choose between slow_dot_general, which dequantizes first and
   # then computes in floating-point types, and fast_dot_general, which
   # computes in quantized types first and then dequantize.
