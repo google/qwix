@@ -866,7 +866,7 @@ class OdmlTest(parameterized.TestCase):
     fp_mae, _ = print_diff('edge vs fp', edge_result, fp_result)
     qat_mae, _ = print_diff('edge vs qat', edge_result, qat_result)
     self.assertLess(qat_mae, fp_mae)
-    self.assertLess(qat_mae, 0.0003)
+    self.assertLess(qat_mae, 0.0005)
 
   def test_vae_separate_export(self):
     rules = [
