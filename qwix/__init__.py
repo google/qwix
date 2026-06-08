@@ -33,7 +33,10 @@ from qwix._src.providers.ptq import (
 )
 from qwix._src.providers.qt import QtProvider, QtRule
 from qwix._src.qconfig import QuantizationProvider, QuantizationRule
-from qwix._src.utils.checkpoint_util import process_prequantized_params
+from qwix._src.utils.checkpoint_util import (
+    process_prequantized_params,
+    restore_quantization_rules,
+)
 from qwix._src.utils.flax_util import QuantStat
 
 __version__: str = version.__version__
