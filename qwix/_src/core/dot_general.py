@@ -57,7 +57,7 @@ def get_how_to_quantize(
   channelwise_axes = sorted(set(range(ndim)) - set(contracting_axes))
   tiled_axes = {}
   if tile_size:
-    tiled_axes = {contracting_axes[0]: tile_size}
+    tiled_axes = {contracting_axes[-1]: tile_size}
 
   return qarray.HowToQuantize(
       channelwise_axes=channelwise_axes,
