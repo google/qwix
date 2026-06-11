@@ -672,6 +672,29 @@ class PtqTest(parameterized.TestCase):
     res = model(param)
     self.assertIsInstance(res, ptq.WithAux)
 
+  def test_nnx_multi_head_attention(self):
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*", weight_qtype="mxfp8", tile_size=32
+        ),
+    ]
+    model_input = jnp.ones((2, 16, 64))
+    mha = nnx.MultiHeadAttention(
+        num_heads=4,
+        in_features=64,
+        qkv_features=128,
+        out_features=64,
+        rngs=nnx.Rngs(0),
+    )
+    ptq_mha = qwix_model.quantize_model(
+        mha,
+        ptq.PtqProvider(q_rules),
+        model_input,
+        decode=False,
+    )
+    out = ptq_mha(model_input, decode=False)
+    self.assertEqual(out.shape, (2, 16, 64))
+
 
 if __name__ == "__main__":
   absltest.main()

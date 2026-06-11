@@ -187,7 +187,11 @@ def _get_residual_for_backward(
   """
   if config.use_original_residuals or (
       isinstance(operand_qt, qarray.QArray)
-      and qarray.get_tiled_axes(operand_qt)
+      and (
+          qarray.get_tiled_axes(operand_qt)
+          or isinstance(operand_qt.qtype, str)
+          and operand_qt.qtype in ('mxfp8', 'mxfp4', 'nvfp4')
+      )
   ):
     return operand_in
   return operand_qt
