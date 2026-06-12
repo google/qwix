@@ -31,3 +31,12 @@ core_api.md
 providers_interface.md
 providers.md
 ```
+
+```{toctree}
+:maxdepth: 1
+:caption: Supported Algorithms
+
+gptq.md
+awq.md
+smooth_quant.md
+```
