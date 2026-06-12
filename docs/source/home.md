@@ -28,6 +28,8 @@ research and production.
     *   ODML: this mode adds proper annotation to the model so that the LiteRT
         converter could produce full integer models.
     *   LoRA/QLoRA: this mode enables LoRA and QLoRA on a model.
+*   Supported algorithms:
+    *   [GPTQ](gptq.md)
 *   Supported numerics:
     *   Native: `int4`, `int8`, `fp8`.
     *   Emulated: `int1` to `int7`, `nf4`.
