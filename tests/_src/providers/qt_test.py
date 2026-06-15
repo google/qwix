@@ -200,6 +200,50 @@ class QtTest(absltest.TestCase):
     # So the dot product of ones(1,4) and sparsified ones(4,1) should be 2.0.
     self.assertEqual(out, jnp.array([[2.0]], dtype=jnp.bfloat16))
 
+  def test_nnx_multi_head_attention_qt_bwd(self):
+    rule = qt.QtRule(
+        module_path=".*",
+        weight_qtype="mxfp4",
+        act_qtype="mxfp4",
+        bwd_qtype="mxfp4",
+        tile_size=32,
+        bwd_weight_grad_tile_size=32,
+        disable_channelwise_axes=False,
+        act_static_scale=False,
+        additional_qt_config={
+            "dlhs_grad_qtype": "mxfp4",
+            "dlhs_tile_size": 32,
+            "drhs_grad_qtype": "mxfp4",
+            "drhs_tile_size": 32,
+        },
+    )
+    model_input = jnp.ones((2, 32, 64), dtype=jnp.float32)
+    mha = nnx.MultiHeadAttention(
+        num_heads=4,
+        in_features=64,
+        qkv_features=128,
+        out_features=64,
+        rngs=nnx.Rngs(0),
+        param_dtype=jnp.float32,
+    )
+    qt_mha = qwix_model.quantize_model(
+        mha,
+        qt.QtProvider([rule]),
+        model_input,
+        decode=False,
+    )
+
+    @nnx.jit
+    def train_step(model, x):
+      def loss_fn(model, x):
+        out = model(x, decode=False)
+        return jnp.sum(out)
+
+      return nnx.grad(loss_fn)(model, x)
+
+    grads = train_step(qt_mha, model_input)
+    self.assertIsNotNone(grads)
+
 
 if __name__ == "__main__":
   absltest.main()

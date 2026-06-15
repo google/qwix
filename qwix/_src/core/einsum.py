@@ -54,11 +54,14 @@ def get_how_to_quantize(
 
   channelwise_axes = []
   tiled_axes = {}
+  last_contracting_axis = None
   for axis, char in enumerate(operand_subs):
     if char not in info.contract_chars:
       channelwise_axes.append(axis)
-    elif tile_size and not tiled_axes:  # Only tile the first contraction axis.
-      tiled_axes[axis] = tile_size
+    else:
+      last_contracting_axis = axis  # Only tile the last contraction axis.
+  if tile_size and last_contracting_axis is not None:
+    tiled_axes[last_contracting_axis] = tile_size
 
   return qarray.HowToQuantize(
       channelwise_axes=channelwise_axes,

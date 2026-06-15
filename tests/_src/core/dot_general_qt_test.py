@@ -399,6 +399,50 @@ class DotGeneralQtTest(parameterized.TestCase):
     self.assertEqual(grad_lhs.shape, lhs.shape)
     self.assertEqual(grad_rhs.shape, rhs.shape)
 
+  def test_mxfp_tiled_residual_fallback_single_tile(self):
+    """Verifies that MXFP single-tile residuals (size 32) correctly fallback to float inputs in bwd pass."""
+    # Test that even when axis_size == tile_size (32), where get_tiled_axes
+    # returns {}, the explicit MXFP check correctly bypasses scale shifting.
+    config = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='mxfp8',
+        rhs_qtype='mxfp8',
+        dlhs_grad_qtype='mxfp8',
+        drhs_grad_qtype='mxfp8',
+        tile_size=32,
+        dlhs_tile_size=32,
+        drhs_tile_size=32,
+        use_original_residuals=False,
+    )
+    lhs = jnp.ones((32, 32), dtype=jnp.float32)
+    rhs = jnp.ones((32, 32), dtype=jnp.float32)
+
+    def f(l, r):
+      return dot_general_qt.dot_general_qt(
+          l, r, (((1,), (0,)), ((), ())), config=config
+      ).sum()
+
+    grad_lhs, grad_rhs = jax.grad(f, argnums=(0, 1))(lhs, rhs)
+    self.assertEqual(grad_lhs.shape, lhs.shape)
+    self.assertEqual(grad_rhs.shape, rhs.shape)
+
+    # Incontrovertibly verify that the actual saved residuals bypassed QArray
+    # and fell back exactly to the original unquantized float inputs.
+    dnums = (((1,), (0,)), ((), ()))
+    how = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=True,
+        qtype='mxfp8',
+        tile_size=32,
+    )
+    lhs_cal = qarray.calibrate(lhs, how)
+    rhs_cal = qarray.calibrate(rhs, how)
+    _, res = dot_general_qt.dot_general_qt_fwd_bwd.fwd(
+        lhs, rhs, lhs_cal, rhs_cal, dnums, config
+    )
+    self.assertNotIsInstance(res[0], qarray.QArray)
+    self.assertNotIsInstance(res[1], qarray.QArray)
+
 
 if __name__ == '__main__':
   absltest.main()

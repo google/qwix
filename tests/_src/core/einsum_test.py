@@ -444,6 +444,39 @@ class EinsumTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, 'Cannot broadcast'):
       einsum.einsum('BTNH,BSNH->BTNS', lhs, rhs)
 
+  def test_innermost_tiling_heuristic(self):
+    einsum_str = 'BTNH,NHO->BTO'
+    lhs_shape = (2, 16, 10, 64)
+    rhs_shape = (10, 64, 128)
+
+    how_lhs = einsum.get_how_to_quantize(
+        einsum_str=einsum_str,
+        ndims=(4, 3),
+        for_lhs=True,
+        qtype='mxfp8',
+        tile_size=32,
+    )
+    # Contracting axes are 2 (N) and 3 (H). Axis 3 should be selected.
+    self.assertEqual(how_lhs.tiled_axes, {3: 32})
+
+    how_rhs = einsum.get_how_to_quantize(
+        einsum_str=einsum_str,
+        ndims=(4, 3),
+        for_lhs=False,
+        qtype='mxfp8',
+        tile_size=32,
+    )
+    # Contracting axes are 0 (N) and 1 (H). Axis 1 should be selected.
+    self.assertEqual(how_rhs.tiled_axes, {1: 32})
+
+    lhs = self._make_array(lhs_shape, jnp.float32)
+    rhs = self._make_array(rhs_shape, jnp.float32)
+    q_lhs = qarray.quantize(lhs, how_lhs)
+    q_rhs = qarray.quantize(rhs, how_rhs)
+
+    res = einsum.einsum(einsum_str, q_lhs, q_rhs)
+    self.assertEqual(res.shape, (2, 16, 128))
+
 
 if __name__ == '__main__':
   absltest.main()

@@ -182,6 +182,30 @@ class DotGeneralTest(parameterized.TestCase):
     finally:
       mxfp_dot._get_primary_platform.cache_clear()
 
+  def test_innermost_tiling_heuristic(self):
+    """Verifies that multi-dimensional dot_general picks the innermost contracting reduction axis."""
+    dnums = (((2, 3), (0, 1)), ((), ()))
+
+    how_lhs = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(4, 3),
+        for_lhs=True,
+        qtype='mxfp8',
+        tile_size=32,
+    )
+    # Contracting axes for LHS are 2 and 3. Axis 3 should be selected.
+    self.assertEqual(how_lhs.tiled_axes, {3: 32})
+
+    how_rhs = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(4, 3),
+        for_lhs=False,
+        qtype='mxfp8',
+        tile_size=32,
+    )
+    # Contracting axes for RHS are 0 and 1. Axis 1 should be selected.
+    self.assertEqual(how_rhs.tiled_axes, {1: 32})
+
 
 if __name__ == '__main__':
   absltest.main()
