@@ -265,6 +265,382 @@ class OdmlTest(parameterized.TestCase):
     self.assertNotIn('multiply0_lhs', stat_keys)
     self.assertNotIn('multiply0_rhs', stat_keys)
 
+  def test_matched_siblings_sharing_stats(self):
+    """Test that matched sibling branches correctly share the tracer and resolve scales."""
+
+    class SiblingModel(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        # Preceding quantized layer to set FQ_RULE and enable delayed sharing
+        x = nn.Dense(features=8, name='pre_dense')(x)
+        x1 = nn.Dense(features=8, name='sibling1')(x)
+        x2 = nn.Dense(features=8, name='sibling2')(x)
+        return jnp.multiply(x1, x2)
+
+    model = SiblingModel()
+    # Both are quantized under the same int8 rule.
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+        ),
+    ]
+
+    qat_provider = odml.OdmlQatProvider(rules)
+    qat_model = qwix_model.quantize_model(model, qat_provider)
+    model_input = jnp.ones((1, 8), dtype=jnp.float32)
+    qat_vars = qat_model.init(jax.random.key(0), model_input)
+
+    # Run calibration to accumulate stats
+    _, new_vars = qat_model.apply(qat_vars, model_input, mutable=True)
+    qat_vars.update(new_vars)
+
+    # Since they are matched, they must have shared the FQ_ARRAY cache.
+    # This means only sibling1 (which ran first) registered the stats.
+    flat_stats = flax.traverse_util.flatten_dict(qat_vars['quant_stats'])
+    stat_keys = {'/'.join(k[:-1]) for k in flat_stats}
+
+    self.assertIn('sibling1/dot_general0_lhs', stat_keys)
+    # sibling2 should NOT have registered stats because it reused sibling1's
+    # tracer
+    self.assertNotIn('sibling2/dot_general0_lhs', stat_keys)
+
+    # Conversion: both sibling1 and sibling2 should convert successfully without
+    # KeyErrors, with sibling2 resolving its static scale using sibling1's
+    # registered path.
+    conversion_provider = odml.OdmlConversionProvider(
+        rules,
+        qat_vars['params'],
+        qat_vars['quant_stats'],
+    )
+    conversion_model = qwix_model.quantize_model(model, conversion_provider)
+    # This apply should succeed cleanly (no KeyError!)
+    conversion_res = conversion_model.apply(qat_vars, model_input)
+    self.assertIsNotNone(conversion_res)
+
+  def test_mismatched_sibling_quantized_vs_float(self):
+    """Test that mismatched sibling branches (quantized vs float) are isolated."""
+
+    class MixedSiblingModel(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        x = nn.Dense(features=8, name='pre_dense')(x)
+        x1 = nn.Dense(features=8, name='quant_sibling')(x)
+        x2 = nn.Dense(features=8, name='float_sibling')(x)
+        return jnp.multiply(x1, x2)
+
+    model = MixedSiblingModel()
+    # Only quantize the first sibling.
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*pre_dense.*|.*quant_sibling.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+        ),
+    ]
+
+    qat_provider = odml.OdmlQatProvider(rules)
+    qat_model = qwix_model.quantize_model(model, qat_provider)
+    model_input = jnp.ones((1, 8), dtype=jnp.float32)
+    qat_vars = qat_model.init(jax.random.key(0), model_input)
+
+    # Run calibration to accumulate stats
+    _, new_vars = qat_model.apply(qat_vars, model_input, mutable=True)
+    qat_vars.update(new_vars)
+
+    # Stats verification
+    flat_stats = flax.traverse_util.flatten_dict(qat_vars['quant_stats'])
+    stat_keys = {'/'.join(k[:-1]) for k in flat_stats}
+
+    self.assertIn('quant_sibling/dot_general0_lhs', stat_keys)
+    self.assertNotIn('float_sibling/dot_general0_lhs', stat_keys)
+
+    # Conversion runs successfully without any leaks or KeyErrors
+    conversion_provider = odml.OdmlConversionProvider(
+        rules,
+        qat_vars['params'],
+        qat_vars['quant_stats'],
+    )
+    conversion_model = qwix_model.quantize_model(model, conversion_provider)
+    conversion_res = conversion_model.apply(qat_vars, model_input)
+    self.assertIsNotNone(conversion_res)
+
+  def test_mismatched_sibling_parameter_isolation(self):
+    """Test that sibling branches with different quantized parameters are strictly isolated."""
+
+    class MultiQuantSiblingModel(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        # Immediate quantization (no pre_dense) to allow different consumer
+        # rules
+        x1 = nn.Dense(features=8, name='sibling_minmax')(x)
+        x2 = nn.Dense(features=8, name='sibling_absmax')(x)
+        return jnp.multiply(x1, x2)
+
+    model = MultiQuantSiblingModel()
+    # Different rules for different siblings.
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*sibling_minmax.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+            act_calibration_method='minmax',
+        ),
+        qconfig.QuantizationRule(
+            module_path='.*sibling_absmax.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+            act_calibration_method='absmax',
+        ),
+    ]
+
+    qat_provider = odml.OdmlQatProvider(rules)
+    qat_model = qwix_model.quantize_model(model, qat_provider)
+    model_input = jnp.ones((1, 8), dtype=jnp.float32)
+    qat_vars = qat_model.init(jax.random.key(0), model_input)
+    _, new_vars = qat_model.apply(qat_vars, model_input, mutable=True)
+    qat_vars.update(new_vars)
+
+    # Since their rules differ, they must have isolated (copied).
+    # Therefore, BOTH siblings must have registered their own unique stats.
+    flat_stats = flax.traverse_util.flatten_dict(qat_vars['quant_stats'])
+    stat_keys = {'/'.join(k[:-1]) for k in flat_stats}
+
+    self.assertIn('sibling_minmax/dot_general0_lhs', stat_keys)
+    self.assertIn('sibling_absmax/dot_general0_lhs', stat_keys)
+
+    # Both convert successfully using their own isolated scales
+    conversion_provider = odml.OdmlConversionProvider(
+        rules,
+        qat_vars['params'],
+        qat_vars['quant_stats'],
+    )
+    conversion_model = qwix_model.quantize_model(model, conversion_provider)
+    conversion_res = conversion_model.apply(qat_vars, model_input)
+    self.assertIsNotNone(conversion_res)
+
+  def test_matched_siblings_with_reshape_sharing(self):
+    """Test that sibling branches separated by reshape calibrate and convert separately."""
+
+    class SiblingReshapeModel(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        x = nn.Dense(features=8, name='pre_dense')(x)
+        x1 = nn.Dense(features=8, name='sibling1')(x)
+        # Reshape to different shape breaks FQ_ARRAY tracer sharing,
+        # forcing sibling2 to run _fake_quant.
+        x_reshaped = jnp.reshape(x, (8,))
+        x2 = nn.Dense(features=8, name='sibling2')(x_reshaped)
+        return jnp.multiply(x1, x2)
+
+    model = SiblingReshapeModel()
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+        ),
+    ]
+
+    qat_provider = odml.OdmlQatProvider(rules)
+    qat_model = qwix_model.quantize_model(model, qat_provider)
+    model_input = jnp.ones((1, 8), dtype=jnp.float32)
+    qat_vars = qat_model.init(jax.random.key(0), model_input)
+
+    # Run calibration to accumulate stats
+    _, new_vars = qat_model.apply(qat_vars, model_input, mutable=True)
+    qat_vars.update(new_vars)
+
+    flat_stats = flax.traverse_util.flatten_dict(qat_vars['quant_stats'])
+    stat_keys = {'/'.join(k[:-1]) for k in flat_stats}
+
+    self.assertIn('sibling1/dot_general0_lhs', stat_keys)
+    # Sibling 2 collects its own stats in QAT because jnp.reshape
+    # breaks FQ_ARRAY tracer-level cache sharing.
+    self.assertIn('sibling2/dot_general0_lhs', stat_keys)
+
+    conversion_provider = odml.OdmlConversionProvider(
+        rules,
+        qat_vars['params'],
+        qat_vars['quant_stats'],
+    )
+    conversion_model = qwix_model.quantize_model(model, conversion_provider)
+    # Both convert successfully using their own respective stats!
+    conversion_res = conversion_model.apply(qat_vars, model_input)
+    self.assertIsNotNone(conversion_res)
+
+  def test_immediate_matched_siblings_sharing_stats(self):
+    """Test that matched sibling branches using immediate quantization share the tracer and stats."""
+
+    class SiblingModel(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        # Immediate quantization (no preceding quantized layer)
+        x1 = nn.Dense(features=8, name='sibling1')(x)
+        x2 = nn.Dense(features=8, name='sibling2')(x)
+        return jnp.multiply(x1, x2)
+
+    model = SiblingModel()
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+        ),
+    ]
+
+    qat_provider = odml.OdmlQatProvider(rules)
+    qat_model = qwix_model.quantize_model(model, qat_provider)
+    model_input = jnp.ones((1, 8), dtype=jnp.float32)
+    qat_vars = qat_model.init(jax.random.key(0), model_input)
+
+    # Run calibration to accumulate stats
+    _, new_vars = qat_model.apply(qat_vars, model_input, mutable=True)
+    qat_vars.update(new_vars)
+
+    # Verify that stats are shared!
+    flat_stats = flax.traverse_util.flatten_dict(qat_vars['quant_stats'])
+    stat_keys = {'/'.join(k[:-1]) for k in flat_stats}
+
+    self.assertIn('sibling1/dot_general0_lhs', stat_keys)
+    # sibling2 should NOT have registered stats because it reused sibling1's
+    # tracer (sharing!)
+    self.assertNotIn('sibling2/dot_general0_lhs', stat_keys)
+
+    # Conversion runs successfully
+    conversion_provider = odml.OdmlConversionProvider(
+        rules,
+        qat_vars['params'],
+        qat_vars['quant_stats'],
+    )
+    conversion_model = qwix_model.quantize_model(model, conversion_provider)
+    conversion_res = conversion_model.apply(qat_vars, model_input)
+    self.assertIsNotNone(conversion_res)
+
+  def test_metadata_propagation_linear_arithmetic(self):
+    """Test that elementwise linear arithmetic propagates quantization rules and ALLOW_FUSION."""
+
+    class LinearPropagationModel(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        # Preceding quantized layer to set FQ_RULE
+        x = nn.Dense(features=8, name='pre_dense')(x)
+
+        # Elementwise linear scaling and shifting (mul, add, neg)
+        # These should propagate the FQ_RULE and ALLOW_FUSION metadata cleanly.
+        x = x * 2.5
+        x = x + 1.2
+        x = -x
+
+        # Matching siblings consuming the scaled/shifted tracer
+        x1 = nn.Dense(features=8, name='sibling1')(x)
+        x2 = nn.Dense(features=8, name='sibling2')(x)
+        return jnp.multiply(x1, x2)
+
+    model = LinearPropagationModel()
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+        ),
+    ]
+
+    qat_provider = odml.OdmlQatProvider(rules)
+    qat_model = qwix_model.quantize_model(model, qat_provider)
+    model_input = jnp.ones((1, 8), dtype=jnp.float32)
+    qat_vars = qat_model.init(jax.random.key(0), model_input)
+
+    # Run calibration
+    _, new_vars = qat_model.apply(qat_vars, model_input, mutable=True)
+    qat_vars.update(new_vars)
+
+    flat_stats = flax.traverse_util.flatten_dict(qat_vars['quant_stats'])
+    stat_keys = {'/'.join(k[:-1]) for k in flat_stats}
+
+    # If propagation succeeded, sibling1 and sibling2 successfully share the
+    # delayed FQ_ARRAY cache, meaning only sibling1 registers stats.
+    self.assertIn('sibling1/dot_general0_lhs', stat_keys)
+    self.assertNotIn('sibling2/dot_general0_lhs', stat_keys)
+
+    # Conversion runs cleanly without KeyErrors
+    conversion_provider = odml.OdmlConversionProvider(
+        rules,
+        qat_vars['params'],
+        qat_vars['quant_stats'],
+    )
+    conversion_model = qwix_model.quantize_model(model, conversion_provider)
+    conversion_res = conversion_model.apply(qat_vars, model_input)
+    self.assertIsNotNone(conversion_res)
+
+  def test_metadata_propagation_reciprocal_division(self):
+    """Test that activation / const propagates metadata but const / activation does not."""
+
+    class ReciprocalDivisionModel(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        # Preceding quantized layer to set FQ_RULE
+        x = nn.Dense(features=8, name='pre_dense')(x)
+
+        # Linear division (activation / const) -> correctly propagates FQ_RULE
+        x_linear = x / 2.0
+
+        # Reciprocal division (const / activation) -> correctly strips FQ_RULE
+        x_reciprocal = jax.lax.div(1.0, x)
+
+        l1 = nn.Dense(features=8, name='linear_sibling1')(x_linear)
+        l2 = nn.Dense(features=8, name='linear_sibling2')(x_linear)
+
+        r1 = nn.Dense(features=8, name='reciprocal_sibling1')(x_reciprocal)
+        r2 = nn.Dense(features=8, name='reciprocal_sibling2')(x_reciprocal)
+        return (
+            jnp.multiply(l1, l2),
+            jnp.multiply(r1, r2),
+            x_linear,
+            x_reciprocal,
+        )
+
+    model = ReciprocalDivisionModel()
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+        ),
+    ]
+
+    qat_provider = odml.OdmlQatProvider(rules)
+    qat_model = qwix_model.quantize_model(model, qat_provider)
+    model_input = jnp.ones((1, 8), dtype=jnp.float32)
+    qat_vars = qat_model.init(jax.random.key(0), model_input)
+
+    # Run calibration
+    res, new_vars = qat_model.apply(qat_vars, model_input, mutable=True)
+    qat_vars.update(new_vars)
+
+    _, _, x_linear, x_reciprocal = res
+
+    # Linear division successfully propagated FQ_RULE
+    self.assertIsNotNone(
+        odml.odml_ops.aux_data.get(
+            x_linear, odml.odml_ops.AuxDataKey.FQ_RULE, None
+        )
+    )
+    # Reciprocal division correctly stripped FQ_RULE
+    self.assertIsNone(
+        odml.odml_ops.aux_data.get(
+            x_reciprocal, odml.odml_ops.AuxDataKey.FQ_RULE, None
+        )
+    )
+
 
 if __name__ == '__main__':
   absltest.main()

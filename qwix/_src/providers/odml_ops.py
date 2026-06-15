@@ -177,6 +177,15 @@ _VALUE_PRESERVING_PRIMITIVES = {
     'split',
 }
 
+# These elementwise arithmetic ops perform linear scaling or shifting.
+_LINEAR_ARITHMETIC_PRIMITIVES = {
+    'mul',
+    'add',
+    'sub',
+    'div',
+    'neg',
+}
+
 
 GetRuleAndOpIdFn = Callable[[str], tuple[qconfig.QuantizationRule, str]]
 FakeQuantFn = Callable[[jax.Array, qarray.HowToQuantize, str | None], jax.Array]
@@ -337,11 +346,6 @@ class QuantizedOp:
     Returns:
       The fake quantized array.
     """
-    # Check if the array is already quantized in another code path.
-    fq_array = aux_data.get(array, AuxDataKey.FQ_ARRAY, None)
-    if fq_array is not None:
-      return array if fq_array == 'self' else fq_array
-
     # Only quantize float arrays.
     if array.dtype not in (jnp.float32, jnp.bfloat16):
       return array
@@ -368,37 +372,39 @@ class QuantizedOp:
 
     # 2) Handle the Non-Weight case (Activations and Constants).
 
-    # If the current operation does not quantize this input, we return a copy
-    # to avoid sharing metadata with other branches consuming the same tensor.
+    # Full precision case.
     if rule is None or rule.act_qtype is None:
-      return _copy_for_isolation(array)
+      if (
+          aux_data.get(array, AuxDataKey.FQ_ARRAY, None) is not None
+          or aux_data.get(array, AuxDataKey.FQ_RULE, None) is not None
+      ):
+        # Copy and isolate if the input carries any quantization metadata.
+        return _copy_for_isolation(array)
+      else:
+        # No quantization metadata, return as is.
+        return array
 
+    # Quantized case.
     # Determine the effective rule to use.
     previous_rule = aux_data.get(array, AuxDataKey.FQ_RULE, None)
-    if previous_rule is not None:
-      # Delayed Quantization: use producer's rule. No copy needed because
-      # all consumers agree on this rule.
-      effective_rule = previous_rule
-      needs_copy = False
-    else:
-      # Immediate Quantization (Fallback): use current consumer's rule.
-      # For both activations (that lacked a producer rule) and non-weight/
-      # non-activation tensors (like constants), we fall back to using the
-      # activation quantization rule of the current operation (specifically
-      # act_qtype, act_batch_axes, and act_calibration_method) to ensure
-      # compatibility with the operation's execution.
-      # We need to copy to protect shared tensors from metadata leakage.
-      effective_rule = rule
-      needs_copy = True
-
+    effective_rule = previous_rule if previous_rule is not None else rule
     # If the effective rule does not have an activation quantization type,
     # return as is.
     if effective_rule.act_qtype is None:
       return array
 
-    # Apply copying if needed for isolation.
-    if needs_copy:
-      array = _copy_for_isolation(array)
+    # See if we can reuse cached FQ_ARRAY from a sibling branch.
+    fq_array = aux_data.get(array, AuxDataKey.FQ_ARRAY, None)
+    if fq_array is not None:
+      if fq_array == 'self':
+        # If the current tensor is already physically fake quantized, return.
+        return array
+      elif aux_data.get(fq_array, AuxDataKey.FQ_RULE, None) == effective_rule:
+        # If fq_array was quantized using the same effective rule, reuse.
+        return fq_array
+      else:
+        # If not, copy and isolate.
+        array = _copy_for_isolation(array)
 
     # Proceed with quantization.
     if not effective_rule.act_static_scale:
@@ -416,6 +422,8 @@ class QuantizedOp:
     )
 
     fq_array = self._fake_quant_fn(array, how, quant_stat_name)
+    # Track rule for the matched checks in subsequent ops.
+    aux_data.set(fq_array, AuxDataKey.FQ_RULE, effective_rule)
     aux_data.set(array, AuxDataKey.FQ_ARRAY, fq_array)
     return fq_array
 
@@ -523,31 +531,72 @@ class FinalOutput(QuantizedOp):
     return self._maybe_fake_quant(x, previous_rule, op_id)
 
 
-def _forward_metadata(inputs: Any, outputs: Any, is_value_preserving_op: bool):
+def _forward_metadata(
+    inputs: Any,
+    outputs: Any,
+    primitive_name: str | None = None,
+):
   """Forwards metadata from inputs to outputs.
 
   Args:
     inputs: The input value(s) of the op, could be a pytree.
     outputs: The output value(s) of the op, could be a pytree.
-    is_value_preserving_op: Whether the op preserves the value.
+    primitive_name: The name of the JAX primitive being executed. If None, the
+      operation defaults to value-preserving (transparent) propagation.
 
-  Metadata propagation rules:
-  1. AuxDataKey.IS_ACTIVATION: Propagated if ANY input is an activation (Union).
-     This tracks data provenance - if data comes from an activation, it remains
-     an activation regardless of the operation.
+  Metadata propagation categories:
+  1. Value-Preserving Operations (e.g., reshape, transpose, slice):
+     Propagates all metadata tags verbatim because they only affect tensor
+       layout
+     or indexing, not the underlying numerical values.
+     - AuxDataKey.IS_ACTIVATION (Union: if any input is activation)
+     - AuxDataKey.WEIGHT_NAME (if uniquely identifying a single weight)
+     - AuxDataKey.FQ_RULE
+     - AuxDataKey.FIXED_RANGE
+     - AuxDataKey.ALLOW_FUSION
+     - AuxDataKey.FQ_ARRAY (Intersection: if all activation inputs are
+       quantized)
 
-  2. AuxDataKey.WEIGHT_NAME, AuxDataKey.FQ_RULE, AuxDataKey.FIXED_RANGE,
-     AuxDataKey.ALLOW_FUSION: Propagated ONLY for value-preserving ops (e.g.
-     reshape, transpose).
-     These keys are "value-preserving" because they describe properties of the
-     specific tensor values (e.g. "this tensor is weight 'w'", "this tensor has
-     range X"). If the values change (e.g. add 1), these properties are lost.
+  2. Elementwise Linear Arithmetic Operations (e.g., mul, add, sub, div, neg):
+     Consumes exactly one activation input (where others are static bounds or
+     constants). For non-commutative operations like `div`, only linear paths
+     (`activation / const`) propagate metadata; reciprocal paths (`const /
+       activation`)
+     are treated as non-linear. Propagates structural quantization intent while
+     stripping specific value-bound ranges or keys.
+     - AuxDataKey.IS_ACTIVATION (Union)
+     - AuxDataKey.FQ_RULE
+     - AuxDataKey.ALLOW_FUSION
 
-  3. AuxDataKey.FQ_ARRAY: Propagated if ALL activation inputs share the same
-     FQ array (Intersection) AND the op is value-preserving.
-     This ensures we don't accidentally treat a mixed or modified value as
-     already quantized.
+  3. Value-Changing / General Operations (Default fallback):
+     Any other operation (e.g., non-linear activations or multi-activation ops).
+     Safely strips all quantization rules and fusion allowances to prevent rule
+     leakage. Propagates only data provenance:
+     - AuxDataKey.IS_ACTIVATION (Union)
   """
+  is_value_preserving_op = (
+      primitive_name in _VALUE_PRESERVING_PRIMITIVES
+      if primitive_name is not None
+      else True
+  )
+
+  is_linear_scaling_op = False
+  if primitive_name in _LINEAR_ARITHMETIC_PRIMITIVES:
+    leaves = jax.tree.leaves(inputs)
+    activation_leaves = [
+        x
+        for x in leaves
+        if isinstance(x, jax.Array)
+        and aux_data.get(x, AuxDataKey.IS_ACTIVATION, False)
+    ]
+    if len(activation_leaves) == 1:
+      is_linear_scaling_op = True
+      if primitive_name == 'div' and len(leaves) >= 2:
+        # For division, only `activation / const` is linear scaling.
+        # `const / activation` is non-linear and should not propagate metadata.
+        if aux_data.get(leaves[1], AuxDataKey.IS_ACTIVATION, False):
+          is_linear_scaling_op = False
+
   metadata = {}
   is_activation = False
   all_args_quantized = True
@@ -573,6 +622,12 @@ def _forward_metadata(inputs: Any, outputs: Any, is_value_preserving_op: bool):
           weight_names.add(val)
         else:
           # Last wins for value dependent metadata.
+          metadata[key] = val
+    # For linear scaling ops, propagate ONLY FQ_RULE and ALLOW_FUSION.
+    elif is_linear_scaling_op:
+      for key in (AuxDataKey.FQ_RULE, AuxDataKey.ALLOW_FUSION):
+        val = aux_data.get(arg, key, None)
+        if val is not None:
           metadata[key] = val
 
   # Set IS_ACTIVATION if at least one arg is activation.
@@ -604,7 +659,7 @@ class Dropout(QuantizedOp):
 
   def __call__(self, *args, **kwargs):
     out = self._call_original_op(*args, **kwargs)
-    _forward_metadata(args[self.input_idx[0]], out, is_value_preserving_op=True)
+    _forward_metadata(args[self.input_idx[0]], out)
     return out
 
 
@@ -621,11 +676,7 @@ class PrimitiveBindOp(QuantizedOp):
 
   def __call__(self, primitive, *args, **params):
     out = self._call_original_op(primitive, *args, **params)
-    _forward_metadata(
-        args,
-        out,
-        is_value_preserving_op=primitive.name in _VALUE_PRESERVING_PRIMITIVES,
-    )
+    _forward_metadata(args, out, primitive_name=primitive.name)
     return out
 
 
