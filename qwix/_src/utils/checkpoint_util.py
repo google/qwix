@@ -13,17 +13,36 @@
 # limitations under the License.
 """Utilities for handling checkpoints and prequantized parameters."""
 
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 from absl import logging
 import flax
 from flax import nnx
 import jax
 from jax import numpy as jnp
+from qwix._src import qconfig
 from qwix._src.core import qarray
+from qwix._src.providers import qt
 from qwix._src.utils import flax_util
 
 _PREQUANTIZED_ARRAY_LEAF_NAMES = frozenset(('qvalue', 'scale', 'zero_point'))
+
+
+def _is_leaf(path, x):
+  """Checks if x is a pre-quantized leaf.
+
+  Stop at dicts that contain the 'qvalue' key. This identifies them
+  as pre-quantized weight payloads.
+
+  Args:
+    path: The parameter path. Unused.
+    x: The value to check.
+
+  Returns:
+    True if x is a pre-quantized leaf, False otherwise.
+  """
+  del path
+  return isinstance(x, dict) and 'qvalue' in x
 
 
 def _get_template_field(obj: Any, field_name: str) -> Any:
@@ -330,7 +349,7 @@ def _resolve_template_param(
 
 
 def process_prequantized_params(
-    checkpoint_params: Any,
+    checkpoint_params: Mapping[str, Any],
     template_params: Any,
     *,
     allow_extra_params: bool = False,
@@ -358,22 +377,6 @@ def process_prequantized_params(
         'process_prequantized_params only supports NNX PTQ/QT models. Got'
         f' {type(template_params)}.'
     )
-
-  def _is_leaf(path, x):
-    """Checks if x is a pre-quantized leaf.
-
-    Stop at dicts that contain the 'qvalue' key. This identifies them
-    as pre-quantized weight payloads.
-
-    Args:
-      path: The parameter path. Unused.
-      x: The value to check.
-
-    Returns:
-      True if x is a pre-quantized leaf, False otherwise.
-    """
-    del path
-    return isinstance(x, dict) and 'qvalue' in x
 
   # Value: QArray(Case 1) or a JAX array(Case 2 and 3).
   flat_processed = {}
@@ -461,3 +464,92 @@ def process_prequantized_params(
   #   - Case 2: <jax.Array>
   #   - Case 3: <jax.Array>
   return nnx.to_pure_dict(nnx.state(nested_processed))
+
+
+_DEFAULT_ACT_QTYPE = object()
+
+
+def restore_quantization_rules(
+    checkpoint_params: Mapping[str, Any],
+    rule_type: type[qconfig.QuantizationRule] | type[qt.QtRule],
+    *,
+    tile_size: int,
+    act_qtype: jax.typing.DTypeLike | None | object = _DEFAULT_ACT_QTYPE,
+    **kwargs,
+) -> list[qconfig.QuantizationRule | qt.QtRule]:
+  """Restores quantization rules from pre-quantized checkpoint.
+
+  Args:
+    checkpoint_params: A nested dict matching NNX state paths (without `.value`
+      suffixes). Leaves must be either a `jax.Array` or a dict containing
+      `'qvalue'`, `'scale'`, and optional `'zero_point'`.
+    rule_type: The type of quantization rule, either `qconfig.QuantizationRule`
+      or `qt.QtRule`.
+    tile_size: The tile size for subchannel quantization.
+    act_qtype: The quantized type for activations. If not specified, it defaults
+      to the quantized type for weights inferred from the checkpoint.
+    **kwargs: Additional keyword arguments for the quantization rule.
+
+  Returns:
+    A list of `qconfig.QuantizationRule | qt.QtRule` objects.
+  """
+  rules = {}
+  flat_checkpoint = flax.traverse_util.flatten_dict(
+      checkpoint_params, is_leaf=_is_leaf
+  )
+  for path, checkpoint_param in flat_checkpoint.items():
+    # Skip non-quantized parameters.
+    if (
+        not isinstance(checkpoint_param, dict)
+        or 'qvalue' not in checkpoint_param
+    ):
+      continue
+
+    # Remove optional 'array' suffix and parameter name from the path, and
+    # replace numeric indices with wildcards.
+    module_path_tuple = path
+    if module_path_tuple and module_path_tuple[-1] == 'array':
+      module_path_tuple = module_path_tuple[:-1]
+    if module_path_tuple:
+      module_path_tuple = module_path_tuple[:-1]
+    module_path_parts = []
+    for part in module_path_tuple:
+      if isinstance(part, int):
+        module_path_parts.append('[^/]+')
+      else:
+        module_path_parts.append(str(part))
+    module_path = '/'.join(module_path_parts)
+
+    # Infer weight quantized type and calibration method.
+    qvalue = checkpoint_param['qvalue']
+    weight_qtype = qvalue.dtype
+    if act_qtype is _DEFAULT_ACT_QTYPE:
+      resolved_act_qtype = weight_qtype
+    else:
+      resolved_act_qtype = cast(jax.typing.DTypeLike | None, act_qtype)
+    zero_point = checkpoint_param.get('zero_point')
+    if zero_point is not None:
+      weight_calibration_method = 'minmax'
+    else:
+      weight_calibration_method = 'absmax'
+
+    # Generate quantization rule.
+    rule = rule_type(
+        module_path=module_path,
+        weight_qtype=weight_qtype,
+        act_qtype=resolved_act_qtype,
+        weight_calibration_method=weight_calibration_method,
+        tile_size=tile_size,
+        **kwargs,
+    )
+    if module_path in rules:
+      if rules[module_path] != rule:
+        logging.warning(
+            'Conflicting quantization rules reconstructed for %s. Existing:'
+            ' %s, New: %s. The existing rule will be overwritten.',
+            module_path,
+            rules[module_path],
+            rule,
+        )
+    rules[module_path] = rule
+  return list(rules.values())

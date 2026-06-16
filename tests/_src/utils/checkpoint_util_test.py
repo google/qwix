@@ -13,6 +13,7 @@
 # limitations under the License.
 import os
 from typing import Any
+from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -750,6 +751,245 @@ class PrequantizedQtTest(parameterized.TestCase):
 
     self.assertEqual(list(kernel_array.devices()), [jax.devices()[0]])
     self.assertEqual(list(bias_array.devices()), [jax.devices()[0]])
+
+
+class RestoreQuantizationRulesTest(parameterized.TestCase):
+
+  def test_restore_rules_linear(self):
+    checkpoint_params = {
+        "kernel": {
+            "qvalue": jnp.ones((4, 4), dtype=jnp.int8),
+            "scale": jnp.ones((1, 4), dtype=jnp.float32),
+        },
+        "bias": jnp.zeros((4,), dtype=jnp.float32),
+    }
+    rules = checkpoint_util.restore_quantization_rules(
+        checkpoint_params, qconfig.QuantizationRule, tile_size=4
+    )
+    expected_rules = [
+        qconfig.QuantizationRule(
+            module_path="",
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+            weight_calibration_method="absmax",
+            tile_size=4,
+        )
+    ]
+    self.assertEqual(rules, expected_rules)
+
+  def test_restore_rules_nested(self):
+    checkpoint_params = {
+        "dense1": {
+            "kernel": {
+                "qvalue": jnp.ones((4, 4), dtype=jnp.int8),
+                "scale": jnp.ones((1, 4), dtype=jnp.float32),
+            }
+        },
+        "dense2": {
+            "kernel": {
+                "qvalue": jnp.ones((4, 4), dtype=jnp.int16),
+                "scale": jnp.ones((1, 4), dtype=jnp.float32),
+            }
+        },
+    }
+    rules = checkpoint_util.restore_quantization_rules(
+        checkpoint_params, qconfig.QuantizationRule, tile_size=4
+    )
+    expected_rules = [
+        qconfig.QuantizationRule(
+            module_path="dense1",
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+            weight_calibration_method="absmax",
+            tile_size=4,
+        ),
+        qconfig.QuantizationRule(
+            module_path="dense2",
+            weight_qtype=jnp.int16,
+            act_qtype=jnp.int16,
+            weight_calibration_method="absmax",
+            tile_size=4,
+        ),
+    ]
+    rules = sorted(rules, key=lambda r: r.module_path)
+    expected_rules = sorted(expected_rules, key=lambda r: r.module_path)
+    self.assertEqual(rules, expected_rules)
+
+  def test_restore_rules_wildcards_override(self):
+    checkpoint_params = {
+        "layers": {
+            0: {
+                "kernel": {
+                    "qvalue": jnp.ones((4, 4), dtype=jnp.int4),
+                    "scale": jnp.ones((1, 4), dtype=jnp.float32),
+                }
+            },
+            1: {
+                "kernel": {
+                    "qvalue": jnp.ones((4, 4), dtype=jnp.int8),
+                    "scale": jnp.ones((1, 4), dtype=jnp.float32),
+                }
+            },
+        }
+    }
+    with mock.patch.object(checkpoint_util.logging, "warning") as mock_warning:
+      rules = checkpoint_util.restore_quantization_rules(
+          checkpoint_params, qconfig.QuantizationRule, tile_size=4
+      )
+    mock_warning.assert_called_once_with(
+        "Conflicting quantization rules reconstructed for %s. Existing: %s,"
+        " New: %s. The existing rule will be overwritten.",
+        "layers/[^/]+",
+        qconfig.QuantizationRule(
+            module_path="layers/[^/]+",
+            weight_qtype=jnp.int4,
+            act_qtype=jnp.int4,
+            weight_calibration_method="absmax",
+            tile_size=4,
+        ),
+        qconfig.QuantizationRule(
+            module_path="layers/[^/]+",
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+            weight_calibration_method="absmax",
+            tile_size=4,
+        ),
+    )
+    expected_rules = [
+        qconfig.QuantizationRule(
+            module_path="layers/[^/]+",
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+            weight_calibration_method="absmax",
+            tile_size=4,
+        )
+    ]
+    self.assertEqual(rules, expected_rules)
+
+  def test_restore_rules_wildcards_no_override(self):
+    checkpoint_params = {
+        "layers": {
+            0: {
+                "kernel": {
+                    "qvalue": jnp.ones((4, 4), dtype=jnp.int8),
+                    "scale": jnp.ones((1, 4), dtype=jnp.float32),
+                }
+            },
+            1: {
+                "kernel": {
+                    "qvalue": jnp.ones((4, 4), dtype=jnp.int8),
+                    "scale": jnp.ones((1, 4), dtype=jnp.float32),
+                }
+            },
+        }
+    }
+    with mock.patch.object(checkpoint_util.logging, "warning") as mock_warning:
+      rules = checkpoint_util.restore_quantization_rules(
+          checkpoint_params, qconfig.QuantizationRule, tile_size=4
+      )
+    mock_warning.assert_not_called()
+    expected_rules = [
+        qconfig.QuantizationRule(
+            module_path="layers/[^/]+",
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+            weight_calibration_method="absmax",
+            tile_size=4,
+        )
+    ]
+    self.assertEqual(rules, expected_rules)
+
+  def test_restore_rules_no_act(self):
+    checkpoint_params = {
+        "kernel": {
+            "qvalue": jnp.ones((4, 4), dtype=jnp.int8),
+            "scale": jnp.ones((1, 4), dtype=jnp.float32),
+        }
+    }
+    rules = checkpoint_util.restore_quantization_rules(
+        checkpoint_params, qconfig.QuantizationRule, tile_size=4, act_qtype=None
+    )
+    expected_rules = [
+        qconfig.QuantizationRule(
+            module_path="",
+            weight_qtype=jnp.int8,
+            act_qtype=None,
+            weight_calibration_method="absmax",
+            tile_size=4,
+        )
+    ]
+    self.assertEqual(rules, expected_rules)
+
+  def test_restore_rules_custom_act(self):
+    checkpoint_params = {
+        "kernel": {
+            "qvalue": jnp.ones((4, 4), dtype=jnp.int8),
+            "scale": jnp.ones((1, 4), dtype=jnp.float32),
+        }
+    }
+    rules = checkpoint_util.restore_quantization_rules(
+        checkpoint_params,
+        qconfig.QuantizationRule,
+        tile_size=4,
+        act_qtype=jnp.uint8,
+    )
+    expected_rules = [
+        qconfig.QuantizationRule(
+            module_path="",
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.uint8,
+            weight_calibration_method="absmax",
+            tile_size=4,
+        )
+    ]
+    self.assertEqual(rules, expected_rules)
+
+  def test_restore_rules_asymmetric(self):
+    checkpoint_params = {
+        "kernel": {
+            "qvalue": jnp.ones((4, 4), dtype=jnp.int8),
+            "scale": jnp.ones((1, 4), dtype=jnp.float32),
+            "zero_point": jnp.zeros((1, 4), dtype=jnp.int8),
+        }
+    }
+    rules = checkpoint_util.restore_quantization_rules(
+        checkpoint_params, qconfig.QuantizationRule, tile_size=4
+    )
+    expected_rules = [
+        qconfig.QuantizationRule(
+            module_path="",
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+            weight_calibration_method="minmax",
+            tile_size=4,
+        )
+    ]
+    self.assertEqual(rules, expected_rules)
+
+  def test_restore_rules_qt(self):
+    checkpoint_params = {
+        "kernel": {
+            "qvalue": jnp.ones((4, 4), dtype=jnp.int8),
+            "scale": jnp.ones((1, 4), dtype=jnp.float32),
+        }
+    }
+    rules = checkpoint_util.restore_quantization_rules(
+        checkpoint_params,
+        qt.QtRule,
+        tile_size=4,
+        bwd_qtype=jnp.int8,
+    )
+    expected_rules = [
+        qt.QtRule(
+            module_path="",
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+            weight_calibration_method="absmax",
+            tile_size=4,
+            bwd_qtype=jnp.int8,
+        )
+    ]
+    self.assertEqual(rules, expected_rules)
 
 
 if __name__ == "__main__":
