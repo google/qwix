@@ -36,7 +36,7 @@ def get_how_to_quantize(
   """Get how to quantize from dimension_numbers and remaining_dims.
 
   By default, use channelwise for all non-contraction axes, and subchannel
-  for the first contraction axes if a tile_size is given.
+  for the innermost (last) contraction axis if a tile_size is given.
 
   Args:
     dimension_numbers: The dimension numbers passed to dot_general.
@@ -44,7 +44,8 @@ def get_how_to_quantize(
     for_lhs: Whether to quantize lhs or rhs.
     tile_size: The tile size for subchannel quantization. If the tile_size is a
       Mapping, then this uses the tiling specified by tile_size. Otherwise this
-      is interpreted as the tile size for the first axis in contracting_axes.
+      is interpreted as the tile size for the innermost (last) axis in
+      contracting_axes.
     **kwargs: Additional keyword arguments to HowToQuantize.
 
   Returns:

@@ -53,7 +53,8 @@ class QuantizationRule:
   # If set, quantize the activations to the given type.
   act_qtype: jax.typing.DTypeLike | None = None
 
-  # If set, enable subchannel for the contraction axis with the given tile size.
+  # If set, enable subchannel for the innermost (last) contraction axis with the
+  # given tile size.
   # If it's a float, it must be "1 / tile_count" and the actual tile size will
   # be round(axis_size * tile_size).
   tile_size: int | float | None = None

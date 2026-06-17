@@ -35,7 +35,7 @@ def get_how_to_quantize(
   """Get how to quantize from an einsum string.
 
   By default, use channelwise for all non-contraction axes, and subchannel for
-  contraction axes if a tile_size is given.
+  the innermost (last) contraction axis if a tile_size is given.
 
   Args:
     einsum_str: The einsum string.

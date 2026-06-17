@@ -40,9 +40,10 @@ class QtRule(qconfig.QuantizationRule):
   # In backward pass, calibrate the gradients using the given method.
   bwd_calibration_method: str = 'absmax'
 
-  # In backward pass, enable subchannel for contraction axes when calculating
-  # the gradient of weights. Note that the tiling is actually applied to the
-  # the incoming gradient and the residual activation rather than any "weight".
+  # In backward pass, enable subchannel for the innermost (last) contraction
+  # axis when calculating the gradient of weights. Note that the tiling is
+  # actually applied to the incoming gradient and the residual activation
+  # rather than any "weight".
   bwd_weight_grad_tile_size: int | float | None = None
 
   # If True, disable channelwise axes for both forward and backward passes.
