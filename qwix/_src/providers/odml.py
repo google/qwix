@@ -27,6 +27,7 @@ from qwix._src import aux_data
 from qwix._src import averaging
 from qwix._src import interception
 from qwix._src import qconfig
+from qwix._src.core import einsum_info
 from qwix._src.core import qarray
 from qwix._src.providers import odml_ops
 from qwix._src.utils import flax_util
@@ -380,6 +381,10 @@ class OdmlConversionProvider(OdmlQatProvider):
         self._flatten_dot_general,
         _dot_general=intercept_map['jax.lax.dot_general'],
     )
+    intercept_map['jax.numpy.einsum'] = functools.partial(
+        self._flatten_einsum,
+        _einsum=intercept_map['jax.numpy.einsum'],
+    )
     return intercept_map
 
   def _flatten_dot_general(self, *args, _dot_general, **kwargs):
@@ -393,10 +398,145 @@ class OdmlConversionProvider(OdmlQatProvider):
     ):
       args = list(args)
       dout = args[1].shape[1:]
+      original_weight = args[1]
       args[1] = jax.lax.reshape(args[1], (args[1].shape[0], np.prod(dout)))
+      odml_ops.forward_metadata(original_weight, args[1])
       out = _dot_general(*args, **kwargs)
-      return jax.lax.reshape(out, out.shape[:-1] + dout)
+      res = jax.lax.reshape(out, out.shape[:-1] + dout)
+      odml_ops.forward_metadata(out, res)
+      return res
     return _dot_general(*args, **kwargs)
+
+  def _flatten_einsum(self, *args, _einsum, **kwargs):
+    """Flatten 3D RHS weights to 2-D when contracting in the middle.
+
+    This handles a limited einsum family:
+      ...D,NDH->...NH
+
+    Examples include 'TD,NDH->TNH', 'BTD,NDH->BTNH', 'BSTD,NDH->BSTNH', etc.,
+    where LHS may have any number of non-contracting dimensions.
+
+    Args:
+      *args: Positional arguments to the original einsum operation.
+      _einsum: The original einsum function being intercepted.
+      **kwargs: Keyword arguments to the original einsum operation.
+
+    Returns:
+      The result of the einsum operation.
+    """
+
+    if len(args) == 3:
+      einsum_str, lhs, rhs = args
+      weight_name = aux_data.get(rhs, odml_ops.AuxDataKey.WEIGHT_NAME, None)
+      if (
+          isinstance(einsum_str, str)
+          and weight_name is not None
+          and rhs.ndim == 3
+      ):
+        try:
+          info = einsum_info.EinsumInfo.parse(
+              einsum_str, ndims=(lhs.ndim, rhs.ndim)
+          )
+        except (NotImplementedError, ValueError):
+          return _einsum(*args, **kwargs)
+        if (
+            info.lhs
+            and len(info.rhs) == 3
+            and len(info.contract_chars) == 1
+            and info.contract_chars[0] == info.lhs[-1]
+            and not info.batch_chars
+        ):
+          contract_char = info.contract_chars[0]
+          if contract_char in info.rhs:
+            contract_idx = info.rhs.index(contract_char)
+            non_contract_axes = [i for i in (0, 1, 2) if i != contract_idx]
+            expected_out_chars = (
+                info.lhs[:-1]
+                + info.rhs[non_contract_axes[0]]
+                + info.rhs[non_contract_axes[1]]
+            )
+            # We allow the output to be a permutation of the expected output.
+            # E.g., ...F, NHF -> ...HN (instead of ...NH).
+            if set(info.out) == set(expected_out_chars):
+              # Matches 3D RHS weight. Rewrite as matmul:
+              #   lhs (..., D) -> (prod(...), D)
+              #   rhs (N, D, H) -> (D, N*H) (or transposed equivalent)
+              # and then reshape the output back to (..., N, H).
+              transpose_perm = (
+                  contract_idx,
+                  non_contract_axes[0],
+                  non_contract_axes[1],
+              )
+              args = list(args)
+              args[1] = jax.lax.reshape(
+                  lhs, (int(np.prod(lhs.shape[:-1])), lhs.shape[-1])
+              )
+              odml_ops.forward_metadata(lhs, args[1])
+
+              # Forward Propagation: If lhs already has a quantized
+              # tracer cached (FQ_ARRAY) from a sibling branch, reshape
+              # it to match args[1] shape and cache it on args[1].
+              fq_lhs = aux_data.get(lhs, odml_ops.AuxDataKey.FQ_ARRAY, None)
+              if fq_lhs is not None:
+                if isinstance(fq_lhs, str) and fq_lhs == 'self':
+                  aux_data.set(args[1], odml_ops.AuxDataKey.FQ_ARRAY, 'self')
+                else:
+                  fq_lhs_2d = jax.lax.reshape(
+                      fq_lhs, (int(np.prod(lhs.shape[:-1])), lhs.shape[-1])
+                  )
+                  odml_ops.forward_metadata(fq_lhs, fq_lhs_2d)
+                  aux_data.set(args[1], odml_ops.AuxDataKey.FQ_ARRAY, fq_lhs_2d)
+
+              args[2] = jax.lax.reshape(
+                  jax.lax.transpose(rhs, transpose_perm),
+                  (
+                      rhs.shape[contract_idx],
+                      rhs.shape[non_contract_axes[0]]
+                      * rhs.shape[non_contract_axes[1]],
+                  ),
+              )
+              odml_ops.forward_metadata(rhs, args[2])
+              aux_data.set(
+                  args[2],
+                  odml_ops.AuxDataKey.FLATTENED_EINSUM_PERM,
+                  transpose_perm,
+              )
+              out = _einsum('ab,bc->ac', args[1], args[2], **kwargs)
+
+              # Backward Propagation: If lhs was not already quantized
+              # (meaning we are the first sibling to run), the _einsum
+              # call fake-quantized args[1] and cached it as FQ_ARRAY.
+              # We reshape it back to lhs shape and cache it on lhs so
+              # sibling branches can reuse it.
+              if fq_lhs is None:
+                fq_lhs_2d = aux_data.get(
+                    args[1], odml_ops.AuxDataKey.FQ_ARRAY, None
+                )
+                if fq_lhs_2d is not None:
+                  if isinstance(fq_lhs_2d, str) and fq_lhs_2d == 'self':
+                    aux_data.set(lhs, odml_ops.AuxDataKey.FQ_ARRAY, 'self')
+                  else:
+                    fq_lhs_3d = jax.lax.reshape(fq_lhs_2d, lhs.shape)
+                    odml_ops.forward_metadata(fq_lhs_2d, fq_lhs_3d)
+                    aux_data.set(lhs, odml_ops.AuxDataKey.FQ_ARRAY, fq_lhs_3d)
+
+              res = jax.lax.reshape(
+                  out,
+                  lhs.shape[:-1]
+                  + (
+                      rhs.shape[non_contract_axes[0]],
+                      rhs.shape[non_contract_axes[1]],
+                  ),
+              )
+              # If the output layout in info.out is a permutation of the
+              # expected layout, transpose the result to match info.out.
+              if info.out != expected_out_chars:
+                perm = tuple(expected_out_chars.index(c) for c in info.out)
+                res = jax.lax.transpose(res, perm)
+              odml_ops.forward_metadata(out, res)
+              return res
+
+    return _einsum(*args, **kwargs)
 
   def _fake_quant(
       self,
@@ -414,12 +554,25 @@ class OdmlConversionProvider(OdmlQatProvider):
         assert quant_stat_name is None
         mdl_path = flax_util.get_current_module_path()
         weight = self._flatten_params[mdl_path + (weight_name,)]
-        if weight.shape != array.shape:  # when _flatten_dot_general is used.
+        flattened_perm = aux_data.get(
+            array, odml_ops.AuxDataKey.FLATTENED_EINSUM_PERM, None
+        )
+        if flattened_perm is not None:
+          # Apply the same layout as _flatten_einsum to the static weight.
+          weight = jax.lax.reshape(
+              jax.lax.transpose(weight, flattened_perm), array.shape
+          )
+        elif weight.shape != array.shape:  # when _flatten_dot_general is used.
           weight = weight.reshape(array.shape)
         calibration = qarray.calibrate(weight, how)
         scale, zp = qarray.compute_scale_zero_point(calibration, how.qtype)
       elif quant_stat_name is not None:  # Static-range activations.
         scale, zp = self._compute_static_scale_zero_point(how, quant_stat_name)
+        # Match scale/zp rank to the activation flattened by _flatten_einsum.
+        if scale.ndim != array.ndim and scale.size == 1:
+          scale = scale.reshape((1,) * array.ndim)
+        if zp is not None and zp.ndim != array.ndim and zp.size == 1:
+          zp = zp.reshape((1,) * array.ndim)
       else:  # Dynamic-range activations.
         scale, zp = None, None
 
