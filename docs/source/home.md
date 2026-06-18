@@ -31,6 +31,7 @@ research and production.
 *   Supported algorithms:
     *   [GPTQ](gptq.md)
     *   [AWQ](awq.md) (Activation-aware Weight Quantization)
+    *   [SmoothQuant](smooth_quant.md)
 *   Supported numerics:
     *   Native: `int4`, `int8`, `fp8`.
     *   Emulated: `int1` to `int7`, `nf4`.

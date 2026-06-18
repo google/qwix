@@ -38,4 +38,5 @@ providers.md
 
 gptq.md
 awq.md
+smooth_quant.md
 ```
