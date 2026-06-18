@@ -30,6 +30,7 @@ research and production.
     *   LoRA/QLoRA: this mode enables LoRA and QLoRA on a model.
 *   Supported algorithms:
     *   [GPTQ](gptq.md)
+    *   [AWQ](awq.md) (Activation-aware Weight Quantization)
 *   Supported numerics:
     *   Native: `int4`, `int8`, `fp8`.
     *   Emulated: `int1` to `int7`, `nf4`.

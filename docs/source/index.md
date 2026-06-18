@@ -37,4 +37,5 @@ providers.md
 :caption: Supported Algorithms
 
 gptq.md
+awq.md
 ```
