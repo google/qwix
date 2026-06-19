@@ -148,6 +148,9 @@ class AuxDataKey(str, enum.Enum):
   # softmax.
   FIXED_RANGE = 'fixed_range'  # tuple[float, float]
 
+  # Permutation used to flatten the einsum weight.
+  FLATTENED_EINSUM_PERM = 'flattened_einsum_perm'  # tuple[int, ...]
+
 
 # Metadata keys that depend on the value being preserved.
 # If the value changes (e.g. add, mul), these keys become invalid.
@@ -156,6 +159,7 @@ _VALUE_DEPENDENT_METADATA = (
     AuxDataKey.FQ_RULE,
     AuxDataKey.FIXED_RANGE,
     AuxDataKey.ALLOW_FUSION,
+    AuxDataKey.FLATTENED_EINSUM_PERM,
 )
 
 # These ops only change the tensor view or layout, not the values.
@@ -214,6 +218,15 @@ def _copy_for_isolation(original_array: jax.Array) -> jax.Array:
     aux_data.set(array_copy, AuxDataKey.FIXED_RANGE, fixed_range)
   if aux_data.get(original_array, AuxDataKey.ALLOW_FUSION, False):
     aux_data.set(array_copy, AuxDataKey.ALLOW_FUSION, True)
+  flattened_einsum_perm = aux_data.get(
+      original_array, AuxDataKey.FLATTENED_EINSUM_PERM, None
+  )
+  if flattened_einsum_perm is not None:
+    aux_data.set(
+        array_copy,
+        AuxDataKey.FLATTENED_EINSUM_PERM,
+        flattened_einsum_perm,
+    )
   return array_copy
 
 
@@ -346,6 +359,7 @@ class QuantizedOp:
     Returns:
       The fake quantized array.
     """
+
     # Only quantize float arrays.
     if array.dtype not in (jnp.float32, jnp.bfloat16):
       return array
@@ -396,7 +410,7 @@ class QuantizedOp:
     # See if we can reuse cached FQ_ARRAY from a sibling branch.
     fq_array = aux_data.get(array, AuxDataKey.FQ_ARRAY, None)
     if fq_array is not None:
-      if fq_array == 'self':
+      if isinstance(fq_array, str) and fq_array == 'self':
         # If the current tensor is already physically fake quantized, return.
         return array
       elif aux_data.get(fq_array, AuxDataKey.FQ_RULE, None) == effective_rule:
@@ -531,7 +545,7 @@ class FinalOutput(QuantizedOp):
     return self._maybe_fake_quant(x, previous_rule, op_id)
 
 
-def _forward_metadata(
+def forward_metadata(
     inputs: Any,
     outputs: Any,
     primitive_name: str | None = None,
@@ -659,7 +673,7 @@ class Dropout(QuantizedOp):
 
   def __call__(self, *args, **kwargs):
     out = self._call_original_op(*args, **kwargs)
-    _forward_metadata(args[self.input_idx[0]], out)
+    forward_metadata(args[self.input_idx[0]], out)
     return out
 
 
@@ -676,7 +690,7 @@ class PrimitiveBindOp(QuantizedOp):
 
   def __call__(self, primitive, *args, **params):
     out = self._call_original_op(primitive, *args, **params)
-    _forward_metadata(args, out, primitive_name=primitive.name)
+    forward_metadata(args, out, primitive_name=primitive.name)
     return out
 
 
