@@ -17,8 +17,13 @@ This comes below the QArray abstraction and operates at the Array level.
 """
 
 import dataclasses
+from typing import overload
 
+import jax
 import jax.numpy as jnp
+import qwix.contrib.hijax.hiquant_utils as hq_utils
+
+JSlice = jax._src.indexing.Slice  # pylint: disable=protected-access
 
 
 @dataclasses.dataclass(frozen=True)
@@ -54,16 +59,16 @@ class QuantizationMetadata:
       cls,
       data_shape: tuple[int, ...],
       quant_info: dict[int, int],
-      original_dtype: jnp.dtype,
-      quantized_dtype: jnp.dtype,
+      dtype: jnp.dtype,
+      qtype: jnp.dtype,
   ):
     """Initializes the quantization metadata for an array.
 
     Args:
       data_shape: The shape of the original array.
       quant_info: A dictionary of quantization axes to group sizes.
-      original_dtype: The dtype of the original array.
-      quantized_dtype: The dtype of the quantized array.
+      dtype: The dtype of the original array.
+      qtype: The dtype of the quantized array.
 
     Returns:
       The quantization metadata for the array.
@@ -100,8 +105,30 @@ class QuantizationMetadata:
         quant_compatible_shape,
         tiled_reduction_axes,
         full_reduction_axes,
-        original_dtype,
-        quantized_dtype,
+        dtype,
+        qtype,
+    )
+
+  @classmethod
+  def init_from_qvalue_and_scales(cls, qvalue: jax.Array, scales: jax.Array):
+    """Initializes the quantization metadata for an array from the quantized value and scales."""
+    dtype = scales.dtype
+    qtype = qvalue.dtype
+    data_shape = qvalue.shape
+    quant_axes = tuple([
+        i for i, (x, y) in enumerate(zip(qvalue.shape, scales.shape)) if x != y
+    ])
+    group_sizes = tuple([
+        x // y
+        for i, (x, y) in enumerate(zip(qvalue.shape, scales.shape))
+        if x != y
+    ])
+    quant_info = {k: v for k, v in zip(quant_axes, group_sizes)}
+    return cls.init(
+        data_shape,
+        quant_info,
+        dtype,
+        qtype,
     )
 
   @staticmethod
@@ -212,7 +239,7 @@ class QuantizationMetadata:
         out.append(xi)
     return tuple(out)
 
-  def __repr__(self):
+  def detailed_repr(self):
     quant_axes = self.quant_axes
     group_sizes = self.group_sizes
     orig_dtype = self.dtype
@@ -222,3 +249,156 @@ class QuantizationMetadata:
         f" {quant_dtype=})"
     )
     return out
+
+  def __repr__(self):
+    quant_type_str = str(jax.core.ShapedArray(self.quant_shape, self.qtype))
+
+    logical_type = jax.core.ShapedArray(self.data_shape, self.dtype)
+
+    # find the type information
+    i = quant_type_str.find("[")
+    qtype_str = quant_type_str[:i]
+    quant_shape_str = quant_type_str[i:]
+
+    out = (
+        f"QMD(logical_type={logical_type}, qtype={qtype_str},"
+        f" qshape={quant_shape_str})"
+    )
+    return out
+
+  def jaxpr_repr(self, use_zero_point: bool):
+    data_type = jax.core.ShapedArray(self.data_shape, self.qtype)
+    scale_type = jax.core.ShapedArray(self.quant_shape, self.dtype)
+    zero_point_type = jax.core.ShapedArray(self.quant_shape, self.qtype)
+    if use_zero_point:
+      out = f"{data_type}, {scale_type}, {zero_point_type}"
+    else:
+      out = f"{data_type}, {scale_type}, None"
+    return out
+
+
+# Functions that operate on Arrays
+
+
+def scale_and_round(
+    data: jax.Array,
+    scale: jax.Array,
+    zero_point: jax.Array | None,
+    metadata: QuantizationMetadata,
+    *,
+    lower: float | None = None,
+    upper: float | None = None,
+    key: jax.Array | None = None,
+    differentiable: bool = False,
+) -> jax.Array:
+  """Quantization operation."""
+  # e.g. q = clip(round(x/scale + zero_point), lower, upper)
+  start_shape = data.shape
+  uqd = data.reshape(metadata.data_compatible_shape)
+  sc = scale.reshape(metadata.quant_compatible_shape)
+  if zero_point is None:
+    out = uqd / sc
+  else:
+    zp = zero_point.reshape(metadata.quant_compatible_shape)
+    out = uqd / sc + zp
+
+  # Stochastic rounding
+  if key is not None:
+    out += jax.random.uniform(key, shape=out.shape, minval=-0.5, maxval=0.5)
+
+  out = jnp.clip(out, lower, upper)
+
+  if not differentiable:
+    if hq_utils.is_integer_dtype(metadata.qtype):
+      out = jnp.round(out)
+    out = out.astype(metadata.qtype)
+  out = out.reshape(start_shape)
+
+  return out
+
+
+def scale_and_round_inverse(
+    data: jax.Array,
+    scale: jax.Array,
+    zero_point: jax.Array | None,
+    metadata: QuantizationMetadata,
+) -> jax.Array:
+  """Basic dequantization method."""
+  # e.g. x = scale * (q - zero_point)
+  qd = data.reshape(metadata.data_compatible_shape)
+  sc = scale.reshape(metadata.quant_compatible_shape)
+  if zero_point is None:
+    out = sc * qd.astype(metadata.dtype)
+  else:
+    zp = zero_point.reshape(metadata.quant_compatible_shape)
+    out = sc * (qd.astype(metadata.dtype) - zp)
+  return out.reshape(metadata.data_shape)
+
+
+@overload
+def map_slice(slc: slice, big_shape: int, small_shape: int) -> slice:
+  ...
+
+
+@overload
+def map_slice(slc: JSlice, big_shape: int, small_shape: int) -> JSlice:
+  ...
+
+
+def map_slice(
+    slc: slice | JSlice, big_shape: int, small_shape: int
+) -> slice | JSlice:
+  """Maps a slice from a big shape to a small shape."""
+
+  use_jax_slice = isinstance(slc, JSlice)
+
+  if use_jax_slice:
+    slc = slice(slc.start, slc.start + slc.size, slc.stride)
+  assert slc.step is None or slc.step == 1, "Only unit strides supported"
+
+  # We assume that big_shape is a multiple of small_shape
+  ratio = big_shape // small_shape
+
+  num_big_elements = slc.stop - slc.start
+  if num_big_elements % ratio != 0:
+    raise ValueError("Slice size must be a multiple of ratio")
+  num_small_elements = num_big_elements // ratio
+
+  new_start = slc.start // ratio
+  new_stop = new_start + num_small_elements
+
+  if use_jax_slice:
+    return JSlice(new_start, new_stop, 1)
+  return slice(new_start, new_stop, 1)
+
+
+def map_int(i: int, big_shape: int, small_shape: int) -> int:
+  """Maps an int from a big shape to a small shape."""
+  ratio = big_shape // small_shape
+  if i % ratio != 0:
+    raise ValueError("Index must be a multiple of ratio")
+  return i // ratio
+
+
+def map_slices_over_shapes(
+    slcs: tuple[slice | JSlice, ...],
+    big_shapes: tuple[int, ...],
+    small_shapes: tuple[int, ...],
+) -> tuple[slice | JSlice, ...]:
+  """Maps a slice from a big shape to a small shape."""
+  assert len(big_shapes) == len(
+      small_shapes
+  ), "Big and small shapes must have same length"
+  return tuple(map(map_slice, slcs, big_shapes, small_shapes))  # pyrefly: ignore
+
+
+def map_ints_over_shapes(
+    ints: tuple[int, ...],
+    big_shapes: tuple[int, ...],
+    small_shapes: tuple[int, ...],
+) -> tuple[int, ...]:
+  """Maps an int from a big shape to a small shape."""
+  assert len(big_shapes) == len(
+      small_shapes
+  ), "Big and small shapes must have same length"
+  return tuple(map(map_int, ints, big_shapes, small_shapes))  # pyrefly: ignore
