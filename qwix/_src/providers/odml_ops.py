@@ -531,7 +531,7 @@ class FinalOutput(QuantizedOp):
     return self._maybe_fake_quant(x, previous_rule, op_id)
 
 
-def _forward_metadata(
+def forward_metadata(
     inputs: Any,
     outputs: Any,
     primitive_name: str | None = None,
@@ -659,7 +659,7 @@ class Dropout(QuantizedOp):
 
   def __call__(self, *args, **kwargs):
     out = self._call_original_op(*args, **kwargs)
-    _forward_metadata(args[self.input_idx[0]], out)
+    forward_metadata(args[self.input_idx[0]], out)
     return out
 
 
@@ -676,7 +676,7 @@ class PrimitiveBindOp(QuantizedOp):
 
   def __call__(self, primitive, *args, **params):
     out = self._call_original_op(primitive, *args, **params)
-    _forward_metadata(args, out, primitive_name=primitive.name)
+    forward_metadata(args, out, primitive_name=primitive.name)
     return out
 
 

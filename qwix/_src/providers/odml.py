@@ -393,9 +393,13 @@ class OdmlConversionProvider(OdmlQatProvider):
     ):
       args = list(args)
       dout = args[1].shape[1:]
+      original_weight = args[1]
       args[1] = jax.lax.reshape(args[1], (args[1].shape[0], np.prod(dout)))
+      odml_ops.forward_metadata(original_weight, args[1])
       out = _dot_general(*args, **kwargs)
-      return jax.lax.reshape(out, out.shape[:-1] + dout)
+      res = jax.lax.reshape(out, out.shape[:-1] + dout)
+      odml_ops.forward_metadata(out, res)
+      return res
     return _dot_general(*args, **kwargs)
 
   def _fake_quant(
