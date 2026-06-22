@@ -13,3 +13,11 @@ build:
 # Tell Sphinx where to find the configuration
 sphinx:
   configuration: docs/source/conf.py
+
+# Define the Python requirements for building the docs
+python:
+  install:
+    - method: pip
+      path: .
+      extra_requirements:
+        - docs
