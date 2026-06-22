@@ -139,7 +139,7 @@ def einsum(
       shapes=True,
       einsum_call=True,  # This is necessary for opt_einsum to return the contraction list.
   )
-  for contraction in contractions:  # pytype: disable=attribute-error
+  for contraction in contractions:  # pytype: disable=attribute-error # pyrefly: ignore
     # operand_indices: (0, 1), einsum_str: "ij,jk->ik"
     operand_indices, _, einsum_str = contraction[:3]
     if len(operand_indices) == 1:

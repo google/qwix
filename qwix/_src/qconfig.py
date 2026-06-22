@@ -146,7 +146,7 @@ class QuantizationProvider:
       # 1. Disable interceptions during the pallas_call factory setup.
       # 2. Wrap the returned callable so that interceptions remain disabled
       #    during deferred execution.
-      intercept_map['jax.experimental.pallas.pallas_call'] = (
+      intercept_map['jax.experimental.pallas.pallas_call'] = (  # pyrefly: ignore
           lambda *args, **kwargs: interception.disable_interceptions(
               interception.disable_interceptions(pl.pallas_call)(
                   *args, **kwargs

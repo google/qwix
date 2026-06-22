@@ -167,8 +167,8 @@ def _fast_ragged_dot_general(
       rhs_tiled_ca[r] = lhs_tile_size or rhs_tile_size
 
   # Split lhs/rhs_value for tiled axes.
-  lhs_val = qarray.split_axis(lhs_val, lhs_tiled_ca)
-  rhs_val = qarray.split_axis(rhs_val, rhs_tiled_ca)
+  lhs_val = qarray.split_axis(lhs_val, lhs_tiled_ca)  # pyrefly: ignore[bad-argument-type]
+  rhs_val = qarray.split_axis(rhs_val, rhs_tiled_ca)  # pyrefly: ignore[bad-argument-type]
 
   lhs_ca, lhs_ba, sum_axes = _apply_tiling(lhs_ca, lhs_ba, lhs_tiled_ca)
   rhs_ca, rhs_ba, _ = _apply_tiling(rhs_ca, rhs_ba, rhs_tiled_ca)

@@ -194,7 +194,7 @@ def transform_block_specs_for_tpu(
       if i in reverse_transposes:
         # Use pallas-friendly transpose.
         kernel_args[i] = qarray.transpose_array(
-            kernel_arg[...], reverse_transposes[i]
+            kernel_arg[...], reverse_transposes[i]  # pyrefly: ignore
         )
       elif i in reverse_reshapes:
         kernel_args[i] = kernel_arg[...].reshape(reverse_reshapes[i])

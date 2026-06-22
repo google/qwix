@@ -425,7 +425,7 @@ def _fn_to_code(fn: Function) -> types.CodeType:
     import inspect  # pylint: disable=g-import-not-at-top,redefined-outer-name,reimported
     from qwix._src import aux_data  # pylint: disable=g-import-not-at-top,redefined-outer-name,reimported
 
-    fn = aux_data.get(inspect.currentframe().f_code, "fn")  # pytype: disable=attribute-error
+    fn = aux_data.get(inspect.currentframe().f_code, "fn")  # pytype: disable=attribute-error # pyrefly: ignore
     return fn(*args, **kwargs)
 
   code = wrapper.__code__.replace()  # this creates a new code object

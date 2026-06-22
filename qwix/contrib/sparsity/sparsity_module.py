@@ -121,7 +121,7 @@ class SparsityModule(nnx.Module):
       )
     if self.sparsity_rule.weight_sparsity_m != 0:
       if self.mask is None:
-        self.mask = nnx.BatchStat(jnp.ones(weight.shape, jnp.bool_))
+        self.mask = nnx.BatchStat(jnp.ones(weight.shape, jnp.bool_))  # pyrefly: ignore
 
       # Only update if not in eval mode
       if not self.sparsity_rule.eval_mode:

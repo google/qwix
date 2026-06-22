@@ -495,7 +495,7 @@ class OdmlConversionProvider(OdmlQatProvider):
     }
     if zp is not None:
       # zero_point has to be int64 for ODML.
-      attributes['zero_point'] = np.asarray(zp, np.int64).flatten()  # pyrefly: ignore[bad-typed-dict-key]
+      attributes['zero_point'] = np.asarray(zp, np.int64).flatten()  # pyrefly: ignore
     if quantization_dim is not None:
-      attributes['quantization_dimension'] = quantization_dim  # pyrefly: ignore[bad-typed-dict-key]
+      attributes['quantization_dimension'] = quantization_dim  # pyrefly: ignore
     return attributes

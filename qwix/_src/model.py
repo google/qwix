@@ -241,7 +241,7 @@ def _output_transform_nnx(
   # flax_util.get_current_module() can work inside the output transform.
   # We cannot use the model in quantize_nnx_model because users may choose to
   # clone the model.
-  args = inspect.currentframe().f_back.f_locals["args"]  # pytype: disable=attribute-error
+  args = inspect.currentframe().f_back.f_locals["args"]  # pytype: disable=attribute-error # pyrefly: ignore
   self = args[0]  # pylint: disable=unused-variable
   return provider.process_model_output(method_name, output)
 

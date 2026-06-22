@@ -184,8 +184,8 @@ def _fast_dot_general(
       rhs_tiled_ca[r] = lhs_tile_size or rhs_tile_size
 
   # Split lhs/rhs_value for tiled axes.
-  lhs_value = qarray.split_axis(lhs_value, lhs_tiled_ca)
-  rhs_value = qarray.split_axis(rhs_value, rhs_tiled_ca)
+  lhs_value = qarray.split_axis(lhs_value, lhs_tiled_ca)  # pyrefly: ignore[bad-argument-type]
+  rhs_value = qarray.split_axis(rhs_value, rhs_tiled_ca)  # pyrefly: ignore[bad-argument-type]
 
   # Split lhs/rhs_zero_point for tiled axes.
   if lhs_zero_point is not None:

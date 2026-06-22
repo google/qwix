@@ -60,7 +60,7 @@ class WithAux(Generic[ArrayTypeVar]):
 
   def astype(self, dtype):
     new_value = flax_util.unbox(self.array).astype(dtype)
-    return self.replace(array=flax_util.update_boxed(self.array, value=new_value))  # pyrefly: ignore[missing-attribute]
+    return self.replace(array=flax_util.update_boxed(self.array, value=new_value))  # pyrefly: ignore
 
   def reshape(self, *shape):
     if len(shape) == 1:
@@ -394,7 +394,7 @@ class PtqProvider(qconfig.QuantizationProvider):
         qkwargs = {'qvalue': a['qvalue'], 'scale': a['scale']}
         if 'zero_point' in a:
           qkwargs['zero_point'] = a['zero_point']
-        a = qarray.QArray(**qkwargs)
+        a = qarray.QArray(**qkwargs)  # pyrefly: ignore
 
     # 3. Handle custom types
     if isinstance(a, WithAux):
