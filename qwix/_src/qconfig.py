@@ -151,7 +151,7 @@ class QuantizationProvider:
               interception.disable_interceptions(pl.pallas_call)(
                   *args, **kwargs
               )
-          )
+          )  # pyrefly: ignore
       )
     return intercept_map
 

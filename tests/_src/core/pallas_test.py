@@ -27,6 +27,15 @@ from qwix._src.core import qarray
 
 class PallasTest(parameterized.TestCase):
 
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+    platform = jax.devices()[0].platform
+    if platform == "tpu":
+      cls.pallas_call_kwargs = dict()
+    else:
+      cls.pallas_call_kwargs = dict(interpret=True)
+
   @parameterized.named_parameters(
       dict(
           testcase_name="channelwise",
@@ -206,6 +215,7 @@ class PallasTest(parameterized.TestCase):
               in_specs=[pl.BlockSpec(block_shape, lambda *args: args[:-1])],
               out_specs=pl.BlockSpec(block_shape, lambda *args: args[:-1]),
           ),
+          **self.pallas_call_kwargs,
       )(jnp.ones((1,), jnp.float32), q)
 
     x = jax.random.uniform(jax.random.key(0), input_shape, jnp.float32)
@@ -222,7 +232,7 @@ class PallasTest(parameterized.TestCase):
     def pallas_matmul_kernel(x_ref, y_ref, z_ref, acc_ref, *, nsteps):
 
       @pl.when(pl.program_id(3) == 0)
-      def _():
+      def _init():
         acc_ref[...] = jnp.zeros_like(acc_ref)
 
       acc_ref[...] += dot_general.loop_dot_general(
@@ -230,7 +240,7 @@ class PallasTest(parameterized.TestCase):
       )
 
       @pl.when(pl.program_id(3) == nsteps - 1)
-      def _():
+      def _write():
         z_ref[...] = acc_ref[...].astype(z_ref.dtype)
 
     def pallas_batch_matmul(
@@ -254,6 +264,7 @@ class PallasTest(parameterized.TestCase):
           ],
           out_specs=pl.BlockSpec((None, bm, bn), lambda b, i, j, k: (b, i, j)),
           scratch_shapes=[pltpu.VMEM((bm, bn), jnp.float32)],
+          **self.pallas_call_kwargs,
       )(x, y)
 
     x_how = qarray.HowToQuantize(
@@ -364,7 +375,9 @@ class PallasTest(parameterized.TestCase):
     )
     jax_output = dot_general.dot_general(lhs, rhs, dimension_numbers)
     output_shape = jax.ShapeDtypeStruct(jax_output.shape, jax_output.dtype)
-    pallas_output = pl.pallas_call(pl_kernel, output_shape)(lhs, rhs)
+    pallas_output = pl.pallas_call(
+        pl_kernel, output_shape, **self.pallas_call_kwargs
+    )(lhs, rhs)
     self.assertLess(
         jnp.abs(jax_output - pallas_output).mean() / jnp.abs(jax_output).mean(),
         2e-3,  # bf16 has a lot error.
