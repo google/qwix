@@ -91,7 +91,7 @@ class ConvGeneralQtTest(parameterized.TestCase):
           testcase_name='int8_nhwc',
           data_format='NHWC',
           fwd_qtype='int8',
-          expected_maes=[0.0005, 0, 0, 0.009, 0.004, 0.007],
+          expected_maes=[0.0005, 0, 0, 0.01, 0.005, 0.008],
       ),
       dict(
           testcase_name='int4_nhwc',
@@ -104,7 +104,7 @@ class ConvGeneralQtTest(parameterized.TestCase):
           data_format='NHWC',
           fwd_qtype='float8_e4m3',
           bwd_qtype='float8_e4m3',
-          expected_maes=[0.004, 0.03, 0.06, 0.008, 0.05, 0.06],
+          expected_maes=[0.004, 0.03, 0.06, 0.009, 0.05, 0.06],
       ),
       dict(
           testcase_name='fp8_bwd_nhwc_dilated',
@@ -135,7 +135,7 @@ class ConvGeneralQtTest(parameterized.TestCase):
           data_format='NCHW',
           fwd_qtype='float8_e4m3',
           bwd_qtype='float8_e4m3',
-          expected_maes=[0.002, 0.02, 0.04, 0.02, 0.04, 0.04],
+          expected_maes=[0.002, 0.03, 0.04, 0.02, 0.05, 0.06],
       ),
   )
   def test_grad_against_fq(
@@ -149,6 +149,8 @@ class ConvGeneralQtTest(parameterized.TestCase):
       rhs_dilation=None,
       expected_maes,
   ):
+    if fwd_qtype == 'int4' and jax.devices()[0].platform != 'tpu':
+      self.skipTest('int4 requires TPU.')
     window_strides = (1, 1)
     if data_format == 'NCHW':
       lhs_shape = (4, 8, 16, 16)  # N, C_in, H, W

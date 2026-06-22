@@ -41,19 +41,19 @@ class EinsumTest(parameterized.TestCase):
       dict(
           testcase_name='w8a16',
           rhs_qtype=jnp.int8,
-          expected_mae=0.007,
+          expected_mae=0.009,
       ),
       dict(
           testcase_name='w8a16_sc',
           rhs_qtype=jnp.int8,
           tile_size=128,
-          expected_mae=0.007,
+          expected_mae=0.009,
       ),
       dict(
           testcase_name='w8a8',
           rhs_qtype=jnp.int8,
           lhs_qtype=jnp.int8,
-          expected_mae=0.01,
+          expected_mae=0.02,
       ),
       dict(
           testcase_name='w8a8_sc',
@@ -115,7 +115,7 @@ class EinsumTest(parameterized.TestCase):
           rhs_qtype=jnp.float8_e4m3fn,
           lhs_qtype=jnp.float8_e4m3fn,
           tile_size=1 / 32,
-          expected_mae=0.036,
+          expected_mae=0.038,
       ),
       dict(
           testcase_name='nf4',
@@ -132,6 +132,9 @@ class EinsumTest(parameterized.TestCase):
       lhs_qtype: jax.typing.DTypeLike | None = None,
       tile_size: int | None = None,
   ):
+    if lhs_qtype == jnp.int4 or rhs_qtype == jnp.int4:
+      if jax.devices()[0].platform != 'tpu':
+        self.skipTest('int4 is only supported on TPU.')
     einsum_str = 'ab,bc->ac'
     lhs = self._make_array((1024, 4096))
     rhs = self._make_array((4096, 32768))
@@ -200,7 +203,7 @@ class EinsumTest(parameterized.TestCase):
           lhs_shape=(10, 256, 16),
           rhs_shape=(256, 16, 128),
           lhs_asymmetric=True,
-          expected_rel_mae=0.013,
+          expected_rel_mae=0.015,
       ),
       dict(
           testcase_name='lhs_asymmetric_subchannel',

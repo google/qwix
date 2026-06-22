@@ -109,6 +109,8 @@ class ConvGeneralTest(parameterized.TestCase):
       conv_kwargs: dict[str, Any] | None = None,
       expected_mae: float = 0.01,
   ):
+    if jax.devices()[0].platform != 'tpu':
+      self.skipTest('Only run on TPU.')
     dimension_numbers = jax.lax.conv_dimension_numbers(
         lhs_shape, rhs_shape, dimension_numbers
     )

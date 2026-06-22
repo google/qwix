@@ -147,11 +147,11 @@ class QuantizationProvider:
       # 2. Wrap the returned callable so that interceptions remain disabled
       #    during deferred execution.
       intercept_map['jax.experimental.pallas.pallas_call'] = (  # pyrefly: ignore
-          lambda *args, **kwargs: interception.disable_interceptions(
+          lambda *args, **kwargs: interception.disable_interceptions(  # pyrefly: ignore
               interception.disable_interceptions(pl.pallas_call)(
                   *args, **kwargs
               )
-          )  # pyrefly: ignore
+          )
       )
     return intercept_map
 

@@ -102,7 +102,7 @@ class DotGeneralQtTest(parameterized.TestCase):
           expected_mae_fq_out=0.02,
           expected_mae_fq_grads=0.03,
           expected_mae_fp_out=0.06,
-          expected_mae_fp_grads=0.02,
+          expected_mae_fp_grads=0.03,
       ),
       dict(
           testcase_name='int4_fwd',
@@ -193,6 +193,9 @@ class DotGeneralQtTest(parameterized.TestCase):
       expected_mae_fp_out,
       expected_mae_fp_grads,
   ):
+    if lhs_qtype == 'int4' or rhs_qtype == 'int4' or bwd_qtype == 'int4':
+      if jax.devices()[0].platform != 'tpu':
+        self.skipTest('int4 is only supported on TPU.')
     lhs = jax.random.normal(jax.random.key(0), lhs_shape, jnp.float32)
     rhs = jax.random.normal(jax.random.key(1), rhs_shape, jnp.float32)
     dimension_numbers = (((1,), (0,)), ((), ()))

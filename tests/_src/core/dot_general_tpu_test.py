@@ -162,6 +162,8 @@ class DotGeneralTest(parameterized.TestCase):
       disable_fast_dot_general: bool = False,
       disable_loop_dot_general: bool = False,
   ):
+    if jax.devices()[0].platform != 'tpu':
+      self.skipTest('Only run on TPU.')
     lhs = self._make_array(lhs_shape, lhs_asymmetric)
     rhs = self._make_array(rhs_shape, rhs_asymmetric)
 
