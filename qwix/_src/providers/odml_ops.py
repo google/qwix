@@ -144,9 +144,18 @@ class AuxDataKey(str, enum.Enum):
   # static weight.
   WEIGHT_NAME = 'weight_name'  # str
 
+  # Whether the array is the original parameter tensor returned by Linen/NNX.
+  # This is stricter than WEIGHT_NAME: value-preserving ops may keep the weight
+  # name, but a transformed view is no longer layout-identical to the stored
+  # static param.
+  IS_UNTRANSFORMED_WEIGHT = 'is_untransformed_weight'  # bool
+
   # Fixed range for logistic functions whose output ranges are known, e.g.
   # softmax.
   FIXED_RANGE = 'fixed_range'  # tuple[float, float]
+
+  # Permutation used to replay an einsum RHS weight flattening on static params.
+  FLATTENED_EINSUM_PERM = 'flattened_einsum_perm'  # tuple[int, ...]
 
 
 # Metadata keys that depend on the value being preserved.
@@ -156,6 +165,7 @@ _VALUE_DEPENDENT_METADATA = (
     AuxDataKey.FQ_RULE,
     AuxDataKey.FIXED_RANGE,
     AuxDataKey.ALLOW_FUSION,
+    AuxDataKey.FLATTENED_EINSUM_PERM,
 )
 
 # These ops only change the tensor view or layout, not the values.
@@ -214,6 +224,15 @@ def _copy_for_isolation(original_array: jax.Array) -> jax.Array:
     aux_data.set(array_copy, AuxDataKey.FIXED_RANGE, fixed_range)
   if aux_data.get(original_array, AuxDataKey.ALLOW_FUSION, False):
     aux_data.set(array_copy, AuxDataKey.ALLOW_FUSION, True)
+  flattened_einsum_perm = aux_data.get(
+      original_array, AuxDataKey.FLATTENED_EINSUM_PERM, None
+  )
+  if flattened_einsum_perm is not None:
+    aux_data.set(
+        array_copy,
+        AuxDataKey.FLATTENED_EINSUM_PERM,
+        flattened_einsum_perm,
+    )
   return array_copy
 
 
@@ -531,7 +550,7 @@ class FinalOutput(QuantizedOp):
     return self._maybe_fake_quant(x, previous_rule, op_id)
 
 
-def _forward_metadata(
+def forward_metadata(
     inputs: Any,
     outputs: Any,
     primitive_name: str | None = None,
@@ -554,6 +573,10 @@ def _forward_metadata(
      - AuxDataKey.FQ_RULE
      - AuxDataKey.FIXED_RANGE
      - AuxDataKey.ALLOW_FUSION
+     - AuxDataKey.FLATTENED_EINSUM_PERM
+       Original-weight identity is intentionally not propagated through these
+       ops, because a view of a weight no longer matches the stored param
+       layout.
      - AuxDataKey.FQ_ARRAY (Intersection: if all activation inputs are
        quantized)
 
@@ -659,7 +682,7 @@ class Dropout(QuantizedOp):
 
   def __call__(self, *args, **kwargs):
     out = self._call_original_op(*args, **kwargs)
-    _forward_metadata(args[self.input_idx[0]], out)
+    forward_metadata(args[self.input_idx[0]], out)
     return out
 
 
@@ -676,7 +699,7 @@ class PrimitiveBindOp(QuantizedOp):
 
   def __call__(self, primitive, *args, **params):
     out = self._call_original_op(primitive, *args, **params)
-    _forward_metadata(args, out, primitive_name=primitive.name)
+    forward_metadata(args, out, primitive_name=primitive.name)
     return out
 
 
