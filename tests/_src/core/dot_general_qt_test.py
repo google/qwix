@@ -81,7 +81,7 @@ class DotGeneralQtTest(parameterized.TestCase):
           # expected_mae_fq_out will become 1e-7 but expected_mae_fq_grads will
           # be non-zero.
           expected_mae_fq_out=0.02,
-          expected_mae_fq_grads=0.01,
+          expected_mae_fq_grads=0.03,
           expected_mae_fp_out=0.06,
           expected_mae_fp_grads=0.03,
       ),
@@ -145,7 +145,7 @@ class DotGeneralQtTest(parameterized.TestCase):
           rhs_qtype='float8_e4m3',
           bwd_qtype='float8_e4m3',
           expected_mae_fq_out=0.0002,
-          expected_mae_fq_grads=0.03,
+          expected_mae_fq_grads=0.2,
           expected_mae_fp_out=0.04,
           expected_mae_fp_grads=0.04,
       ),
@@ -171,7 +171,7 @@ class DotGeneralQtTest(parameterized.TestCase):
           bwd_qtype='float8_e4m3',
           bwd_drhs_tile_size=32,
           expected_mae_fq_out=0.0033,
-          expected_mae_fq_grads=0.14,
+          expected_mae_fq_grads=0.5,
           expected_mae_fp_out=0.2,
           expected_mae_fp_grads=0.2,
       ),

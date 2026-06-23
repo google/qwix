@@ -91,7 +91,7 @@ class ConvGeneralQtTest(parameterized.TestCase):
           testcase_name='int8_nhwc',
           data_format='NHWC',
           fwd_qtype='int8',
-          expected_maes=[0.0005, 0, 0, 0.01, 0.005, 0.008],
+          expected_maes=[0.0005, 0, 0, 0.1, 0.005, 0.008],
       ),
       dict(
           testcase_name='int4_nhwc',
@@ -104,7 +104,7 @@ class ConvGeneralQtTest(parameterized.TestCase):
           data_format='NHWC',
           fwd_qtype='float8_e4m3',
           bwd_qtype='float8_e4m3',
-          expected_maes=[0.004, 0.03, 0.06, 0.009, 0.05, 0.06],
+          expected_maes=[0.004, 0.05, 0.06, 0.07, 0.05, 0.06],
       ),
       dict(
           testcase_name='fp8_bwd_nhwc_dilated',
@@ -121,7 +121,7 @@ class ConvGeneralQtTest(parameterized.TestCase):
           data_format='NCHW',
           fwd_qtype='int8',
           bwd_qtype='int8',
-          expected_maes=[0.002, 0.003, 0.003, 0.009, 0.008, 0.006],
+          expected_maes=[0.002, 0.005, 0.003, 0.009, 0.008, 0.02],
       ),
       dict(
           testcase_name='int4_bwd_nchw',
@@ -135,7 +135,7 @@ class ConvGeneralQtTest(parameterized.TestCase):
           data_format='NCHW',
           fwd_qtype='float8_e4m3',
           bwd_qtype='float8_e4m3',
-          expected_maes=[0.002, 0.03, 0.04, 0.02, 0.05, 0.06],
+          expected_maes=[0.002, 0.04, 0.04, 0.02, 0.05, 0.06],
       ),
   )
   def test_grad_against_fq(

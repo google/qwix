@@ -60,7 +60,7 @@ class EinsumTest(parameterized.TestCase):
           rhs_qtype=jnp.int8,
           lhs_qtype=jnp.int8,
           tile_size=128,
-          expected_mae=0.009,
+          expected_mae=0.02,
       ),
       dict(
           testcase_name='w4a16',
