@@ -107,6 +107,8 @@ def get_datasets():
   ds_builder.download_and_prepare()
   train_ds = tfds.as_numpy(ds_builder.as_dataset(split='train', batch_size=-1))
   test_ds = tfds.as_numpy(ds_builder.as_dataset(split='test', batch_size=-1))
+  # train_ds = {k: v[:100] for k, v in train_ds.items()}
+  # test_ds = {k: v[:100] for k, v in test_ds.items()}
   train_ds['image'] = jnp.float32(train_ds['image']) / 255.0
   test_ds['image'] = jnp.float32(test_ds['image']) / 255.0
   return train_ds, test_ds
@@ -215,6 +217,62 @@ class OdmlCnnTest(absltest.TestCase):
     logits = odml_model(test_ds['image'])
     odml_accuracy = jnp.mean(jnp.argmax(logits, -1) == test_ds['label'])
     logging.info('odml accuracy: %.4f', odml_accuracy * 100)
+
+    self.assertAlmostEqual(
+        qat_test_accurary, conversion_test_accuracy, places=3
+    )
+    self.assertAlmostEqual(qat_test_accurary, odml_accuracy, places=3)
+    self.assertGreater(odml_accuracy, 0.98)
+
+  def test_cnn_srq_int16_act(self):
+    cnn = CNN()
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=r'.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int16,
+            act_calibration_method='absmax',
+        ),
+    ]
+    qat_cnn = qwix_model.quantize_model(cnn, odml.OdmlQatProvider(q_rules))
+
+    config = ml_collections.ConfigDict()
+    config.learning_rate = 0.1
+    config.momentum = 0.9
+    config.batch_size = 128
+    config.num_epochs = 10
+    config.qat_after_epoch = 5
+
+    # QAT with SRQ (int16 activations).
+    _, qat_state = train_and_evaluate(cnn, qat_cnn, config)
+    qat_test_accurary = evaluate(
+        qat_cnn,
+        {'params': qat_state.params, 'quant_stats': qat_state.quant_stats},
+    )
+
+    # ODML conversion.
+    odml_conversion_provider = odml.OdmlConversionProvider(
+        q_rules, qat_state.params, qat_state.quant_stats
+    )
+    conversion_cnn = qwix_model.quantize_model(cnn, odml_conversion_provider)
+    conversion_test_accuracy = evaluate(
+        conversion_cnn, {'params': qat_state.params}
+    )
+
+    # Convert and evaluate the ODML model.
+    test_ds = get_datasets()[1]
+    odml_model = ai_edge_jax.convert(
+        conversion_cnn.apply,
+        {'params': qat_state.params},
+        (test_ds['image'],),
+        _litert_converter_flags={'_experimental_strict_qdq': True},
+    )
+    output_dir = absltest.get_default_test_tmpdir()
+    output_dir = os.environ.get('TEST_UNDECLARED_OUTPUTS_DIR', output_dir)
+    odml_model.export(output_dir + '/qwix_cnn_int16.tflite')
+    logits = odml_model(test_ds['image'])
+    odml_accuracy = jnp.mean(jnp.argmax(logits, -1) == test_ds['label'])
+    logging.info('odml int16 accuracy: %.4f', odml_accuracy * 100)
 
     self.assertAlmostEqual(
         qat_test_accurary, conversion_test_accuracy, places=3
