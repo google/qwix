@@ -191,12 +191,11 @@ class Transformer(nn.Module):
       'final_output0',
   }
 
-  # x.mean(axis=1) is not quantized correctly and produces
-  # "dq -> fp_sum -> fp_div -> q".
+  # x.mean(axis=1) is quantized to a single MEAN op which runs as int.
   expected_ops_summary = {
-      'quantize_op_count': 1,
-      'dequantize_op_count': 2,  # mean and final_output.
-      'fp_op_count': 2,  # fp_sum and fp_div in mean.
+      'quantize_op_count': 0,
+      'dequantize_op_count': 1,  # final_output.
+      'fp_op_count': 0,
   }
 
   drq_expected_ops_summary = {
