@@ -47,9 +47,12 @@ def mxfp_dot_general(
   Returns:
     A jax.Array with the result, or None to fall back to emulation.
   """
-  # jax.nn.scaled_matmul is currently only supported on GPU (natively on
-  # Blackwell, emulated on legacy devices). Once scaled_matmul supports TPU, we
-  # will enable it for TPU as well.
+  # jax.nn.scaled_matmul is the fused GPU fast path (natively on Blackwell via
+  # cuDNN, emulated on legacy GPUs). On TPU/CPU there is no scaled_matmul
+  # lowering, so we return None and the caller falls back to the native tiled
+  # fp8 dot_general path (dot_general._fast_dot_general), which is correct and
+  # MXU-accelerated on TPU. If/when scaled_matmul gains a TPU lowering, it can be
+  # enabled here as an additional fast path.
   if _get_primary_platform() == "gpu":
     return _gpu_mxfp_dot(lhs, rhs, dimension_numbers, preferred_element_type)
 
