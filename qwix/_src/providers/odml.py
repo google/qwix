@@ -27,9 +27,26 @@ from qwix._src import aux_data
 from qwix._src import averaging
 from qwix._src import interception
 from qwix._src import qconfig
+from qwix._src.core import einsum_info
 from qwix._src.core import qarray
 from qwix._src.providers import odml_ops
 from qwix._src.utils import flax_util
+
+
+@dataclasses.dataclass(frozen=True)
+class _CollapsedEinsumRhsLayout:
+  """Describes an einsum whose RHS output axes can be collapsed.
+
+  The LHS and its labels remain unchanged. Only the RHS is transposed so its
+  contraction axes come first, then its free axes are collapsed into one
+  channel axis. The output is restored after the rewritten einsum.
+  """
+
+  rewritten_einsum: str
+  rhs_perm: tuple[int, ...]
+  rhs_collapsed_shape: tuple[int, ...]
+  rhs_free_shape: tuple[int, ...]
+  output_perm: tuple[int, ...] | None
 
 
 class OdmlQatProvider(qconfig.QuantizationProvider):
@@ -96,6 +113,7 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
     #    JAX's C++ dispatch bypasses the patched Python `__code__` when JIT
     #    is enabled, preventing us from catching inner function calls.
     super().__init__(rules, disable_jit=True)
+    self._disable_per_channel_weights = disable_per_channel_weights
     self._fixed_range_for_inputs = fixed_range_for_inputs
     self._fixed_range_for_outputs = fixed_range_for_outputs
     self._strict = strict
@@ -135,15 +153,22 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
       unbox: bool = True,
       **init_kwargs,
   ) -> jax.Array | nn.meta.AxisMetadata[jax.Array]:
-    """Intercepts nn.Module.param to associate weight_name aux_data."""
+    """Associates a Linen parameter's direct logical array with aux_data."""
     ret = nn.Module.param(
         module, name, init_fn, *init_args, unbox=unbox, **init_kwargs
     )
+    weight = flax_util.unbox(ret)
     # Clear the previous aux_data such as fq_array.
-    aux_data.clear(ret if unbox else ret.unbox())
+    aux_data.clear(weight)
     # weight_name is used to distinguish weights from activations.
+    aux_data.set(weight, odml_ops.AuxDataKey.WEIGHT_NAME, name)
+    # This identifies the direct parameter API result, before any intercepted
+    # model transform. Consumers must separately verify that a conversion-time
+    # static parameter has a compatible shape and layout.
     aux_data.set(
-        ret if unbox else ret.unbox(), odml_ops.AuxDataKey.WEIGHT_NAME, name
+        weight,
+        odml_ops.AuxDataKey.IS_UNTRANSFORMED_WEIGHT,
+        True,
     )
     return ret
 
@@ -217,10 +242,17 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
         if isinstance(node, nnx.Module):
           aux_data.clear(node)  # clear the op_count.
         elif isinstance(node, nnx.Param):
+          weight = flax_util.unbox(node)
           # Clear the previous aux_data such as fq_array.
-          aux_data.clear(node.value)
+          aux_data.clear(weight)
           # weight_name is used to distinguish weights from activations.
-          aux_data.set(node.value, odml_ops.AuxDataKey.WEIGHT_NAME, path[-1])
+          aux_data.set(weight, odml_ops.AuxDataKey.WEIGHT_NAME, path[-1])
+          # This is the direct parameter state before the model executes any
+          # intercepted transforms. Static tree compatibility remains a
+          # separate conversion-time check.
+          aux_data.set(
+              weight, odml_ops.AuxDataKey.IS_UNTRANSFORMED_WEIGHT, True
+          )
 
     # Activation Handling: Apply the `ModelInput` operator to all leaves of
     # `model_args` and `model_kwargs` (the actual arguments passed to the
@@ -380,12 +412,19 @@ class OdmlConversionProvider(OdmlQatProvider):
         self._flatten_dot_general,
         _dot_general=intercept_map['jax.lax.dot_general'],
     )
+    if not self._disable_per_channel_weights and any(
+        rule.weight_qtype is not None for rule in self._rules
+    ):
+      intercept_map['jax.numpy.einsum'] = functools.partial(
+          self._collapse_einsum_rhs_scale,
+          _einsum=intercept_map['jax.numpy.einsum'],
+      )
     return intercept_map
 
   def _flatten_dot_general(self, *args, _dot_general, **kwargs):
     """Flatten N-D weights to 2-D to support channelwise quantization."""
-    # This special handling is needed because tflite doesn't support multiple
-    # quantization_dimensions.
+    # This special handling is needed because tflite doesn't support 2-D+
+    # scales. By flattening N-D weights to 2-D, we have at most 1-D scales.
     if (
         aux_data.get(args[1], odml_ops.AuxDataKey.WEIGHT_NAME, None) is not None
         and args[1].ndim > 2
@@ -397,6 +436,176 @@ class OdmlConversionProvider(OdmlQatProvider):
       out = _dot_general(*args, **kwargs)
       return jax.lax.reshape(out, out.shape[:-1] + dout)
     return _dot_general(*args, **kwargs)
+
+  @staticmethod
+  def _maybe_get_collapsed_einsum_rhs_layout(
+      info: einsum_info.EinsumInfo,
+      lhs_shape: tuple[int, ...],
+      rhs_shape: tuple[int, ...],
+  ) -> _CollapsedEinsumRhsLayout | None:
+    """Returns a RHS-only scale collapse for a supported binary einsum.
+
+    This handles contractions with multiple RHS-only output axes, which would
+    otherwise produce a multi-dimensional per-channel weight scale. Shared
+    batch labels and operand-local reductions remain on the original path.
+
+    Args:
+      info: The parsed string and structural information of the einsum string.
+      lhs_shape: Shape of the left-hand side tensor.
+      rhs_shape: Shape of the right-hand side tensor.
+
+    Returns:
+      A _CollapsedEinsumRhsLayout object if collapse is needed and supported,
+      or None if unsupported or if the tensor has at most a 1D scale.
+    """
+    if info.batch_chars:
+      return None
+
+    # Keep each contraction dimension separate so the LHS can retain its
+    # original rank and activation metadata. The RHS order determines the
+    # transpose and the rewritten RHS equation.
+    contract_chars = tuple(c for c in info.rhs if c in info.contract_chars)
+    lhs_free_chars = tuple(
+        c for c in info.lhs if c in info.out and c not in contract_chars
+    )
+    rhs_free_chars = tuple(
+        c for c in info.rhs if c in info.out and c not in contract_chars
+    )
+
+    lhs_supported_chars = set(lhs_free_chars) | set(contract_chars)
+    rhs_supported_chars = set(rhs_free_chars) | set(contract_chars)
+    # Reject labels reduced from only one operand. Collapsing those would need
+    # a different rewrite and does not address the RHS output-scale problem.
+    if set(info.lhs) != lhs_supported_chars:
+      return None
+    if set(info.rhs) != rhs_supported_chars:
+      return None
+
+    expected_out_chars = ''.join(lhs_free_chars + rhs_free_chars)
+    if len(expected_out_chars) != len(info.out) or set(
+        expected_out_chars
+    ) != set(info.out):
+      return None
+
+    lhs_axis = {c: i for i, c in enumerate(info.lhs)}
+    rhs_axis = {c: i for i, c in enumerate(info.rhs)}
+
+    for c in contract_chars:
+      if lhs_shape[lhs_axis[c]] != rhs_shape[rhs_axis[c]]:
+        return None
+
+    rhs_contract_axes = tuple(rhs_axis[c] for c in contract_chars)
+    rhs_free_axes = tuple(rhs_axis[c] for c in rhs_free_chars)
+
+    rhs_contract_shape = tuple(rhs_shape[i] for i in rhs_contract_axes)
+    rhs_free_shape = tuple(rhs_shape[i] for i in rhs_free_axes)
+
+    # If the original RHS channelwise scale would have only one non-unit
+    # dimension, ODML/TFLite can already express it as a scale vector. Flatten
+    # only when multiple RHS output axes would otherwise create a multi-D scale.
+    if sum(dim != 1 for dim in rhs_free_shape) <= 1:
+      return None
+
+    rhs_perm = rhs_contract_axes + rhs_free_axes
+    collapsed_label = rhs_free_chars[0]
+    rewritten_rhs = ''.join(contract_chars) + collapsed_label
+    rewritten_out = ''.join(lhs_free_chars) + collapsed_label
+
+    return _CollapsedEinsumRhsLayout(
+        rewritten_einsum=f'{info.lhs},{rewritten_rhs}->{rewritten_out}',
+        rhs_perm=rhs_perm,
+        rhs_collapsed_shape=(
+            rhs_contract_shape + (int(np.prod(rhs_free_shape)),)
+        ),
+        rhs_free_shape=rhs_free_shape,
+        output_perm=info.output_perm,
+    )
+
+  @staticmethod
+  def _collapse_einsum_rhs(
+      rhs: jax.Array, layout: _CollapsedEinsumRhsLayout
+  ) -> jax.Array:
+    """Collapses RHS output axes and records how to replay that layout."""
+    rhs_ordered = jax.lax.transpose(rhs, layout.rhs_perm)
+    collapsed_rhs = jax.lax.reshape(rhs_ordered, layout.rhs_collapsed_shape)
+    # Conversion fake quant reads the stored parameter rather than this runtime
+    # view. Record the exact transpose so calibration can replay this one
+    # intentional transform before matching the collapsed runtime shape.
+    aux_data.set(
+        collapsed_rhs,
+        odml_ops.AuxDataKey.COLLAPSED_EINSUM_RHS_PERM,
+        layout.rhs_perm,
+    )
+    return collapsed_rhs
+
+  def _collapse_einsum_rhs_scale(self, *args, _einsum, **kwargs):
+    """Collapses multi-dimensional RHS weight scales to one channel axis.
+
+    LiteRT supports high-rank einsum operands but expects a per-channel weight
+    scale to vary along only one dimension. For supported binary contractions,
+    this leaves the LHS untouched and combines all RHS-only output dimensions
+    into one channel. It restores the original output shape and order afterward.
+
+    Einsums with transformed or statically incompatible RHS weights, shared
+    batch dimensions, operand-local reductions, or an already one-dimensional
+    scale use the existing ODML path.
+
+    Args:
+      *args: Positional arguments (e.g. einsum_str, lhs, rhs).
+      _einsum: The original JAX primitive or function to dispatch to.
+      **kwargs: Keyword arguments for the einsum function.
+
+    Returns:
+      The result of the einsum operation.
+    """
+
+    if len(args) != 3:
+      return _einsum(*args, **kwargs)
+
+    einsum_str, lhs, rhs = args
+    weight_name = aux_data.get(rhs, odml_ops.AuxDataKey.WEIGHT_NAME, None)
+    is_untransformed_weight = aux_data.get(
+        rhs, odml_ops.AuxDataKey.IS_UNTRANSFORMED_WEIGHT, False
+    )
+    if not isinstance(einsum_str, str) or weight_name is None:
+      return _einsum(*args, **kwargs)
+    # A transformed weight may retain WEIGHT_NAME, but replaying this rewrite on
+    # its untransformed stored parameter would calibrate a different tensor.
+    if not is_untransformed_weight:
+      return _einsum(*args, **kwargs)
+
+    try:
+      info = einsum_info.EinsumInfo.parse(
+          einsum_str, ndims=(lhs.ndim, rhs.ndim)
+      )
+    except (NotImplementedError, ValueError):
+      return _einsum(*args, **kwargs)
+
+    layout = self._maybe_get_collapsed_einsum_rhs_layout(
+        info, lhs.shape, rhs.shape
+    )
+    if layout is None:
+      return _einsum(*args, **kwargs)
+
+    # The marker only proves that no intercepted tensor transform followed the
+    # local parameter API read. Lifted transforms such as nn.vmap can still add
+    # axes to the stored parameter tree, so independently require the static
+    # calibration source to match this runtime RHS before recording a replay.
+    mdl_path = flax_util.get_current_module_path()
+    static_weight = self._flatten_params.get(mdl_path + (weight_name,))
+    if static_weight is None:
+      return _einsum(*args, **kwargs)
+    static_weight = flax_util.unbox(static_weight)
+    static_shape = getattr(static_weight, 'shape', None)
+    if static_shape is None or tuple(static_shape) != tuple(rhs.shape):
+      return _einsum(*args, **kwargs)
+
+    collapsed_rhs = self._collapse_einsum_rhs(rhs, layout)
+    out = _einsum(layout.rewritten_einsum, lhs, collapsed_rhs, **kwargs)
+    res = jax.lax.reshape(out, out.shape[:-1] + layout.rhs_free_shape)
+    if layout.output_perm is not None:
+      res = jax.lax.transpose(res, layout.output_perm)
+    return res
 
   def _fake_quant(
       self,
@@ -414,7 +623,22 @@ class OdmlConversionProvider(OdmlQatProvider):
         assert quant_stat_name is None
         mdl_path = flax_util.get_current_module_path()
         weight = self._flatten_params[mdl_path + (weight_name,)]
-        if weight.shape != array.shape:  # when _flatten_dot_general is used.
+        collapsed_rhs_perm = aux_data.get(
+            array, odml_ops.AuxDataKey.COLLAPSED_EINSUM_RHS_PERM, None
+        )
+        if collapsed_rhs_perm is not None:
+          # Recreate the intentional RHS-only transform on the stored parameter
+          # so calibration matches the tensor consumed by the rewritten einsum.
+          if len(collapsed_rhs_perm) != weight.ndim:
+            raise ValueError(
+                'Cannot replay collapsed einsum RHS layout on static weight '
+                f'with shape {weight.shape} and permutation '
+                f'{collapsed_rhs_perm}.'
+            )
+          weight = jax.lax.reshape(
+              jax.lax.transpose(weight, collapsed_rhs_perm), array.shape
+          )
+        elif weight.shape != array.shape:  # when _flatten_dot_general is used.
           weight = weight.reshape(array.shape)
         calibration = qarray.calibrate(weight, how)
         scale, zp = qarray.compute_scale_zero_point(calibration, how.qtype)
