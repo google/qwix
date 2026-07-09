@@ -149,17 +149,6 @@ class MxfpNumericsTest(absltest.TestCase):
     lhs_scale = jnp.ones((1, 32, 2), dtype=jnp.float32)
     rhs_scale = jnp.ones((1, 32, 2), dtype=jnp.float32)
 
-    platform = jax.devices()[0].platform
-    if platform in ("cpu", "tpu"):
-      with self.assertRaises(NotImplementedError):
-        jax.nn.scaled_matmul(lhs, rhs, lhs_scale, rhs_scale)
-      logging.info(
-          "jax.nn.scaled_matmul (F32) correctly raised NotImplementedError"
-          " on %s",
-          platform,
-      )
-      return
-
     res = jax.nn.scaled_matmul(lhs, rhs, lhs_scale, rhs_scale)
     expected = jnp.einsum("bmk,bnk->bmn", lhs, rhs)
     np.testing.assert_allclose(res, expected, rtol=5e-3, atol=5e-3)
@@ -191,20 +180,6 @@ class MxfpNumericsTest(absltest.TestCase):
 
     lhs_q, lhs_scale = local_quantize(lhs, data_type, scale_type, block_size)
     rhs_q, rhs_scale = local_quantize(rhs, data_type, scale_type, block_size)
-
-    # Call jax.nn.scaled_matmul.
-    # We expect NotImplementedError on CPU/TPU to track the rollout.
-    platform = jax.devices()[0].platform
-    if platform in ("cpu", "tpu"):
-      with self.assertRaises(NotImplementedError):
-        jax.nn.scaled_matmul(lhs_q, rhs_q, lhs_scale, rhs_scale)
-      logging.info(
-          "jax.nn.scaled_matmul (%s) correctly raised NotImplementedError"
-          " on %s",
-          mxfp_format,
-          platform,
-      )
-      return
 
     res = jax.nn.scaled_matmul(lhs_q, rhs_q, lhs_scale, rhs_scale)
     logging.info("jax.nn.scaled_matmul succeeded for %s", mxfp_format)
