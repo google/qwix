@@ -384,8 +384,8 @@ class OdmlConversionProvider(OdmlQatProvider):
 
   def _flatten_dot_general(self, *args, _dot_general, **kwargs):
     """Flatten N-D weights to 2-D to support channelwise quantization."""
-    # This special handling is needed because tflite doesn't support multiple
-    # quantization_dimensions.
+    # This special handling is needed because tflite doesn't support 2-D+
+    # scales. By flattening N-D weights to 2-D, we have at most 1-D scales.
     if (
         aux_data.get(args[1], odml_ops.AuxDataKey.WEIGHT_NAME, None) is not None
         and args[1].ndim > 2
