@@ -223,7 +223,7 @@ def validate_qarray(array: QArray):
         f'Scale {array.scale.shape} should be broadcastable to qvalue'
         f' {array.qvalue.shape}.'
     )
-  if array.qvalue.dtype.itemsize > 1:
+  if array.qvalue.dtype.itemsize > 1 and array.qvalue.dtype != jnp.int16:
     raise ValueError(f'{array.qvalue.dtype} is not a valid type for qvalue.')
   if not numerics.should_quantize(array.scale.dtype):
     raise ValueError(f'{array.scale.dtype} is not a valid type for scale.')

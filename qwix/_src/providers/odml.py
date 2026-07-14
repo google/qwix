@@ -478,6 +478,8 @@ class OdmlConversionProvider(OdmlQatProvider):
     match jnp.dtype(dtype):
       case jnp.int8:
         dtype = 'i8'
+      case jnp.int16:
+        dtype = 'i16'
       case _:
         raise ValueError(f'Unsupported dtype {dtype} for ODML conversion.')
     attributes = {
