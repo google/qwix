@@ -370,7 +370,16 @@ class OdmlConversionProvider(OdmlQatProvider):
   ):
     super().__init__(rules, **kwargs)
     # Store params and quant_stats statically so they won't become tracers.
-    self._flatten_params = flax.traverse_util.flatten_dict(params)
+    flatten_params = flax.traverse_util.flatten_dict(params)
+    self._flatten_params = {}
+    for path, param in flatten_params.items():
+      param = flax_util.unbox(param)
+      if not hasattr(param, 'shape'):
+        raise TypeError(
+            'ODML conversion parameters must unbox to array-like values; '
+            f'parameter {"/".join(path)} has type {type(param).__name__}.'
+        )
+      self._flatten_params[path] = param
     self._quant_stats = quant_stats
 
   def get_intercept_map(self):

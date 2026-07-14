@@ -88,6 +88,37 @@ class OdmlTest(parameterized.TestCase):
     conversion_res = conversion_model.apply(qat_vars, model_input)
     self.assertTrue(jnp.allclose(qat_res, conversion_res))
 
+  def test_linen_partitioned_conversion_parameter(self):
+    model = nn.Dense(
+        4,
+        use_bias=False,
+        kernel_init=nn.with_partitioning(nn.ones_init(), ('input', 'output')),
+    )
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*',
+            weight_qtype=jnp.int8,
+        ),
+    ]
+    model_input = jnp.ones((1, 3), dtype=jnp.float32)
+    qat_model = qwix_model.quantize_model(model, odml.OdmlQatProvider(rules))
+    variables = qat_model.init(jax.random.key(0), model_input)
+    qat_result = qat_model.apply(variables, model_input)
+
+    self.assertIsInstance(variables['params']['kernel'], nn.Partitioned)
+
+    conversion_model = qwix_model.quantize_model(
+        model,
+        odml.OdmlConversionProvider(rules, variables['params'], {}),
+    )
+    conversion_result = conversion_model.apply(variables, model_input)
+
+    self.assertTrue(jnp.allclose(qat_result, conversion_result))
+
+  def test_conversion_parameter_must_unbox_to_array(self):
+    with self.assertRaisesRegex(TypeError, 'parameter kernel has type object'):
+      odml.OdmlConversionProvider([], {'kernel': object()}, {})
+
   def test_linen_shared_scope(self):
     """Test that shared scopes do not cause naming collisions."""
 
