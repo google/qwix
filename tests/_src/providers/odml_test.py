@@ -21,10 +21,12 @@ from flax import linen as nn
 from flax import nnx
 import jax
 from jax import numpy as jnp
+from qwix._src import aux_data
 from qwix._src import interception
 from qwix._src import model as qwix_model
 from qwix._src import qconfig
 from qwix._src.providers import odml
+from qwix._src.providers import odml_ops
 from qwix._src.utils import flax_util
 
 
@@ -185,6 +187,32 @@ class OdmlTest(parameterized.TestCase):
         },
     )
 
+  def test_odml_original_weight_marker_is_not_forwarded(self):
+    """Tests a real structural interceptor invalidates layout identity."""
+    rhs = jnp.ones((4, 5, 7), dtype=jnp.float32)
+    aux_data.set(rhs, odml_ops.AuxDataKey.WEIGHT_NAME, 'kernel')
+    aux_data.set(rhs, odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT, True)
+
+    provider = odml.OdmlQatProvider([])
+    transpose = interception.wrap_func_intercepted(
+        lambda x: jnp.transpose(x, (0, 2, 1)),
+        provider.get_interceptors()[0],
+        disable_jit=False,
+    )
+    rhs_transposed = transpose(rhs)
+
+    self.assertEqual(
+        aux_data.get(rhs_transposed, odml_ops.AuxDataKey.WEIGHT_NAME, None),
+        'kernel',
+    )
+    self.assertFalse(
+        aux_data.get(
+            rhs_transposed,
+            odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT,
+            False,
+        )
+    )
+
   def test_nnx(self):
     class NnxModel(nnx.Module):
 
@@ -234,6 +262,71 @@ class OdmlTest(parameterized.TestCase):
     )
     conversion_res = conversion_model(model_input)
     self.assertTrue(jnp.allclose(qat_res, conversion_res))
+
+  @parameterized.parameters(False, True)
+  def test_linen_original_weight_marker_is_initialized(self, use_axis_metadata):
+    """Tests Linen tags one direct logical array for boxed and raw params."""
+    observed_metadata = []
+
+    class LinenModel(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        init = nn.initializers.ones
+        if use_axis_metadata:
+          init = nn.with_partitioning(init, ('input', 'output'))
+        param = self.param(
+            'kernel', init, (x.shape[-1], 4), unbox=not use_axis_metadata
+        )
+        weight = flax_util.unbox(param)
+        observed_metadata.append((
+            aux_data.get(weight, odml_ops.AuxDataKey.WEIGHT_NAME, None),
+            aux_data.get(
+                weight,
+                odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT,
+                False,
+            ),
+        ))
+        return jnp.dot(x, weight)
+
+    model = LinenModel()
+    qat_model = qwix_model.quantize_model(model, odml.OdmlQatProvider([]))
+    model_input = jnp.ones((1, 3), dtype=jnp.float32)
+    variables = qat_model.init(jax.random.key(0), model_input)
+
+    observed_metadata.clear()
+    qat_model.apply(variables, model_input)
+
+    self.assertEqual(observed_metadata, [('kernel', True)])
+
+  def test_nnx_original_weight_marker_is_initialized(self):
+    """Tests NNX model preprocessing tags the direct parameter state."""
+
+    class NnxModel(nnx.Module):
+
+      def __init__(self):
+        self.kernel = nnx.Param(jnp.ones((3, 4), dtype=jnp.float32))
+
+      def __call__(self, x):
+        return jnp.dot(x, self.kernel)
+
+    model_input = jnp.ones((1, 3), dtype=jnp.float32)
+    qat_model = qwix_model.quantize_model(
+        NnxModel(), odml.OdmlQatProvider([]), model_input
+    )
+    weight = flax_util.unbox(qat_model.kernel)
+
+    self.assertEqual(
+        aux_data.get(weight, odml_ops.AuxDataKey.WEIGHT_NAME, None),
+        'kernel',
+    )
+    self.assertTrue(
+        aux_data.get(
+            weight,
+            odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT,
+            False,
+        )
+    )
 
   def test_odml_interception_stack(self):
     """Verifies that ODML providers return interceptors in the correct order."""

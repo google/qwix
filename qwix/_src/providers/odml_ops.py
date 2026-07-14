@@ -144,6 +144,12 @@ class AuxDataKey(str, enum.Enum):
   # static weight.
   WEIGHT_NAME = 'weight_name'  # str
 
+  # Whether this exact array is the direct logical value exposed by the
+  # Linen/NNX parameter API, with no subsequently intercepted tensor transform.
+  # This is stricter than WEIGHT_NAME, but it does not prove that a lifted or
+  # boxed static parameter tree has the same shape and layout.
+  IS_ORIGINAL_WEIGHT = 'is_original_weight'  # bool
+
   # Fixed range for logistic functions whose output ranges are known, e.g.
   # softmax.
   FIXED_RANGE = 'fixed_range'  # tuple[float, float]
@@ -151,6 +157,9 @@ class AuxDataKey(str, enum.Enum):
 
 # Metadata keys that depend on the value being preserved.
 # If the value changes (e.g. add, mul), these keys become invalid.
+# IS_ORIGINAL_WEIGHT is intentionally excluded from all propagation. A
+# transform may retain weight provenance, but without a general static replay
+# mechanism its output cannot be treated as the direct parameter API value.
 _VALUE_DEPENDENT_METADATA = (
     AuxDataKey.WEIGHT_NAME,
     AuxDataKey.FQ_RULE,

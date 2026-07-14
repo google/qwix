@@ -135,15 +135,22 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
       unbox: bool = True,
       **init_kwargs,
   ) -> jax.Array | nn.meta.AxisMetadata[jax.Array]:
-    """Intercepts nn.Module.param to associate weight_name aux_data."""
+    """Associates a Linen parameter's direct logical array with aux_data."""
     ret = nn.Module.param(
         module, name, init_fn, *init_args, unbox=unbox, **init_kwargs
     )
+    weight = flax_util.unbox(ret)
     # Clear the previous aux_data such as fq_array.
-    aux_data.clear(ret if unbox else ret.unbox())
+    aux_data.clear(weight)
     # weight_name is used to distinguish weights from activations.
+    aux_data.set(weight, odml_ops.AuxDataKey.WEIGHT_NAME, name)
+    # This identifies the direct parameter API result, before any intercepted
+    # model transform. Consumers must separately verify that a conversion-time
+    # static parameter has a compatible shape and layout.
     aux_data.set(
-        ret if unbox else ret.unbox(), odml_ops.AuxDataKey.WEIGHT_NAME, name
+        weight,
+        odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT,
+        True,
     )
     return ret
 
@@ -217,10 +224,19 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
         if isinstance(node, nnx.Module):
           aux_data.clear(node)  # clear the op_count.
         elif isinstance(node, nnx.Param):
+          weight = flax_util.unbox(node)
           # Clear the previous aux_data such as fq_array.
-          aux_data.clear(node.value)
+          aux_data.clear(weight)
           # weight_name is used to distinguish weights from activations.
-          aux_data.set(node.value, odml_ops.AuxDataKey.WEIGHT_NAME, path[-1])
+          aux_data.set(weight, odml_ops.AuxDataKey.WEIGHT_NAME, path[-1])
+          # This is the direct parameter state before the model executes any
+          # intercepted transforms. Static tree compatibility remains a
+          # separate conversion-time check.
+          aux_data.set(
+              weight,
+              odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT,
+              True,
+          )
 
     # Activation Handling: Apply the `ModelInput` operator to all leaves of
     # `model_args` and `model_kwargs` (the actual arguments passed to the
