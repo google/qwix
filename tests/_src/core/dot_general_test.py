@@ -19,7 +19,6 @@ import jax
 from jax import numpy as jnp
 from qwix._src.core import dot_general
 from qwix._src.core import einsum
-from qwix._src.core import mxfp_dot
 from qwix._src.core import qarray
 
 
@@ -147,40 +146,31 @@ class DotGeneralTest(parameterized.TestCase):
         self.assertEqual(dot_general_output.dtype, expected_output_dtype)
 
   @mock.patch.object(jax.nn, 'scaled_matmul')
-  @mock.patch.object(jax, 'devices')
-  def test_outer_product(self, mock_devices, mock_scaled_matmul):
-    mock_device = mock.MagicMock()
-    mock_device.platform = 'gpu'
-    mock_devices.return_value = [mock_device]
-
+  def test_outer_product(self, mock_scaled_matmul):
     mock_scaled_matmul.return_value = jnp.ones((1, 10, 10), jnp.float32)
 
-    mxfp_dot._get_primary_platform.cache_clear()
-    try:
-      lhs = qarray.QArray(
-          jnp.ones((10, 1), jnp.float8_e4m3fn),
-          jnp.ones((10, 1), jnp.bfloat16),
-          qtype='mxfp8',
-      )
-      rhs = qarray.QArray(
-          jnp.ones((1, 10), jnp.float8_e4m3fn),
-          jnp.ones((1, 10), jnp.bfloat16),
-          qtype='mxfp8',
-      )
-      dnums = (((), ()), ((), ()))
-      res = dot_general.dot_general(lhs, rhs, dnums)
-      self.assertEqual(res.shape, (10, 1, 1, 10))
+    lhs = qarray.QArray(
+        jnp.ones((10, 1), jnp.float8_e4m3fn),
+        jnp.ones((10, 1), jnp.bfloat16),
+        qtype='mxfp8',
+    )
+    rhs = qarray.QArray(
+        jnp.ones((1, 10), jnp.float8_e4m3fn),
+        jnp.ones((1, 10), jnp.bfloat16),
+        qtype='mxfp8',
+    )
+    dnums = (((), ()), ((), ()))
+    res = dot_general.dot_general(lhs, rhs, dnums)
+    self.assertEqual(res.shape, (10, 1, 1, 10))
 
-      mock_scaled_matmul.assert_called_once()
+    mock_scaled_matmul.assert_called_once()
 
-      args, _ = mock_scaled_matmul.call_args
-      lhs_3d, rhs_3d, lhs_scale_3d, rhs_scale_3d = args
-      self.assertEqual(lhs_3d.shape, (1, 10, 1))
-      self.assertEqual(rhs_3d.shape, (1, 10, 1))
-      self.assertEqual(lhs_scale_3d.shape, (1, 10, 1))
-      self.assertEqual(rhs_scale_3d.shape, (1, 10, 1))
-    finally:
-      mxfp_dot._get_primary_platform.cache_clear()
+    args, _ = mock_scaled_matmul.call_args
+    lhs_3d, rhs_3d, lhs_scale_3d, rhs_scale_3d = args
+    self.assertEqual(lhs_3d.shape, (1, 10, 1))
+    self.assertEqual(rhs_3d.shape, (1, 10, 1))
+    self.assertEqual(lhs_scale_3d.shape, (1, 10, 1))
+    self.assertEqual(rhs_scale_3d.shape, (1, 10, 1))
 
   def test_innermost_tiling_heuristic(self):
     """Verifies that multi-dimensional dot_general picks the innermost contracting reduction axis."""

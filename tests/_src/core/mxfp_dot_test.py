@@ -28,12 +28,10 @@ Key Formats:
 
 Hardware Support Summary:
 - Blackwell (B200): Native MXFP8 and NVFP4 support.
-- H100: Supported via JAX emulation/decomposition (Verified).
-- TPUs (v5e, v6e, etc.): Currently raises NotImplementedError in JAX.
-- CPU: Currently raises NotImplementedError in JAX.
+- Older generation GPUs(H100, etc), TPUs(v5e, v6, etc.), CPU : Supported via JAX
+emulation/decomposition.
 """
 
-from unittest import mock
 from absl import logging
 from absl.testing import absltest
 import jax
@@ -278,7 +276,7 @@ class MxfpDotTest(absltest.TestCase):
     res = mxfp_dot._unflatten_from_3d(out_3d, lhs, rhs, dnums)
     self.assertEqual(res.shape, (2, 3, 4, 6))
 
-  def test_mxfp_dot_general_emulation_fallback(self):
+  def test_mxfp_dot_general_returns_array(self):
     lhs = qarray.QArray(
         qvalue=jnp.ones((2, 32), jnp.float8_e4m3fn),
         scale=jnp.ones((2, 1)),
@@ -290,34 +288,23 @@ class MxfpDotTest(absltest.TestCase):
         qtype="mxfp8",
     )
 
-    platform = jax.devices()[0].platform
-    if platform == "cpu":
-      res = mxfp_dot.mxfp_dot_general(
-          lhs, rhs, dimension_numbers=(((1,), (1,)), ((), ()))
-      )
-      self.assertIsNone(res)
+    res = mxfp_dot.mxfp_dot_general(
+        lhs, rhs, dimension_numbers=(((1,), (1,)), ((), ()))
+    )
+    self.assertIsNotNone(res)
 
-  @mock.patch.object(jax, "devices")
-  def test_one_side_mxfp_fallback(self, mock_devices):
-    mock_device = mock.MagicMock()
-    mock_device.platform = "gpu"
-    mock_devices.return_value = [mock_device]
+  def test_one_side_mxfp_fallback(self):
+    lhs = qarray.QArray(
+        qvalue=jnp.ones((2, 32), jnp.float8_e4m3fn),
+        scale=jnp.ones((2, 1)),
+        qtype="mxfp8",
+    )
+    rhs = jnp.ones((2, 32), jnp.float32)
 
-    mxfp_dot._get_primary_platform.cache_clear()
-    try:
-      lhs = qarray.QArray(
-          qvalue=jnp.ones((2, 32), jnp.float8_e4m3fn),
-          scale=jnp.ones((2, 1)),
-          qtype="mxfp8",
-      )
-      rhs = jnp.ones((2, 32), jnp.float32)
-
-      res = mxfp_dot.mxfp_dot_general(
-          lhs, rhs, dimension_numbers=(((1,), (1,)), ((), ()))
-      )
-      self.assertIsNone(res)
-    finally:
-      mxfp_dot._get_primary_platform.cache_clear()
+    res = mxfp_dot.mxfp_dot_general(
+        lhs, rhs, dimension_numbers=(((1,), (1,)), ((), ()))
+    )
+    self.assertIsNone(res)
 
 
 if __name__ == "__main__":
