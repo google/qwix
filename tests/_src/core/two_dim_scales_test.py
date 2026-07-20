@@ -18,6 +18,7 @@ import jax
 from jax import numpy as jnp
 from qwix._src.core import dot_general
 from qwix._src.core import dot_general_qt
+from qwix._src.core import einsum
 from qwix._src.core import qarray
 
 jax.config.update('jax_threefry_partitionable', False)
@@ -256,6 +257,40 @@ class TwoDimScalesTest(parameterized.TestCase):
     # Compare with the gradients from dot_general_qt.
     self.assertTrue(jnp.allclose(qt_grads[0], dlhs, rtol=1e-4, atol=1e-4))
     self.assertTrue(jnp.allclose(qt_grads[1], drhs, rtol=1e-4, atol=1e-4))
+
+  def test_einsum_2d_scales(self):
+    """Tests einsum with 2d scales."""
+    lhs_shape = (128, 128)
+    rhs_shape = (128, 128)
+
+    lhs_array = jax.random.normal(
+        jax.random.key(0), lhs_shape, dtype=jnp.float32
+    )
+    rhs_array = jax.random.normal(
+        jax.random.key(1), rhs_shape, dtype=jnp.float32
+    )
+
+    # 2D tiles of shape (8, 8)
+    lhs_how = qarray.HowToQuantize(
+        qtype=jnp.int8,
+        tiled_axes={0: 8, 1: 8},
+        calibration_method='absmax',
+    )
+    rhs_how = qarray.HowToQuantize(
+        qtype=jnp.int8,
+        tiled_axes={0: 8, 1: 8},
+        calibration_method='absmax',
+    )
+
+    lhs_q = qarray.quantize(lhs_array, lhs_how)
+    rhs_q = qarray.quantize(rhs_array, rhs_how)
+
+    res_true = jnp.einsum(
+        'ab,bc->ac', qarray.dequantize(lhs_q), qarray.dequantize(rhs_q)
+    )
+    res_einsum = einsum.einsum('ab,bc->ac', lhs_q, rhs_q)
+
+    self.assertTrue(jnp.allclose(res_einsum, res_true, rtol=1e-4, atol=1e-4))
 
 
 if __name__ == '__main__':
