@@ -44,7 +44,11 @@ class NamedParamModule(nn.Module):
 
 class OdmlTest(parameterized.TestCase):
 
-  def test_linen(self):
+  @parameterized.named_parameters(
+      dict(testcase_name='i8xi8', act_qtype=jnp.int8, weight_qtype=jnp.int8),
+      dict(testcase_name='i8xi4', act_qtype=jnp.int8, weight_qtype=jnp.int4),
+  )
+  def test_linen(self, act_qtype, weight_qtype):
     class LinenModel(nn.Module):
 
       @nn.compact
@@ -58,8 +62,8 @@ class OdmlTest(parameterized.TestCase):
     rules = [
         qconfig.QuantizationRule(
             module_path='.*',
-            weight_qtype=jnp.int8,
-            act_qtype=jnp.int8,
+            weight_qtype=weight_qtype,
+            act_qtype=act_qtype,
         ),
     ]
     qat_provider = odml.OdmlQatProvider(rules)
@@ -213,7 +217,11 @@ class OdmlTest(parameterized.TestCase):
         )
     )
 
-  def test_nnx(self):
+  @parameterized.named_parameters(
+      dict(testcase_name='i8xi8', act_qtype=jnp.int8, weight_qtype=jnp.int8),
+      dict(testcase_name='i8xi4', act_qtype=jnp.int8, weight_qtype=jnp.int4),
+  )
+  def test_nnx(self, act_qtype, weight_qtype):
     class NnxModel(nnx.Module):
 
       def __init__(self, rngs: nnx.Rngs):
@@ -230,8 +238,8 @@ class OdmlTest(parameterized.TestCase):
     rules = [
         qconfig.QuantizationRule(
             module_path='.*',
-            weight_qtype=jnp.int8,
-            act_qtype=jnp.int8,
+            weight_qtype=weight_qtype,
+            act_qtype=act_qtype,
         ),
     ]
     qat_provider = odml.OdmlQatProvider(rules)
