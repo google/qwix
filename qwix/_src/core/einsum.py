@@ -14,7 +14,7 @@
 """Quantized einsum with subchannel support."""
 # pylint: disable=line-too-long
 
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import jax
 from jax import numpy as jnp
@@ -29,7 +29,7 @@ def get_how_to_quantize(
     einsum_str: str,
     ndims: tuple[int, int],
     for_lhs: bool,
-    tile_size: int | float | None,
+    tile_size: Mapping[int, int | float] | int | float | None,
     **kwargs: Any,
 ) -> qarray.HowToQuantize:
   """Get how to quantize from an einsum string.
@@ -43,12 +43,15 @@ def get_how_to_quantize(
       when ellipsis is in subscripts and we need to determine the number of
       dimensions represented by ellipsis.
     for_lhs: Whether to quantize lhs or rhs.
-    tile_size: The tile size for subchannel quantization.
+    tile_size: The tile size for subchannel quantization. If the tile_size is a
+      Mapping, then this uses the tiling specified by tile_size. Otherwise this
+      is interpreted as the tile size for the first axis in contracting_axes.
     **kwargs: Additional keyword arguments to HowToQuantize.
 
   Returns:
     How to quantize the lhs or rhs.
   """
+  # get einsum info
   info = einsum_info.EinsumInfo.parse(einsum_str, ndims=ndims)
   operand_subs = info.lhs if for_lhs else info.rhs
 
@@ -60,8 +63,16 @@ def get_how_to_quantize(
       channelwise_axes.append(axis)
     else:
       last_contracting_axis = axis  # Only tile the last contraction axis.
-  if tile_size and last_contracting_axis is not None:
-    tiled_axes[last_contracting_axis] = tile_size
+
+  if isinstance(tile_size, Mapping):
+    tiled_axes = tile_size
+    # Update the channelwise axes to exclude the tiled axes.
+    channelwise_axes = [
+        axis for axis in channelwise_axes if axis not in tiled_axes
+    ]
+  else:
+    if tile_size and last_contracting_axis is not None:
+      tiled_axes[last_contracting_axis] = tile_size
 
   return qarray.HowToQuantize(
       channelwise_axes=channelwise_axes,

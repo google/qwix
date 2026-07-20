@@ -695,6 +695,40 @@ class PtqTest(parameterized.TestCase):
     out = ptq_mha(model_input, decode=False)
     self.assertEqual(out.shape, (2, 16, 64))
 
+  def test_nnx_linear_2d_scales_ptq(self):
+    layer = nnx.Linear(8, 16, rngs=nnx.Rngs(0))
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*", weight_qtype=jnp.int8, tile_size={0: 2, 1: 2}
+        ),
+    ]
+    x = jnp.ones((2, 8))
+    ptq_layer = qwix_model.quantize_model(layer, ptq.PtqProvider(q_rules), x)
+    out = ptq_layer(x)
+    self.assertEqual(out.shape, (2, 16))
+    self.assertEqual(ptq_layer.kernel.array.scale.shape, (4, 8))
+
+  def test_nnx_einsum_2d_scales_ptq(self):
+    class EinsumModel(nnx.Module):
+
+      def __init__(self):
+        self.w = nnx.Param(jnp.ones((8, 16)))
+
+      def __call__(self, x):
+        return jnp.einsum("ij,jk->ik", x, self.w)
+
+    layer = EinsumModel()
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*", weight_qtype=jnp.int8, tile_size={0: 2, 1: 2}
+        ),
+    ]
+    x = jnp.ones((2, 8))
+    ptq_layer = qwix_model.quantize_model(layer, ptq.PtqProvider(q_rules), x)
+    out = ptq_layer(x)
+    self.assertEqual(out.shape, (2, 16))
+    self.assertEqual(ptq_layer.w.array.scale.shape, (4, 8))
+
 
 if __name__ == "__main__":
   absltest.main()
