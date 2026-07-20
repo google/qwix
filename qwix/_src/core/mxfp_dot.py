@@ -14,9 +14,8 @@
 """Block-scaled dot_general dispatch for eligible hardware devices."""
 
 from collections.abc import Sequence
-import functools
 import math
-from typing import Any
+from typing import Any, TypeGuard
 import jax
 from jax import numpy as jnp
 from qwix._src.core import qarray
@@ -28,15 +27,16 @@ def mxfp_dot_general(
     dimension_numbers: jax.lax.DotDimensionNumbers,
     preferred_element_type: jax.typing.DTypeLike | None = None,
 ) -> jax.Array | None:
-  """Handles MXFP dot_general on ZFC and Blackwell GPUs.
+  """Handles MXFP dot_general using `jax.nn.scaled_matmul`.
 
-  This dispatcher attempts to accelerate OCP/NVIDIA microscaled matmuls using
-  GPU hardware Tensor Cores via `jax.nn.scaled_matmul`.
+  This dispatcher attempts to accelerate or decompose OCP/NVIDIA microscaled
+  matmuls using `jax.nn.scaled_matmul` (hardware Tensor Cores on Blackwell, or
+  JAX emulation/decomposition on TPUs, CPUs, and legacy GPUs).
 
-  Note that hardware acceleration is strictly supported only when BOTH operands
-  are microscaled formats (MXFP8, MXFP4, or NVFP4). One-sided microscaled
-  operations are not supported by the hardware, and will cleanly return `None`
-  to fall back to standard float emulation.
+  Note that `scaled_matmul` is supported when BOTH operands are microscaled
+  formats (MXFP8, MXFP4, or NVFP4) with matching batch and contracting scale
+  dimensions. One-sided microscaled operations or mismatched scale dimensions
+  will cleanly return `None` to fall back to standard float emulation.
 
   Args:
     lhs: Left hand side operand.
@@ -47,30 +47,6 @@ def mxfp_dot_general(
   Returns:
     A jax.Array with the result, or None to fall back to emulation.
   """
-  # jax.nn.scaled_matmul is currently only supported on GPU (natively on
-  # Blackwell, emulated on legacy devices). Once scaled_matmul supports TPU, we
-  # will enable it for TPU as well.
-  if _get_primary_platform() == "gpu":
-    return _gpu_mxfp_dot(lhs, rhs, dimension_numbers, preferred_element_type)
-
-  return None
-
-
-def _is_mxfp(operand: Any) -> bool:
-  """Verifies whether the operand is an OCP/NVIDIA microscaled format."""
-  if isinstance(operand, qarray.QArray):
-    return operand.qtype in ("mxfp8", "mxfp4", "nvfp4")
-  return False
-
-
-@functools.cache
-def _get_primary_platform() -> str:
-  """Returns the JAX platform name cached to avoid tracer round-trips."""
-  return jax.devices()[0].platform
-
-
-def _gpu_mxfp_dot(lhs, rhs, dimension_numbers, preferred_element_type):
-  """GPU specific MXFP dot."""
   if not (_is_mxfp(lhs) and _is_mxfp(rhs)):
     return None
 
@@ -78,17 +54,49 @@ def _gpu_mxfp_dot(lhs, rhs, dimension_numbers, preferred_element_type):
   lhs_val_3d, lhs_scale_3d = _flatten_to_3d(lhs, lhs_ca, lhs_ba)
   rhs_val_3d, rhs_scale_3d = _flatten_to_3d(rhs, rhs_ca, rhs_ba)
 
+  if not _inputs_compatible(lhs_val_3d, rhs_val_3d, lhs_scale_3d, rhs_scale_3d):
+    return None
+
+  _, result_type = qarray.get_accumulator_and_result_type(
+      lhs, rhs, preferred_element_type=preferred_element_type
+  )
+
   # jax.nn.scaled_matmul is natively accelerated on Blackwell GPUs (via cuDNN
-  # scaled matmul kernels) and emulated/decomposed on legacy GPUs (like H100).
+  # scaled matmul kernels) and emulated/decomposed on TPUs, CPUs, and legacy
+  # GPUs (like H100).
   out_3d = jax.nn.scaled_matmul(
       lhs_val_3d,
       rhs_val_3d,
       lhs_scale_3d,
       rhs_scale_3d,
-      preferred_element_type=preferred_element_type or jnp.float32,
+      preferred_element_type=result_type,
   )
 
   return _unflatten_from_3d(out_3d, lhs, rhs, dimension_numbers)
+
+
+def _is_mxfp(operand: Any) -> TypeGuard[qarray.QArray]:
+  """Verifies whether the operand is an OCP/NVIDIA microscaled format."""
+  return isinstance(operand, qarray.QArray) and operand.qtype in (
+      "mxfp8",
+      "mxfp4",
+      "nvfp4",
+  )
+
+
+def _inputs_compatible(
+    lhs_val_3d: jax.Array,
+    rhs_val_3d: jax.Array,
+    lhs_scale_3d: jax.Array,
+    rhs_scale_3d: jax.Array,
+) -> bool:
+  """Checks 3D value and scale tensors are compatible for scaled_matmul."""
+  return (
+      lhs_val_3d.shape[0] == rhs_val_3d.shape[0]
+      and lhs_val_3d.shape[2] == rhs_val_3d.shape[2]
+      and lhs_scale_3d.shape[0] == rhs_scale_3d.shape[0]
+      and lhs_scale_3d.shape[2] == rhs_scale_3d.shape[2]
+  )
 
 
 def _flatten_to_3d(
