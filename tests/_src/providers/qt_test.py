@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import itertools
 from absl.testing import absltest
+from absl.testing import parameterized
 from flax import linen as nn
 from flax import nnx
 import jax
@@ -24,7 +26,7 @@ from qwix._src.providers import qt
 from qwix._src.utils import flax_util
 
 
-class QtTest(absltest.TestCase):
+class QtTest(parameterized.TestCase):
 
   def test_bwd_reuse_noise(self):
     """Tests that noise is reused in bwd pass for lhs/rhs."""
@@ -242,6 +244,57 @@ class QtTest(absltest.TestCase):
       return nnx.grad(loss_fn)(model, x)
 
     grads = train_step(qt_mha, model_input)
+    self.assertIsNotNone(grads)
+
+  @parameterized.parameters(itertools.product([True, False], repeat=3))
+  def test_nnx_linear_qt_2d_bwd(
+      self,
+      tsb: bool,
+      bwd_weight_grad_tsb: bool,
+      dlhs_tsb: bool,
+  ):
+    """Tests that QtProvider is compatible with 2D tile sizes."""
+    # tsb is short for tile_size_bool
+
+    # If True, use a 2D tile size, otherwise use a scalar tile size.
+    def _get_tile_size(use_multi_axis: bool):
+      if use_multi_axis:
+        return {0: 2, 1: 2}
+      return 2
+
+    rule = qt.QtRule(
+        module_path=".*",
+        weight_qtype="int8",
+        act_qtype="int8",
+        bwd_qtype="int8",
+        tile_size=_get_tile_size(tsb),
+        bwd_weight_grad_tile_size=_get_tile_size(bwd_weight_grad_tsb),
+        disable_channelwise_axes=False,
+        act_static_scale=False,
+        additional_qt_config={
+            "dlhs_grad_qtype": "int8",
+            "dlhs_tile_size": _get_tile_size(dlhs_tsb),
+            "drhs_grad_qtype": "int8",
+        },
+    )
+    model_input = jnp.ones((8, 16), dtype=jnp.float32)
+    linear = nnx.Linear(16, 32, rngs=nnx.Rngs(0))
+    qt_linear = qwix_model.quantize_model(
+        linear,
+        qt.QtProvider([rule]),
+        model_input,
+    )
+
+    # Training function
+    @nnx.jit
+    def train_step(model, x):
+      def loss_fn(model, x):
+        out = model(x)
+        return jnp.sum(out)
+
+      return nnx.grad(loss_fn)(model, x)
+
+    grads = train_step(qt_linear, model_input)
     self.assertIsNotNone(grads)
 
 
