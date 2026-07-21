@@ -220,7 +220,7 @@ def lhs_fused_quantized_matmul(
   # Call the kernel
   return pl.kernel(
       kernel,
-      out_type=out_type,
-      mesh=tc_mesh,
-      scratch_types=[accum_buffer],
+      out_type=out_type,  # pyrefly: ignore
+      mesh=tc_mesh,  # pyrefly: ignore
+      scratch_types=[accum_buffer],  # pyrefly: ignore
   )(x, y, sy)

@@ -9,7 +9,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: unit-tests-${{ github.workflow }}-${{ github.ref }}
+  # Give every push its own group so main runs are never queued behind or
+  # cancelled by other runs. PR runs share a per-PR group so superseded
+  # commits are cancelled.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

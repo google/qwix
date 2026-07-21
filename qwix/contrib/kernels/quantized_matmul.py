@@ -396,7 +396,7 @@ def quantized_matmul(
   # Call the kernel
   return pl.kernel(
       kernel,
-      out_type=out_type,
-      mesh=tc_mesh,
-      scratch_types=[pltpu.VMEM((bm, bn), accum_dtype)],
+      out_type=out_type,  # pyrefly: ignore
+      mesh=tc_mesh,  # pyrefly: ignore
+      scratch_types=[pltpu.VMEM((bm, bn), accum_dtype)],  # pyrefly: ignore
   )(x, sx, y, sy)

@@ -123,6 +123,35 @@ def _get_sharding(
   return sharding
 
 
+def _sharding_from_template_metadata(
+    boxed_template_value: Any,
+) -> jax.sharding.NamedSharding | None:
+  """Recovers a NamedSharding from an nnx template's partitioning metadata.
+
+  On older jax versions, `nnx.eval_shape` may drop the sharding from template
+  leaves even though the boxed nnx `Variable` still carries its partitioning
+  metadata. When a concrete mesh is active, reconstruct the intended
+  `NamedSharding` from that metadata, mirroring `nnx.get_named_sharding`.
+
+  Args:
+    boxed_template_value: The template leaf before `flax_util.unbox`.
+
+  Returns:
+    A concrete `NamedSharding`, or `None` when the template has no real
+    partitioning metadata or no concrete mesh is active (callers then keep the
+    existing un-sharded behavior).
+  """
+  if not isinstance(boxed_template_value, nnx.Variable):
+    return None
+  spec = nnx.spmd.get_var_pspec(boxed_template_value)
+  concrete_mesh = jax.sharding.get_mesh()
+  # Re-shard only when the template names a real non-replicated axis and a
+  # concrete mesh is active. Empty/all-None specs keep the caller's default.
+  if concrete_mesh.empty or spec is None or all(axis is None for axis in spec):
+    return None
+  return jax.sharding.NamedSharding(concrete_mesh, spec)
+
+
 def _apply_sharding_and_dtype(
     checkpoint_value: Any,
     template_value: Any,
@@ -131,6 +160,7 @@ def _apply_sharding_and_dtype(
     use_checkpoint_sharding: bool = False,
 ) -> jax.Array:
   """Converts a host/device array-like value into the template's array shape."""
+  boxed_template_value = template_value
   template_value = flax_util.unbox(template_value)
   if not isinstance(template_value, (jax.Array, jax.ShapeDtypeStruct)):
     raise TypeError(
@@ -144,6 +174,8 @@ def _apply_sharding_and_dtype(
     sharding = _get_sharding(getattr(checkpoint_value, 'sharding', None), path)
   else:
     sharding = _get_sharding(getattr(template_value, 'sharding', None), path)
+    if sharding is None:
+      sharding = _sharding_from_template_metadata(boxed_template_value)
 
   # Handle sharding.
   if sharding is not None:

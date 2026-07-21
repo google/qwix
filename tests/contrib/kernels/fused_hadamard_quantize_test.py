@@ -9,6 +9,15 @@ from qwix.contrib.kernels import fused_hadamard_quantize as fhq
 
 class LHSFusedHadamardQuantizeTest(parameterized.TestCase):
 
+  def setUp(self):
+    super().setUp()
+    if jax.devices()[0].platform != "tpu":
+      self.skipTest(
+          "Fused Hadamard quantize is a TPU-only Pallas kernel; it requires "
+          "TensorCore mesh setup (pltpu.create_tensorcore_mesh needs "
+          "device.num_cores), which is unavailable on CPU/GPU."
+      )
+
   @parameterized.parameters(
       (1024, 1024, 8, 8, 1024, 1024),
       (1024, 1024, 8, 8, 512, 512),

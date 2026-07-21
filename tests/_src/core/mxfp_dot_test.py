@@ -33,6 +33,7 @@ Hardware Support Summary:
 - CPU: Currently raises NotImplementedError in JAX.
 """
 
+import functools
 from unittest import mock
 from absl import logging
 from absl.testing import absltest
@@ -41,6 +42,36 @@ import jax.numpy as jnp
 import numpy as np
 from qwix._src.core import mxfp_dot
 from qwix._src.core import qarray
+
+
+@functools.lru_cache(maxsize=None)
+def _scaled_matmul_supported() -> bool:
+  """Returns whether `jax.nn.scaled_matmul` can run on the current backend.
+
+  The `scaled_matmul` primitive lacks an MLIR lowering rule on some platforms
+  (e.g. CPU and TPU) in released JAX builds, where it raises
+  `NotImplementedError` at lowering time. We probe support at runtime and cache
+  the result so the affected tests automatically re-enable once a released JAX
+  gains a lowering for the current platform.
+  """
+  lhs = jnp.zeros((1, 1, 32), dtype=jnp.float32)
+  rhs = jnp.zeros((1, 1, 32), dtype=jnp.float32)
+  scale = jnp.ones((1, 1, 1), dtype=jnp.float32)
+  try:
+    jax.jit(jax.nn.scaled_matmul)(lhs, rhs, scale, scale).block_until_ready()
+    return True
+  except NotImplementedError:
+    return False
+
+
+def _skip_if_scaled_matmul_unsupported(test_case: absltest.TestCase) -> None:
+  if not _scaled_matmul_supported():
+    test_case.skipTest(
+        "jax.nn.scaled_matmul has no lowering for platform "
+        f"{jax.devices()[0].platform!r} in this JAX build (raises "
+        "NotImplementedError). Re-enables automatically when a released JAX "
+        "adds support."
+    )
 
 
 def reference_scaled_matmul(lhs, rhs, lhs_scale, rhs_scale):
@@ -143,6 +174,7 @@ class MxfpNumericsTest(absltest.TestCase):
 
   def test_matmul_f32_baseline(self):
     """Sanity check for scaled_matmul with FP32 and unit scales."""
+    _skip_if_scaled_matmul_unsupported(self)
     lhs, rhs = self._generate_test_data()
 
     # scaled_matmul with 1.0 scales should be same as normal matmul
@@ -167,6 +199,7 @@ class MxfpNumericsTest(absltest.TestCase):
       scale_type: The JAX data type for the scales.
       block_size: The block size for microscaling.
     """
+    _skip_if_scaled_matmul_unsupported(self)
     logging.info(
         "Running MXFP test: mxfp_format=%s, data_type=%s, scale_type=%s,"
         " block_size=%d",
