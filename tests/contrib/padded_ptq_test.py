@@ -181,6 +181,80 @@ class PaddedPtqTest(parameterized.TestCase):
     print(f'Max diff in dot_general results: {float(result_diff)}')
     assert jnp.allclose(result_pad, result_ptq, atol=1e-3)
 
+  def test_einsum_simple_2d_scales(self):
+    weight_qtype = 'int8'
+    act_qtype = 'int8'
+    tile_size = {0: 2, 1: 2}
+    x = jax.random.normal(jax.random.key(0), (T, D), dtype=jnp.float32)
+    w = jax.random.normal(jax.random.key(1), (E, D, F), dtype=jnp.float32)
+
+    # Pad the weight for PTQ
+    w_padded_shape = padded_ptq.get_padded_shape(w.shape, tile_size)
+    e_padded, d_padded, f_padded = w_padded_shape
+    w_padded = padded_ptq.pad_to_shape(w, w_padded_shape)
+    x_padded = padded_ptq.pad_to_shape(x, (T, d_padded))
+
+    rule = qconfig.QuantizationRule(
+        module_path='.*',
+        weight_qtype=weight_qtype,
+        act_qtype=act_qtype,
+        tile_size=tile_size,
+    )
+
+    how = core_einsum.get_how_to_quantize(
+        einsum_str='td,edf->tef',
+        ndims=(2, 3),
+        for_lhs=False,
+        qtype=rule.weight_qtype,
+        tile_size=tile_size,
+        calibration_method='absmax',
+    )
+
+    w_qarray_pad = padded_ptq.quantize_act(w, how, rule, None)
+    w_qarray_ptq = ptq.quantize_act(w_padded, how, rule, None)
+
+    q_diff = jnp.max(
+        jnp.abs(w_qarray_pad.qvalue - w_qarray_ptq.qvalue[:E, :D, :F])
+    )
+    print(f'Max diff in calibration: {float(q_diff)}')
+    scale_diff = jnp.max(jnp.abs(w_qarray_pad.scale - w_qarray_ptq.scale))
+    print(f'Max diff in scales: {float(scale_diff)}')
+    assert jnp.allclose(
+        w_qarray_pad.qvalue, w_qarray_ptq.qvalue[:E, :D, :F], atol=1e-6
+    )
+    assert jnp.allclose(w_qarray_pad.scale, w_qarray_ptq.scale, atol=1e-6)
+
+    # Use tiny dummy modules so provider rule lookup has a module context.
+    class EinsumModel(nn.Module):
+      e: int
+      d: int
+      f: int
+      w_init: jax.Array
+
+      @nn.compact
+      def __call__(self, x):
+        w = self.param(
+            'w', lambda *args, **kwargs: self.w_init, (self.e, self.d, self.f)
+        )
+        return jnp.einsum('td,edf->tef', x, w)
+
+    pad_model = EinsumModel(E, D, F, w)
+    pad_qmodel = qwix_model.quantize_model(
+        pad_model, padded_ptq.PaddedPtqProvider([rule])
+    )
+    pad_vars = pad_qmodel.init(jax.random.key(0), x)
+    result_pad = pad_qmodel.apply(pad_vars, x)
+
+    ptq_model = EinsumModel(e_padded, d_padded, f_padded, w_padded)
+    base_qmodel = qwix_model.quantize_model(ptq_model, ptq.PtqProvider([rule]))
+    base_vars = base_qmodel.init(jax.random.key(1), x_padded)
+    result_ptq = base_qmodel.apply(base_vars, x_padded)
+
+    result_diff = jnp.max(jnp.abs(result_pad - result_ptq))
+    print(f'Max diff in einsum results: {float(result_diff)}')
+
+    assert jnp.allclose(result_pad, result_ptq, atol=1e-3)
+
 
 if __name__ == '__main__':
   absltest.main()
