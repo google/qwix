@@ -445,6 +445,36 @@ class AwqTest(parameterized.TestCase):
     # Note: 'key' stores stats as 'key_awq'.
     self.assertLen(variables['quant_stats'], 1)
 
+  def test_2d_scales(self):
+    """Test AWQ with different quantization types."""
+
+    class Model(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        return nn.Dense(64)(x)
+
+    model = Model()
+    x = jax.random.normal(jax.random.key(0), (5, 32))
+    variables = model.init(jax.random.key(1), x)
+
+    rules = [awq.AwqRule(tile_size={0: 2, 1: 2})]
+    awq_provider = awq.AwqCalibrationProvider(rules)
+    model_cal = qwix_model.quantize_model(model, awq_provider)
+    _, new_variables = model_cal.apply(variables, x, mutable='quant_stats')
+    variables.update(new_variables)
+
+    ptq_provider = ptq.PtqProvider(rules)
+    model_ptq = qwix_model.quantize_model(model, ptq_provider)
+    abs_variables = jax.eval_shape(model_ptq.init, jax.random.key(2), x)
+
+    awq_params = awq.quantize_params(
+        variables['params'], abs_variables['params'], variables['quant_stats']
+    )
+
+    # Verify quantization succeeded.
+    self.assertIsNotNone(awq_params)
+
 
 if __name__ == '__main__':
   absltest.main()
