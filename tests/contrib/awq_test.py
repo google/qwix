@@ -445,6 +445,56 @@ class AwqTest(parameterized.TestCase):
     # Note: 'key' stores stats as 'key_awq'.
     self.assertLen(variables['quant_stats'], 1)
 
+  def test_2d_scales(self):
+    """Test AWQ with different quantization types."""
+
+    class Model(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        return nn.Dense(64)(x)
+
+    model = Model()
+    x = jax.random.normal(jax.random.key(0), (5, 32))
+    variables = model.init(jax.random.key(1), x)
+    fp_y = model.apply(variables, x)
+
+    rules = [awq.AwqRule(weight_qtype=jnp.int8, tile_size={0: 2, 1: 2})]
+    awq_provider = awq.AwqCalibrationProvider(rules)
+    model_cal = qwix_model.quantize_model(model, awq_provider)
+    _, new_variables = model_cal.apply(variables, x, mutable='quant_stats')
+    variables.update(new_variables)
+
+    ptq_provider = ptq.PtqProvider(rules)
+    model_ptq = qwix_model.quantize_model(model, ptq_provider)
+    abs_variables = jax.eval_shape(model_ptq.init, jax.random.key(2), x)
+
+    awq_params = awq.quantize_params(
+        variables['params'], abs_variables['params'], variables['quant_stats']
+    )
+
+    # Verify quantization succeeded.
+    self.assertIsNotNone(awq_params)
+    # Use AwqInferenceProvider for inference (applies per-channel compensation).
+    awq_inference_provider = awq.AwqInferenceProvider(rules)
+    model_awq = qwix_model.quantize_model(model, awq_inference_provider)
+    awq_y = model_awq.apply({'params': awq_params}, x)
+
+    # Verify output is valid and has correct shape.
+    self.assertEqual(awq_y.shape, fp_y.shape)
+    self.assertTrue(jnp.all(jnp.isfinite(awq_y)))
+
+    # Weight transformation using PTQ.
+    ptq_params = ptq.quantize_params(
+        variables['params'], abs_variables['params']
+    )
+    model_ptq_inference = qwix_model.quantize_model(model, ptq_provider)
+    ptq_y = model_ptq_inference.apply({'params': ptq_params}, x)
+
+    # Verify AWQ outperforms PTQ.
+    mae = lambda x, y: jnp.mean(jnp.abs(x - y))
+    self.assertLessEqual(mae(fp_y, awq_y), mae(fp_y, ptq_y))
+
 
 if __name__ == '__main__':
   absltest.main()

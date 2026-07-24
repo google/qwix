@@ -326,6 +326,46 @@ class GptqTest(parameterized.TestCase):
     quant_stats = nnx.state(model_cal, flax_util.QuantStat)
     self.assertLen(nnx.to_pure_dict(quant_stats), 1)
 
+  def test_2d_scales(self):
+    """Tests that a dense model is quantized correctly with NNX."""
+
+    model = nnx.Linear(32, 64, rngs=nnx.Rngs(0))
+    x = jax.random.normal(jax.random.key(0), (5, 32))
+
+    # 1. Calibration.
+    rules = [gptq.GptqRule(module_path='.*', tile_size={0: 2, 1: 2})]
+    gptq_calibration_provider = gptq.GptqCalibrationProvider(rules)
+    model_cal = qwix_model.quantize_model(model, gptq_calibration_provider, x)
+
+    # Running the first calibration batch.
+    _ = model_cal(x)
+    gptq_stats = model_cal.kernel_gptq
+    self.assertEqual(gptq_stats['count'], 1)
+    self.assertEqual(gptq_stats['sum_of_hessian'].shape, (32, 32))
+
+    # Running the second calibration batch to test accumulation.
+    fp_y = model_cal(x)
+    gptq_stats = model_cal.kernel_gptq
+    self.assertEqual(gptq_stats['count'], 2)
+
+    # 2. Model preparation for inference.
+    ptq_provider = ptq.PtqProvider(rules)
+    model_ptq = qwix_model.quantize_model(model, ptq_provider, x)
+    # Get PTQ baseline output.
+    ptq_y = model_ptq(x)
+
+    # 3. Actual weight transformation using GPTQ.
+    state = nnx.to_pure_dict(nnx.state(model_cal, nnx.Param))
+    quant_stats = nnx.to_pure_dict(nnx.state(model_cal, flax_util.QuantStat))
+    gptq_params = gptq.quantize_params(state, model_ptq, quant_stats)
+    # Apply GPTQ params to model.
+    nnx.update(model_ptq, gptq_params)
+    gptq_y = model_ptq(x)
+
+    # GPTQ should match PTQ for single layer
+    mae = lambda x, y: jnp.mean(jnp.abs(x - y))
+    self.assertLessEqual(mae(fp_y, gptq_y), mae(fp_y, ptq_y))
+
 
 if __name__ == '__main__':
   absltest.main()
