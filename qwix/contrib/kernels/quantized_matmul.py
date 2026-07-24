@@ -239,13 +239,14 @@ def quantized_matmul_kernel(
 
   # Kernel body
   def quantized_matmul_body(
+      step,
       x_vmem: jax.Ref,
       sx_vmem: jax.Ref,
       y_vmem: jax.Ref,
       sy_vmem: jax.Ref,
       o_vmem: jax.Ref,
   ):
-    kind = pl.program_id(2)
+    kind = step.index[2]
 
     # Initialize accumulation buffer
     @pl.when(kind == 0)
@@ -283,7 +284,7 @@ def quantized_matmul_kernel(
           accum_vmem[data_m_slc, data_n_slc] += xys
 
     # Write results to output buffer.
-    @pl.when(pl.program_id(2) == pl.num_programs(2) - 1)
+    @pl.when(step.index[2] == grid[2] - 1)
     def _write():
       o_vmem[...] = accum_vmem[...].astype(o_vmem.dtype)
 
@@ -298,6 +299,7 @@ def quantized_matmul_kernel(
       out_specs=o_spec,
       core_axis_name=_CORE_AXIS_NAME,
       dimension_semantics=(pltpu.PARALLEL, pltpu.PARALLEL, pltpu.ARBITRARY),
+      _explicit_indices=True,
   )(x_hbm, sx_hbm, y_hbm, sy_hbm, o_hbm)
 
 
