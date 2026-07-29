@@ -17,6 +17,8 @@ from jax import numpy as jnp
 from qwix._src import model as qwix_model
 from qwix._src import qconfig
 from qwix._src.core import qarray
+from qwix._src.providers import boxed_param
+from qwix._src.providers import lora
 from qwix._src.providers import ptq
 
 
@@ -123,6 +125,14 @@ class QconfigTest(absltest.TestCase):
               act_static_scale=True,
           )
       ])
+
+  def test_boxed_param_provider_hierarchy(self):
+    self.assertTrue(issubclass(ptq.PtqProvider, boxed_param.BoxedParamProvider))
+    self.assertTrue(
+        issubclass(lora.LoraProvider, boxed_param.BoxedParamProvider)
+    )
+    self.assertFalse(issubclass(lora.LoraProvider, ptq.PtqProvider))
+    self.assertIs(ptq.WithAux, boxed_param.WithAux)
 
 
 if __name__ == "__main__":
