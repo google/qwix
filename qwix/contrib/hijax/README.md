@@ -50,6 +50,7 @@ impacting current qwix users.
 This implementation uses the naming `HiQArray` for the hijax implementation of
 a `QArray`.
 
-- `hiqarray_common`: Common jax based functions and dataclasses for `HiQArray`.
+- `metadata`: Utilities for translating between data and scales.
 - `hiquant_utils`: Common jax utilities for use in `HiQArray`.
-- `hiqarray`: Coming soon.
+- `hiqarray`: Main HiQarray abstraction.
+- `convert`: Functions to convert to and from HiQArrays.
