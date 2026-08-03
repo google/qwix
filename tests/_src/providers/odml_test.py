@@ -13,6 +13,7 @@
 # limitations under the License.
 """Test the ODML providers for op coverage."""
 
+from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -43,6 +44,86 @@ class NamedParamModule(nn.Module):
 
 
 class OdmlTest(parameterized.TestCase):
+
+  def _run_linen_einsum_conversion(
+      self,
+      rules,
+      *,
+      input_shape=(2, 3, 16),
+      weight_shape=(4, 16, 8),
+      einsum_str='BTD,NDH->BTNH',
+      provider_kwargs=None,
+      transform_weight=False,
+  ):
+    class EinsumModel(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        if not transform_weight:
+          return nn.Einsum(
+              shape=weight_shape,
+              einsum_str=einsum_str,
+              use_bias=False,
+          )(x)
+        else:
+          w = self.param('kernel', nn.initializers.lecun_normal(), weight_shape)
+          w = jnp.flip(w, axis=0)
+          return jnp.einsum(einsum_str, x, w)
+
+    model = EinsumModel()
+    provider_kwargs = provider_kwargs or {}
+    qat_provider = odml.OdmlQatProvider(rules, **provider_kwargs)
+    qat_model = qwix_model.quantize_model(model, qat_provider)
+    input_size = 1
+    for dim in input_shape:
+      input_size *= dim
+    model_input = jnp.arange(input_size, dtype=jnp.float32).reshape(input_shape)
+    model_input = (model_input + 1) / input_size
+    qat_vars = qat_model.init(jax.random.key(0), model_input)
+    qat_res, new_vars = qat_model.apply(qat_vars, model_input, mutable=True)
+    qat_vars.update(new_vars)
+
+    conversion_provider = odml.OdmlConversionProvider(
+        rules,
+        qat_vars['params'],
+        qat_vars.get('quant_stats', {}),
+        **provider_kwargs,
+    )
+    conversion_model = qwix_model.quantize_model(model, conversion_provider)
+    conversion_res = conversion_model.apply(qat_vars, model_input)
+    return qat_vars, qat_res, conversion_res
+
+  def _run_nnx_einsum_conversion(self, rules):
+    class NnxEinsumModel(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.einsum = nnx.Einsum(
+            'BTD,NDH->BTNH',
+            (4, 16, 8),
+            rngs=rngs,
+        )
+
+      def __call__(self, x):
+        return self.einsum(x)
+
+    model = NnxEinsumModel(nnx.Rngs(0))
+    model_input = jnp.arange(2 * 3 * 16, dtype=jnp.float32).reshape(2, 3, 16)
+    model_input = model_input / jnp.max(model_input)
+
+    qat_provider = odml.OdmlQatProvider(rules)
+    qat_model = qwix_model.quantize_model(model, qat_provider, model_input)
+    qat_res = qat_model(model_input)
+    quant_stats = nnx.to_pure_dict(nnx.state(qat_model, flax_util.QuantStat))
+    params = nnx.to_pure_dict(nnx.state(qat_model, nnx.Param))
+
+    conversion_provider = odml.OdmlConversionProvider(
+        rules, params, quant_stats
+    )
+    conversion_model = qwix_model.quantize_model(
+        model, conversion_provider, model_input
+    )
+    conversion_res = conversion_model(model_input)
+    return quant_stats, qat_res, conversion_res
 
   @parameterized.named_parameters(
       dict(testcase_name='i8xi8', act_qtype=jnp.int8, weight_qtype=jnp.int8),
@@ -191,6 +272,339 @@ class OdmlTest(parameterized.TestCase):
         },
     )
 
+  @parameterized.parameters(False, True)
+  def test_linen_original_weight_marker_is_initialized(self, use_axis_metadata):
+    """Tests Linen tags one direct logical array for boxed and raw params."""
+    observed_metadata = []
+
+    class LinenModel(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        init = nn.initializers.ones
+        if use_axis_metadata:
+          init = nn.with_partitioning(init, ('input', 'output'))
+        param = self.param(
+            'kernel', init, (x.shape[-1], 4), unbox=not use_axis_metadata
+        )
+        weight = flax_util.unbox(param)
+        observed_metadata.append((
+            aux_data.get(weight, odml_ops.AuxDataKey.WEIGHT_NAME, None),
+            aux_data.get(
+                weight,
+                odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT,
+                False,
+            ),
+        ))
+        return jnp.dot(x, weight)
+
+    model = LinenModel()
+    qat_model = qwix_model.quantize_model(model, odml.OdmlQatProvider([]))
+    model_input = jnp.ones((1, 3), dtype=jnp.float32)
+    variables = qat_model.init(jax.random.key(0), model_input)
+
+    observed_metadata.clear()
+    qat_model.apply(variables, model_input)
+
+    self.assertEqual(observed_metadata, [('kernel', True)])
+
+  def test_linen_einsum_multi_axis_weight_conversion(self):
+    """Tests 3D einsum weights with a middle contracting dimension."""
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+        ),
+    ]
+
+    qat_vars, qat_res, conversion_res = self._run_linen_einsum_conversion(rules)
+    self.assertIn('einsum0_lhs', qat_vars['quant_stats']['Einsum_0'])
+    self.assertEqual(conversion_res.shape, (2, 3, 4, 8))
+    self.assertTrue(jnp.allclose(qat_res, conversion_res))
+
+  def test_linen_einsum_activation_only_conversion(self):
+    """Tests activation-only quantization needs no RHS scale flattening."""
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*',
+            act_qtype=jnp.int8,
+        ),
+    ]
+    qat_vars, qat_res, conversion_res = self._run_linen_einsum_conversion(rules)
+
+    # The RHS-only rewrite falls back without weight quantization, so the
+    # original activation rank and its collected statistics remain aligned.
+    self.assertEqual(
+        qat_vars['quant_stats']['Einsum_0']['einsum0_lhs']['sum_of_max'].shape,
+        (1, 1, 1),
+    )
+    self.assertEqual(conversion_res.shape, (2, 3, 4, 8))
+    self.assertTrue(jnp.allclose(qat_res, conversion_res))
+
+  def test_linen_einsum_dynamic_activation_conversion(self):
+    """Tests RHS scale flattening leaves dynamic activations unchanged."""
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+            act_static_scale=False,
+        ),
+    ]
+    _, qat_res, conversion_res = self._run_linen_einsum_conversion(rules)
+
+    self.assertEqual(conversion_res.shape, (2, 3, 4, 8))
+    self.assertTrue(jnp.allclose(qat_res, conversion_res))
+
+  def test_linen_einsum_disable_per_channel_weight_conversion(self):
+    """Tests per-tensor weights need no RHS scale flattening."""
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+        ),
+    ]
+    _, qat_res, conversion_res = self._run_linen_einsum_conversion(
+        rules, provider_kwargs={'disable_per_channel_weights': True}
+    )
+
+    self.assertEqual(conversion_res.shape, (2, 3, 4, 8))
+    self.assertTrue(jnp.allclose(qat_res, conversion_res))
+
+  def test_flatten_einsum_interceptor_and_gating(self):
+    """Tests the einsum handler is always installed and gates its rewrite."""
+    weight_rule = qconfig.QuantizationRule(
+        module_path='.*', op_names=('einsum',), weight_qtype=jnp.int8
+    )
+    unrelated_weight_rule = qconfig.QuantizationRule(
+        module_path='.*', op_names=('dot_general',), weight_qtype=jnp.int8
+    )
+    activation_rule = qconfig.QuantizationRule(
+        module_path='.*', op_names=('einsum',), act_qtype=jnp.int8
+    )
+    testcases = (
+        ('per_channel_weight', [weight_rule], {}, 'BTD,DN->BTN'),
+        (
+            'activation_only_with_unrelated_weight_rule',
+            [unrelated_weight_rule, activation_rule],
+            {},
+            'BTD,NDH->BTNH',
+        ),
+        (
+            'unmatched_with_unrelated_weight_rule',
+            [unrelated_weight_rule],
+            {},
+            'BTD,NDH->BTNH',
+        ),
+        (
+            'per_tensor_weight',
+            [weight_rule],
+            {'disable_per_channel_weights': True},
+            'BTD,NDH->BTNH',
+        ),
+    )
+
+    for name, rules, provider_kwargs, expected_einsum in testcases:
+      with self.subTest(name):
+        lhs = jnp.ones((2, 3, 5), dtype=jnp.float32)
+        rhs = jnp.ones((4, 5, 7), dtype=jnp.float32)
+        provider = odml.OdmlConversionProvider(
+            rules, {'kernel': rhs}, {}, **provider_kwargs
+        )
+        aux_data.set(rhs, odml_ops.AuxDataKey.WEIGHT_NAME, 'kernel')
+        aux_data.set(rhs, odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT, True)
+        einsum_op = provider.get_intercept_map()['jax.numpy.einsum']
+        is_flatten_handler = (
+            getattr(einsum_op, 'func', None)
+            == provider._flatten_einsum  # pylint: disable=protected-access
+        )
+        self.assertTrue(is_flatten_handler)
+
+        mock_einsum = mock.Mock(side_effect=jnp.einsum)
+        mock_einsum.disable_per_channel_weights = provider_kwargs.get(
+            'disable_per_channel_weights', False
+        )
+
+        with mock.patch.object(
+            flax_util, 'get_current_module_path', return_value=()
+        ):
+          res = provider._flatten_einsum(  # pylint: disable=protected-access
+              'BTD,NDH->BTNH', lhs, rhs, _einsum=mock_einsum
+          )
+
+        self.assertEqual(res.shape, (2, 3, 4, 7))
+        self.assertEqual(mock_einsum.call_args[0][0], expected_einsum)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='rank2_rhs_no_contract_outer_product',
+          input_shape=(2,),
+          weight_shape=(3, 4),
+          einsum_str='A,BC->ABC',
+          expected_shape=(2, 3, 4),
+      ),
+      dict(
+          testcase_name='rank1_lhs_3d_rhs',
+          input_shape=(16,),
+          weight_shape=(4, 16, 8),
+          einsum_str='D,NDH->NH',
+          expected_shape=(4, 8),
+      ),
+      dict(
+          testcase_name='rhs_5d',
+          input_shape=(2, 7),
+          weight_shape=(3, 4, 7, 5, 6),
+          einsum_str='AD,BCDEF->ABCEF',
+          expected_shape=(2, 3, 4, 5, 6),
+      ),
+      dict(
+          testcase_name='rhs_5d_output_permutation',
+          input_shape=(2, 7),
+          weight_shape=(3, 4, 7, 5, 6),
+          einsum_str='AD,BCDEF->EABCF',
+          expected_shape=(5, 2, 3, 4, 6),
+      ),
+      dict(
+          testcase_name='ellipsis_lhs',
+          input_shape=(2, 3, 16),
+          weight_shape=(4, 16, 8),
+          einsum_str='...D,NDH->...NH',
+          expected_shape=(2, 3, 4, 8),
+      ),
+      dict(
+          testcase_name='multiple_contract_axes',
+          input_shape=(2, 3, 5, 7),
+          weight_shape=(7, 11, 5, 13),
+          einsum_str='ABCD,DECF->ABEF',
+          expected_shape=(2, 3, 11, 13),
+      ),
+      dict(
+          testcase_name='lhs_contract_axes_not_trailing',
+          input_shape=(2, 7, 3, 5),
+          weight_shape=(7, 11, 5, 13),
+          einsum_str='ADBC,DECF->ABEF',
+          expected_shape=(2, 3, 11, 13),
+      ),
+  )
+  def test_linen_einsum_general_flattened_rhs_conversion(
+      self, input_shape, weight_shape, einsum_str, expected_shape
+  ):
+    """Tests generalized RHS weight flattening for ODML conversion."""
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+        ),
+    ]
+
+    _, qat_res, conversion_res = self._run_linen_einsum_conversion(
+        rules,
+        input_shape=input_shape,
+        weight_shape=weight_shape,
+        einsum_str=einsum_str,
+    )
+    self.assertEqual(conversion_res.shape, expected_shape)
+    self.assertTrue(jnp.allclose(qat_res, conversion_res))
+
+  def test_linen_transformed_einsum_weight_conversion(self):
+    """Tests transformed RHS weight views raise when per-channel weights are requested."""
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+        ),
+    ]
+
+    with self.assertRaisesRegex(
+        ValueError, 'requires multiple quantization dimensions'
+    ):
+      self._run_linen_einsum_conversion(rules, transform_weight=True)
+
+    _, qat_res, conversion_res = self._run_linen_einsum_conversion(
+        rules,
+        provider_kwargs={'disable_per_channel_weights': True},
+        transform_weight=True,
+    )
+    self.assertTrue(jnp.allclose(qat_res, conversion_res))
+
+  def test_linen_transformed_einsum_activation_only_conversion(self):
+    """Tests transformed RHS weight views succeed for activation-only ops."""
+    rules = [
+        qconfig.QuantizationRule(
+            op_names=('dot_general',),
+            weight_qtype=jnp.int8,
+        ),
+        qconfig.QuantizationRule(
+            op_names=('einsum',),
+            act_qtype=jnp.int8,
+        ),
+    ]
+    _, qat_res, conversion_res = self._run_linen_einsum_conversion(
+        rules, transform_weight=True
+    )
+    self.assertTrue(jnp.allclose(qat_res, conversion_res))
+
+  def test_linen_einsum_flatten_requires_matching_static_weight_shape(self):
+    """Tests a lifted static parameter axis keeps einsum on the old path."""
+    rules = [qconfig.QuantizationRule(module_path='.*', weight_qtype=jnp.int8)]
+    lhs = jnp.ones((2, 3, 5), dtype=jnp.float32)
+    rhs = jnp.ones((4, 5, 7), dtype=jnp.float32)
+    lifted_static_rhs = jnp.ones((2, 4, 5, 7), dtype=jnp.float32)
+    provider = odml.OdmlConversionProvider(
+        rules, {'kernel': lifted_static_rhs}, {}
+    )
+    aux_data.set(rhs, odml_ops.AuxDataKey.WEIGHT_NAME, 'kernel')
+    aux_data.set(rhs, odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT, True)
+    calls = []
+
+    def _einsum(*args, **kwargs):
+      calls.append(args)
+      return jnp.einsum(*args, **kwargs)
+
+    with mock.patch.object(
+        flax_util, 'get_current_module_path', return_value=()
+    ):
+      res = provider._flatten_einsum(  # pylint: disable=protected-access
+          'BTD,NDH->BTNH', lhs, rhs, _einsum=_einsum
+      )
+
+    self.assertEqual(res.shape, (2, 3, 4, 7))
+    self.assertEqual(calls[0][0], 'BTD,NDH->BTNH')
+    self.assertIs(calls[0][2], rhs)
+    self.assertIsNone(
+        aux_data.get(
+            calls[0][2],
+            odml_ops.AuxDataKey.FLATTENED_EINSUM_RHS_PERM,
+            None,
+        )
+    )
+
+  def test_linen_einsum_single_axis_scale_is_not_flattened(self):
+    """Tests an already supported scale vector stays on the normal path."""
+    rules = [qconfig.QuantizationRule(module_path='.*', weight_qtype=jnp.int8)]
+    lhs = jnp.ones((2, 3, 5), dtype=jnp.float32)
+    rhs = jnp.ones((5, 7), dtype=jnp.float32)
+    provider = odml.OdmlConversionProvider(rules, {'kernel': rhs}, {})
+    aux_data.set(rhs, odml_ops.AuxDataKey.WEIGHT_NAME, 'kernel')
+    aux_data.set(rhs, odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT, True)
+    calls = []
+
+    def _einsum(*args, **kwargs):
+      calls.append(args)
+      return jnp.einsum(*args, **kwargs)
+
+    res = provider._flatten_einsum(  # pylint: disable=protected-access
+        'BTD,DH->BTH', lhs, rhs, _einsum=_einsum
+    )
+
+    self.assertEqual(res.shape, (2, 3, 7))
+    self.assertEqual(calls[0][0], 'BTD,DH->BTH')
+    self.assertEqual(calls[0][2].shape, rhs.shape)
+
   def test_odml_original_weight_marker_is_not_forwarded(self):
     """Tests a real structural interceptor invalidates layout identity."""
     rhs = jnp.ones((4, 5, 7), dtype=jnp.float32)
@@ -216,6 +630,155 @@ class OdmlTest(parameterized.TestCase):
             False,
         )
     )
+
+  def test_nnx_original_weight_marker_is_initialized(self):
+    """Tests NNX model preprocessing tags the direct parameter state."""
+
+    class NnxModel(nnx.Module):
+
+      def __init__(self):
+        self.kernel = nnx.Param(jnp.ones((3, 4), dtype=jnp.float32))
+
+      def __call__(self, x):
+        return jnp.dot(x, self.kernel)
+
+    model_input = jnp.ones((1, 3), dtype=jnp.float32)
+    qat_model = qwix_model.quantize_model(
+        NnxModel(), odml.OdmlQatProvider([]), model_input
+    )
+    weight = flax_util.unbox(qat_model.kernel)
+
+    self.assertEqual(
+        aux_data.get(weight, odml_ops.AuxDataKey.WEIGHT_NAME, None),
+        'kernel',
+    )
+    self.assertTrue(
+        aux_data.get(
+            weight,
+            odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT,
+            False,
+        )
+    )
+
+  def test_linen_einsum_shared_batch_falls_back(self):
+    """Tests shared-batch einsums stay on the existing ODML path."""
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+        ),
+    ]
+
+    with self.assertRaisesRegex(ValueError, 'Cannot flatten scale with shape'):
+      self._run_linen_einsum_conversion(
+          rules,
+          input_shape=(2, 3, 5),
+          weight_shape=(3, 5, 7),
+          einsum_str='ABC,BCD->ACD',
+      )
+
+  def test_gemma3_kv_einsum_conversion(self):
+    class Gemma3Attention(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        kv_einsum = nn.Einsum(
+            shape=(2, 1, x.shape[-1], 8),
+            einsum_str='BSD,CKDH->CBSKH',
+            use_bias=False,
+            name='kv_einsum',
+        )
+        return kv_einsum(x)
+
+    model = Gemma3Attention()
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+            act_static_scale=True,
+        ),
+    ]
+
+    qat_provider = odml.OdmlQatProvider(rules)
+    qat_model = qwix_model.quantize_model(model, qat_provider)
+    model_input = jnp.ones((2, 3, 16), dtype=jnp.float32)
+    qat_vars = qat_model.init(jax.random.key(0), model_input)
+    _, new_vars = qat_model.apply(qat_vars, model_input, mutable=True)
+    qat_vars.update(new_vars)
+
+    conversion_provider = odml.OdmlConversionProvider(
+        rules, qat_vars['params'], qat_vars['quant_stats']
+    )
+    conversion_model = qwix_model.quantize_model(model, conversion_provider)
+
+    res = conversion_model.apply(qat_vars, model_input)
+    self.assertEqual(res.shape, (2, 2, 3, 1, 8))
+
+  def test_nnx_einsum_multi_axis_weight_conversion(self):
+    """Tests RHS scale flattening through the NNX parameter path."""
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+        ),
+    ]
+
+    quant_stats, qat_res, conversion_res = self._run_nnx_einsum_conversion(
+        rules
+    )
+    self.assertIn('einsum0_lhs', quant_stats['einsum'])
+    self.assertEqual(conversion_res.shape, (2, 3, 4, 8))
+    self.assertTrue(jnp.allclose(qat_res, conversion_res))
+
+  def test_linen_einsum_and_dense_siblings_share_activation_stats(self):
+    """Tests the unchanged LHS keeps sibling fake-quant sharing intact."""
+
+    class SiblingModel(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        x = nn.Dense(features=16, name='pre_dense')(x)
+        einsum_out = nn.Einsum(
+            shape=(4, x.shape[-1], 8),
+            einsum_str='BTD,NDH->BTNH',
+            use_bias=False,
+            name='einsum_sibling',
+        )(x)
+        dense_out = nn.Dense(features=8, name='dense_sibling')(x)
+        return einsum_out, dense_out
+
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+        ),
+    ]
+    model = SiblingModel()
+    model_input = jnp.arange(2 * 3 * 16, dtype=jnp.float32).reshape(2, 3, 16)
+    model_input = model_input / jnp.max(model_input)
+    qat_model = qwix_model.quantize_model(model, odml.OdmlQatProvider(rules))
+    qat_vars = qat_model.init(jax.random.key(0), model_input)
+    qat_res, new_vars = qat_model.apply(qat_vars, model_input, mutable=True)
+    qat_vars.update(new_vars)
+
+    stat_keys = {
+        '/'.join(key[:-1])
+        for key in flax.traverse_util.flatten_dict(qat_vars['quant_stats'])
+    }
+    self.assertIn('einsum_sibling/einsum0_lhs', stat_keys)
+    self.assertNotIn('dense_sibling/dot_general0_lhs', stat_keys)
+
+    conversion_provider = odml.OdmlConversionProvider(
+        rules, qat_vars['params'], qat_vars['quant_stats']
+    )
+    conversion_model = qwix_model.quantize_model(model, conversion_provider)
+    conversion_res = conversion_model.apply(qat_vars, model_input)
+    for qat_value, conversion_value in zip(qat_res, conversion_res):
+      self.assertTrue(jnp.allclose(qat_value, conversion_value))
 
   @parameterized.named_parameters(
       dict(testcase_name='i8xi8', act_qtype=jnp.int8, weight_qtype=jnp.int8),
@@ -270,71 +833,6 @@ class OdmlTest(parameterized.TestCase):
     )
     conversion_res = conversion_model(model_input)
     self.assertTrue(jnp.allclose(qat_res, conversion_res))
-
-  @parameterized.parameters(False, True)
-  def test_linen_original_weight_marker_is_initialized(self, use_axis_metadata):
-    """Tests Linen tags one direct logical array for boxed and raw params."""
-    observed_metadata = []
-
-    class LinenModel(nn.Module):
-
-      @nn.compact
-      def __call__(self, x):
-        init = nn.initializers.ones
-        if use_axis_metadata:
-          init = nn.with_partitioning(init, ('input', 'output'))
-        param = self.param(
-            'kernel', init, (x.shape[-1], 4), unbox=not use_axis_metadata
-        )
-        weight = flax_util.unbox(param)
-        observed_metadata.append((
-            aux_data.get(weight, odml_ops.AuxDataKey.WEIGHT_NAME, None),
-            aux_data.get(
-                weight,
-                odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT,
-                False,
-            ),
-        ))
-        return jnp.dot(x, weight)
-
-    model = LinenModel()
-    qat_model = qwix_model.quantize_model(model, odml.OdmlQatProvider([]))
-    model_input = jnp.ones((1, 3), dtype=jnp.float32)
-    variables = qat_model.init(jax.random.key(0), model_input)
-
-    observed_metadata.clear()
-    qat_model.apply(variables, model_input)
-
-    self.assertEqual(observed_metadata, [('kernel', True)])
-
-  def test_nnx_original_weight_marker_is_initialized(self):
-    """Tests NNX model preprocessing tags the direct parameter state."""
-
-    class NnxModel(nnx.Module):
-
-      def __init__(self):
-        self.kernel = nnx.Param(jnp.ones((3, 4), dtype=jnp.float32))
-
-      def __call__(self, x):
-        return jnp.dot(x, self.kernel)
-
-    model_input = jnp.ones((1, 3), dtype=jnp.float32)
-    qat_model = qwix_model.quantize_model(
-        NnxModel(), odml.OdmlQatProvider([]), model_input
-    )
-    weight = flax_util.unbox(qat_model.kernel)
-
-    self.assertEqual(
-        aux_data.get(weight, odml_ops.AuxDataKey.WEIGHT_NAME, None),
-        'kernel',
-    )
-    self.assertTrue(
-        aux_data.get(
-            weight,
-            odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT,
-            False,
-        )
-    )
 
   def test_odml_interception_stack(self):
     """Verifies that ODML providers return interceptors in the correct order."""

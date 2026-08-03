@@ -154,6 +154,9 @@ class AuxDataKey(str, enum.Enum):
   # softmax.
   FIXED_RANGE = 'fixed_range'  # tuple[float, float]
 
+  # Exact RHS permutation to replay before flattened-einsum calibration.
+  FLATTENED_EINSUM_RHS_PERM = 'flattened_einsum_rhs_perm'  # tuple[int, ...]
+
 
 # Metadata keys that depend on the value being preserved.
 # If the value changes (e.g. add, mul), these keys become invalid.
