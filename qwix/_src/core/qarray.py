@@ -564,8 +564,21 @@ def compute_scale_zero_point(
   else:
     raise ValueError(f'Unsupported calibration: {calibration}')
   if qtype in ('mxfp8', 'mxfp8_16', 'mxfp4'):
-    log2_scale = jnp.ceil(jnp.log2(scale))
-    scale = (2**log2_scale).astype(scale.dtype)
+    # Biases theoretically derived via Outlier Aware Scaling (OAS)
+    # (arxiv 2603.08713) to optimize the tradeoff between outlier clipping
+    # and subnormal quantization errors.
+    if qtype == 'mxfp4':
+      # Bias = 0.5 - log2(7/6). C = 2**(bias + 0.5) = 12 / 7.
+      c = 12.0 / 7.0
+    else:
+      # Bias = 0.5 - log2(31/30). C = 2**(bias + 0.5) = 60 / 31.
+      c = 60.0 / 31.0
+    scale_bf16 = (scale * c).astype(jnp.bfloat16)
+    scale = (
+        (scale_bf16.view(jnp.int16) & 0x7F80)
+        .view(jnp.bfloat16)
+        .astype(scale.dtype)
+    )
   elif qtype == 'nvfp4':
     scale = numerics.convert_to(scale, jnp.float8_e4m3fn).astype(scale.dtype)
   return scale, zero_point

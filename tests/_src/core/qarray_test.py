@@ -122,7 +122,7 @@ class QArrayTest(parameterized.TestCase):
           channelwise_axes=[0, 1],
           tiled_axes={2: 32},
           calibration_method='absmax',
-          expected_mae=0.10791,
+          expected_mae=0.106445,
       ),
       dict(
           testcase_name='nvfp4',
@@ -501,6 +501,35 @@ class QArrayTest(parameterized.TestCase):
           qtype='nvfp4',
           tiled_axes={1: 32},
       )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='mxfp4',
+          qtype='mxfp4',
+          test_values=[6.5, 7.5],
+          expected_scales=[1.0, 2.0],
+      ),
+      dict(
+          testcase_name='mxfp8',
+          qtype='mxfp8',
+          test_values=[460.0, 465.0],
+          expected_scales=[1.0, 2.0],
+      ),
+      dict(
+          testcase_name='mxfp8_16',
+          qtype='mxfp8_16',
+          test_values=[460.0, 465.0],
+          expected_scales=[1.0, 2.0],
+      ),
+  )
+  def test_compute_scale_zero_point_mxfp_oas_bias(
+      self, qtype, test_values, expected_scales
+  ):
+    calibration = {'absmax': jnp.array(test_values)}
+    scale, _ = qarray.compute_scale_zero_point(calibration, qtype)
+    self.assertTrue(
+        jnp.array_equal(scale, jnp.array(expected_scales, dtype=scale.dtype))
+    )
 
 
 if __name__ == '__main__':
