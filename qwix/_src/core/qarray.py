@@ -306,6 +306,7 @@ class HowToQuantize:
   def __post_init__(self):
     if isinstance(self.qtype, str) and self.qtype in (
         'mxfp8',
+        'mxfp8_16',
         'mxfp4',
         'nvfp4',
     ):
@@ -562,7 +563,7 @@ def compute_scale_zero_point(
     zero_point = None
   else:
     raise ValueError(f'Unsupported calibration: {calibration}')
-  if qtype == 'mxfp8' or qtype == 'mxfp4':
+  if qtype in ('mxfp8', 'mxfp8_16', 'mxfp4'):
     log2_scale = jnp.ceil(jnp.log2(scale))
     scale = (2**log2_scale).astype(scale.dtype)
   elif qtype == 'nvfp4':

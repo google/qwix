@@ -83,6 +83,7 @@ def _is_mxfp(operand: Any) -> TypeGuard[qarray.QArray]:
   """Verifies whether the operand is an OCP/NVIDIA microscaled format."""
   return isinstance(operand, qarray.QArray) and operand.qtype in (
       "mxfp8",
+      "mxfp8_16",
       "mxfp4",
       "nvfp4",
   )

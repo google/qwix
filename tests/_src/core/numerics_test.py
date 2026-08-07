@@ -135,6 +135,23 @@ class NumericsTest(absltest.TestCase):
       )
       self._assert_equal(converted, expected)
 
+    with self.subTest("mxfp8_16_bound"):
+      bound = numerics.get_symmetric_bound("mxfp8_16")
+      finfo = jnp.finfo(jnp.float8_e4m3fn)
+      self.assertEqual(bound, float(finfo.max))
+
+    with self.subTest("mxfp8_16_conversion"):
+      finfo = jnp.finfo(jnp.float8_e4m3fn)
+      # Test values: in-range, out-of-range high, out-of-range low
+      in_array = jnp.array([10.0, 500.0, -1000.0], dtype=jnp.float32)
+      converted = numerics.convert_to(in_array, "mxfp8_16")
+
+      self.assertEqual(converted.dtype, jnp.float8_e4m3fn)
+      expected = jnp.array(
+          [10.0, finfo.max, finfo.min], dtype=jnp.float8_e4m3fn
+      )
+      self._assert_equal(converted, expected)
+
     with self.subTest("mxfp4_bound"):
       bound = numerics.get_symmetric_bound("mxfp4")
       finfo = jnp.finfo(jnp.float4_e2m1fn)

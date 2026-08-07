@@ -476,6 +476,20 @@ class QArrayTest(parameterized.TestCase):
       )
 
     with self.assertRaisesRegex(
+        ValueError, 'Format mxfp8_16 requires `tiled_axes` to be specified.'
+    ):
+      qarray.HowToQuantize(qtype='mxfp8_16')
+
+    with self.assertRaisesRegex(
+        ValueError,
+        'Format mxfp8_16 requires a tile size of 16, but axis 1 got 32',
+    ):
+      qarray.HowToQuantize(
+          qtype='mxfp8_16',
+          tiled_axes={1: 32},
+      )
+
+    with self.assertRaisesRegex(
         ValueError, 'Format nvfp4 requires `tiled_axes` to be specified.'
     ):
       qarray.HowToQuantize(qtype='nvfp4')

@@ -190,7 +190,7 @@ def _get_residual_for_backward(
       and (
           qarray.get_tiled_axes(operand_qt)
           or isinstance(operand_qt.qtype, str)
-          and operand_qt.qtype in ('mxfp8', 'mxfp4', 'nvfp4')
+          and operand_qt.qtype in ('mxfp8', 'mxfp8_16', 'mxfp4', 'nvfp4')
       )
   ):
     return operand_in

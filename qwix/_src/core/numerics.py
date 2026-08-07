@@ -111,7 +111,7 @@ def get_symmetric_bound(qtype: jax.typing.DTypeLike) -> float:
       # The bound is extended to qmax + 0.5 so that we have a better utilization
       # of the qmax bucket. This is more important for fewer bits of int.
       return 2 ** (int(qtype[3:]) - 1) - 0.5
-    case 'mxfp8':
+    case 'mxfp8' | 'mxfp8_16':
       qtype = jnp.float8_e4m3fn
     case 'mxfp4' | 'nvfp4':
       qtype = jnp.float4_e2m1fn
@@ -165,7 +165,7 @@ def convert_to(
       else:
         raise ValueError(f'Unsupported integer dtype: {qtype}')
       return jnp.round(x).clip(qmin, qmax).astype(qtype)
-    case 'mxfp8':
+    case 'mxfp8' | 'mxfp8_16':
       qtype = jnp.float8_e4m3fn
     case 'mxfp4' | 'nvfp4':
       qtype = jnp.float4_e2m1fn

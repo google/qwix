@@ -251,6 +251,14 @@ class MxfpNumericsTest(absltest.TestCase):
         block_size=32,
     )
 
+  def test_scaled_matmul_mxfp8_16(self):
+    self.run_mxfp_test(
+        mxfp_format="mxfp8_16",
+        data_type=jnp.float8_e4m3fn,
+        scale_type=jnp.float8_e8m0fnu,
+        block_size=16,
+    )
+
   def test_scaled_matmul_mxfp4(self):
     self.run_mxfp_test(
         mxfp_format="mxfp4",
