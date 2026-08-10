@@ -27,7 +27,7 @@ from qwix._src import model as qwix_model
 from qwix._src import qconfig
 from qwix._src.core import einsum_info
 from qwix._src.core import qarray
-from qwix._src.providers import ptq
+from qwix._src.providers import boxed_param
 from qwix._src.utils import flax_util
 
 
@@ -205,11 +205,11 @@ def _compute_lora_delta(
   return delta
 
 
-class LoraProvider(ptq.PtqProvider):
+class LoraProvider(boxed_param.BoxedParamProvider):
   """Provider for (Q)LoRA.
 
-  LoraProvider inherits from PtqProvider, because the base model is frozen
-  during LoRA training.
+  LoraProvider reuses boxed-parameter interception for frozen base weights and
+  adds trainable low-rank adapters on matched operations.
   """
 
   def __init__(self, rules=None, *, disable_jit: bool = False, **kwargs):
@@ -238,7 +238,7 @@ class LoraProvider(ptq.PtqProvider):
   def dot_general(
       self,
       lhs: jax.Array,
-      rhs: jax.Array | ptq.WithAux[qarray.QArray],
+      rhs: jax.Array | boxed_param.WithAux[qarray.QArray],
       dimension_numbers: jax.lax.DotDimensionNumbers,
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
@@ -260,7 +260,7 @@ class LoraProvider(ptq.PtqProvider):
     if not isinstance(rule, LoraRule):
       return res
 
-    weight_name = flax_util.find_param(rhs, ptq.WithAux)
+    weight_name = flax_util.find_param(rhs, boxed_param.WithAux)
     if weight_name is None:  # rhs is not a weight.
       return res
 
@@ -319,7 +319,7 @@ class LoraProvider(ptq.PtqProvider):
   def einsum(
       self,
       einsum_str: str,
-      *operands: jax.Array | ptq.WithAux[qarray.QArray],
+      *operands: jax.Array | boxed_param.WithAux[qarray.QArray],
       **kwargs,
   ) -> jax.Array:
     """LoRA einsum."""
@@ -334,7 +334,7 @@ class LoraProvider(ptq.PtqProvider):
       raise ValueError(f'Unsupported einsum format: {einsum_str=} {operands=}')
     lhs, rhs = operands
 
-    weight_name = flax_util.find_param(rhs, ptq.WithAux)
+    weight_name = flax_util.find_param(rhs, boxed_param.WithAux)
     if weight_name is None:  # rhs is not a weight.
       return res
 
@@ -373,7 +373,7 @@ class LoraProvider(ptq.PtqProvider):
   def conv_general_dilated(
       self,
       lhs: jax.Array,
-      rhs: jax.Array | ptq.WithAux[qarray.QArray],
+      rhs: jax.Array | boxed_param.WithAux[qarray.QArray],
       window_strides: Sequence[int],
       padding: str | Sequence[tuple[int, int]],
       lhs_dilation: Sequence[int] | None = None,
@@ -407,7 +407,7 @@ class LoraProvider(ptq.PtqProvider):
     if not isinstance(rule, LoraRule):
       return res
 
-    weight_name = flax_util.find_param(rhs, ptq.WithAux)
+    weight_name = flax_util.find_param(rhs, boxed_param.WithAux)
     assert weight_name is not None, 'rhs must be a weight.'
 
     dimension_numbers = jax.lax.conv_dimension_numbers(
@@ -496,7 +496,7 @@ def _get_or_create_lora_params(
     return sharding.update(spec=padded_pspec)
 
   # Get the dtype, boxed param, and (optional) sharding from the original param.
-  if isinstance(param, ptq.WithAux):
+  if isinstance(param, boxed_param.WithAux):
     lora_dtype = flax_util.unbox(param.array.scale).dtype
     boxed = param.array.qvalue
     sharding = get_canonical_pspec(boxed)
