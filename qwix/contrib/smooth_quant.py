@@ -31,6 +31,7 @@ from qwix._src import averaging
 from qwix._src import qconfig
 from qwix._src.core import dot_general
 from qwix._src.core import qarray
+from qwix._src.providers import boxed_param
 from qwix._src.providers import ptq
 from qwix._src.utils import flax_util
 from qwix.contrib import calibration
@@ -57,7 +58,7 @@ class SqRule(qconfig.QuantizationRule):
 
 
 @flax.struct.dataclass(kw_only=True)
-class WithSqScale(ptq.WithAux[qarray.QArray]):
+class WithSqScale(boxed_param.WithAux[qarray.QArray]):
   """A quantized array with SQ per-channel scales.
 
   This wrapper stores the quantized weights along with the per-channel SQ
@@ -190,7 +191,7 @@ def quantize_params(
     sq_stats_path = (*path[:-1], path[-1] + "_sq")
     sq_stats = flax_util.get_value_from_path(sq_quant_stats, sq_stats_path)
 
-    if not isinstance(abs_w, ptq.WithAux) or sq_stats is None:
+    if not isinstance(abs_w, boxed_param.WithAux) or sq_stats is None:
       # Not quantized by SQ.
       not_quantized_params[path] = w
       continue
@@ -264,7 +265,7 @@ class SqInferenceProvider(ptq.PtqProvider):
   def dot_general(
       self,
       lhs: jax.Array,
-      rhs: jax.Array | WithSqScale | ptq.WithAux[qarray.QArray],
+      rhs: jax.Array | WithSqScale | boxed_param.WithAux[qarray.QArray],
       dimension_numbers: jax.lax.DotDimensionNumbers,
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
