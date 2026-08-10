@@ -117,7 +117,7 @@ def _get_sharding(
       raise ValueError(
           f'{path} requires an active mesh to place pre-quantized'
           ' arrays. Run process_prequantized_params inside the same'
-          ' jax.set_mesh(...) context used for the sharded PTQ model.'
+          ' jax.set_mesh(...) context used for the sharded model.'
       )
     return jax.sharding.NamedSharding(concrete_mesh, sharding.spec)
   return sharding
@@ -355,12 +355,12 @@ def _resolve_template_param(
 ) -> tuple[tuple[str, ...], Any]:
   """Resolves the template parameter and its path.
 
-  For QT models, Qwix doesn't convert JAX arrays to WithAux so the template
-  parameters don't have the 'array' suffix in their paths.
+  For QT and full-precision models, Qwix doesn't convert JAX arrays to WithAux
+  so the template parameters don't have the 'array' suffix in their paths.
 
   Args:
     path: The path from the checkpoint.
-    template_params: The template parameters of the NNX PTQ/QT model.
+    template_params: The template parameters of the NNX model.
 
   Returns:
     A tuple of (resolved_path, template_param).
@@ -393,7 +393,7 @@ def process_prequantized_params(
     checkpoint_params: A nested dict matching NNX state paths (without `.value`
       suffixes). Leaves must be either a `jax.Array` or a dict containing
       `'qvalue'`, `'scale'`, and optional `'zero_point'`.
-    template_params: An NNX PTQ/QT model, possibly abstract (e.g., from
+    template_params: An NNX model, possibly abstract (e.g., from
       `nnx.eval_shape`).
     allow_extra_params: If True, ignore payload entries not present in
       `template_params`.
@@ -406,7 +406,7 @@ def process_prequantized_params(
   """
   if not isinstance(template_params, nnx.Module):
     raise TypeError(
-        'process_prequantized_params only supports NNX PTQ/QT models. Got'
+        'process_prequantized_params only supports NNX models. Got'
         f' {type(template_params)}.'
     )
 

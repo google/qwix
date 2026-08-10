@@ -342,7 +342,7 @@ class PrequantizedPtqTest(parameterized.TestCase):
         ptq_dense.init, jax.random.key(0), jnp.ones((10, 12))
     )["params"]
 
-    with self.assertRaisesRegex(TypeError, "NNX PTQ/QT models"):
+    with self.assertRaisesRegex(TypeError, "NNX models"):
       checkpoint_util.process_prequantized_params({}, abs_ptq_params)
 
   def test_process_prequantized_params_with_lists(self):
@@ -471,6 +471,57 @@ class PrequantizedQtTest(parameterized.TestCase):
     _assert_trees_allclose(self, processed_params["bias"], orig_params["bias"])
     nnx.update(abs_qt_linear, processed_params)
     abs_qt_linear(model_input)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="symmetric", calibration_method="absmax"),
+      dict(testcase_name="asymmetric", calibration_method="minmax"),
+  )
+  def test_process_prequantized_params_dequantized(self, calibration_method):
+    qt_rules = [
+        qt.QtRule(
+            module_path=".*",
+            weight_qtype=jnp.int8,
+            weight_calibration_method=calibration_method,
+            act_qtype=jnp.int8,
+            bwd_qtype=jnp.int8,
+        ),
+    ]
+    model_input = jnp.ones((10, 12), dtype=jnp.bfloat16)
+    fp_linear = nnx.Linear(
+        in_features=12,
+        out_features=6,
+        param_dtype=jnp.bfloat16,
+        rngs=nnx.Rngs(0),
+    )
+
+    abs_quantized_linear = nnx.eval_shape(
+        lambda: qwix_model.quantize_model(
+            fp_linear,
+            ptq.PtqProvider(qt_rules),
+            model_input,
+        )
+    )
+    orig_params = nnx.to_pure_dict(nnx.state(fp_linear, nnx.Param))
+    ref_params_ptq = ptq.quantize_params(orig_params, abs_quantized_linear)
+    orbax_payload = _to_orbax_payload(ref_params_ptq)
+    processed_params = checkpoint_util.process_prequantized_params(
+        orbax_payload, fp_linear
+    )
+
+    ref_kernel_dict = ref_params_ptq["kernel"]["array"]
+    ref_qarray = qarray.QArray(
+        qvalue=ref_kernel_dict["qvalue"],
+        scale=ref_kernel_dict["scale"],
+        zero_point=ref_kernel_dict.get("zero_point"),
+    )
+    expected_kernel = qarray.dequantize(ref_qarray)
+
+    self.assertEqual(processed_params["kernel"].dtype, jnp.bfloat16)
+    self.assertEqual(processed_params["bias"].dtype, jnp.bfloat16)
+    _assert_trees_allclose(self, processed_params["kernel"], expected_kernel)
+    _assert_trees_allclose(self, processed_params["bias"], orig_params["bias"])
+    nnx.update(fp_linear, processed_params)
+    fp_linear(model_input)
 
   def test_process_prequantized_params_full_precision(self):
     qt_rules = [
