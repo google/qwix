@@ -52,6 +52,7 @@ research and production.
     *   NNX:
         *   QT: `int4`, `int8`, `fp8`
         *   PTQ: `int4`, `int8`, `fp8`
+        *   full-precision: `bf16`, `fp32`
 *   Integration with any Flax Linen or NNX models via a single function call.
 
 ## Relation with AQT

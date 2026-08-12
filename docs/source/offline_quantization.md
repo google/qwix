@@ -3,7 +3,15 @@
 Qwix's Offline Quantization feature enables loading pre-quantized checkpoints
 and continuing training or inference workloads in the desired target numeric.
 
+*   **Quantized Training/Inference**: Keep weights in the original quantization
+    schema for quantized training or optimized serving.
+*   **Full-Precision Training/Inference**: Dequantize weights back to
+    full-precision (e.g. BF16) for continued training or full-precision
+    inference.
+
 ## Overview
+
+### Quantized Training/Inference
 
 1.  **Load and Transform Checkpoint**: Load and transform your pre-quantized
     checkpoint into the expected Qwix structure with Orbax's model surgery
@@ -72,6 +80,59 @@ with jax.set_mesh(mesh):
   nnx.update(abstract_model, processed_params)
 
 # Step 5: Ready for continued training or inference!
+```
+
+### Full-Precision Training/Inference
+
+```{note}
+The full-precision path omits the `restore_quantization_rules` and
+`override_opaque_layers` steps which are only needed to initialize a quantized
+abstract model with intercepted and opaque weights.
+```
+
+1.  **Load and Transform Checkpoint**: Load and transform your pre-quantized
+    checkpoint into the expected Qwix structure with Orbax's model surgery
+    transformation utilities.
+2.  **Generate Abstract Model**: Initialize your model with `nnx.eval_shape`.
+3.  **Process and Update State**: Process the loaded parameters with
+    `qwix.process_prequantized_params` and update model state with `nnx.update`.
+4.  **Ready for continued training or inference!**
+
+```py
+from flax import nnx
+import jax
+from orbax.checkpoint.experimental import v1 as ocp
+import qwix
+
+checkpoint_dir = '/path/to/checkpoint'
+mesh = create_mesh()
+
+# Step 1: Load and Transform Checkpoint
+with ocp.Context(checkpoint_layout=ocp.options.CheckpointLayout.SAFETENSORS):
+  meta = ocp.metadata(checkpoint_dir)
+  sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+  flat_abstract = {
+      name: jax.ShapeDtypeStruct(
+          shape=m.shape, dtype=m.dtype, sharding=sharding
+      )
+      for name, m in meta.metadata.items()
+  }
+  restored_tree = ocp.load(checkpoint_dir, abstract_state=flat_abstract)
+
+# See below section on how to implement this helper.
+restored_tree = transform_checkpoint_tree(restored_tree)
+
+# Step 2: Generate Abstract Model
+with jax.set_mesh(mesh):
+  abstract_model = nnx.eval_shape(lambda: MyModel())
+
+  # Step 3: Process and Update State
+  processed_params = qwix.process_prequantized_params(
+      restored_tree, abstract_model
+  )
+  nnx.update(abstract_model, processed_params)
+
+# Step 4: Ready for continued training or inference!
 ```
 
 ## Transforming Checkpoints to Qwix Structure
