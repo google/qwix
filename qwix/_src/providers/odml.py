@@ -724,9 +724,11 @@ class OdmlConversionProvider(OdmlQatProvider):
         dtype = 'i8'
       case jnp.int4:
         dtype = 'i4'
+      case jnp.int16:
+        dtype = 'i16'
       case _:
         raise ValueError(f'Unsupported dtype {dtype} for ODML conversion.')
-    attributes = {
+    attributes: dict[str, Any] = {
         'scale': np.asarray(scale, np.float32).flatten(),
         'dtype': dtype,
         # narrow_range is an ODML-specific optimization that reduces the range
@@ -741,7 +743,7 @@ class OdmlConversionProvider(OdmlQatProvider):
     }
     if zp is not None:
       # zero_point has to be int64 for ODML.
-      attributes['zero_point'] = np.asarray(zp, np.int64).flatten()  # pyrefly: ignore
+      attributes['zero_point'] = np.asarray(zp, np.int64).flatten()
     if quantization_dim is not None:
-      attributes['quantization_dimension'] = quantization_dim  # pyrefly: ignore
+      attributes['quantization_dimension'] = quantization_dim
     return attributes
