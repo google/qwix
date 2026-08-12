@@ -23,6 +23,7 @@ import jax
 from jax import numpy as jnp
 from qwix._src import averaging
 from qwix._src import qconfig
+from qwix._src.providers import boxed_param
 from qwix._src.providers import ptq
 from qwix._src.utils import flax_util
 
@@ -247,7 +248,7 @@ class CalibratedQuantContext:
   weight: jax.Array
   how: Any
   calibration_stats: dict[str, jax.Array]
-  abs_w: ptq.WithAux
+  abs_w: boxed_param.WithAux
   contracting_axis: int
   restore_shape: Callable[..., Any]
   path: tuple[str, ...]
@@ -256,7 +257,7 @@ class CalibratedQuantContext:
 def extract_calibrated_quant_context(
     path: tuple[str, ...],
     weight: jax.Array,
-    abs_w: ptq.WithAux,
+    abs_w: boxed_param.WithAux,
     stats: Any,
 ) -> CalibratedQuantContext | None:
   """Extracts the calibration context for a single weight.
@@ -338,7 +339,7 @@ def quantize_params_with_calibration(
     stats_path = (*path[:-1], path[-1] + stats_suffix)
     stats = flax_util.get_value_from_path(quant_stats, stats_path)
 
-    if not isinstance(abs_w, ptq.WithAux) or stats is None:
+    if not isinstance(abs_w, boxed_param.WithAux) or stats is None:
       not_quantized_params[path] = w
       continue
 

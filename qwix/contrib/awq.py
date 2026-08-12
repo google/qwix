@@ -37,6 +37,7 @@ from flax import nnx
 import jax
 from qwix._src import qconfig
 from qwix._src.core import qarray
+from qwix._src.providers import boxed_param
 from qwix._src.providers import ptq
 from qwix.contrib import awq_core
 from qwix.contrib import calibration
@@ -56,7 +57,7 @@ class AwqRule(qconfig.QuantizationRule):
 
 
 @flax.struct.dataclass(kw_only=True)
-class WithAwqScale(ptq.WithAux[qarray.QArray]):
+class WithAwqScale(boxed_param.WithAux[qarray.QArray]):
   """A quantized array with AWQ per-channel scales.
 
   This wrapper stores the quantized weights along with the per-channel AWQ
@@ -71,6 +72,7 @@ class WithAwqScale(ptq.WithAux[qarray.QArray]):
 
   awq_scale: jax.Array
   contracting_axis: int = flax.struct.field(pytree_node=False)
+
 
 # Register as NNX data to allow JAX arrays in Module attributes.
 nnx.register_data_type(WithAwqScale)
@@ -124,6 +126,7 @@ def quantize_params(
     weights, returns WithAwqScale wrappers containing the QArray and per-channel
     AWQ scales. For non-AWQ weights, returns WithAux wrappers (same as PTQ).
   """
+
   def _quantize(ctx: calibration.CalibratedQuantContext) -> Any:
     activation_scale = ctx.calibration_stats['act_scale']
     assert activation_scale.shape[0] == ctx.weight.shape[1]
@@ -182,7 +185,7 @@ class AwqInferenceProvider(ptq.PtqProvider):
   def dot_general(
       self,
       lhs: jax.Array,
-      rhs: jax.Array | WithAwqScale | ptq.WithAux[qarray.QArray],
+      rhs: jax.Array | WithAwqScale | boxed_param.WithAux[qarray.QArray],
       dimension_numbers: jax.lax.DotDimensionNumbers,
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
@@ -220,7 +223,7 @@ class AwqInferenceProvider(ptq.PtqProvider):
     new_operands = jax.tree.map(
         _preprocess_operand,
         operands,
-        is_leaf=lambda x: isinstance(x, (WithAwqScale, ptq.WithAux)),
+        is_leaf=lambda x: isinstance(x, (WithAwqScale, boxed_param.WithAux)),
     )
 
     return super().einsum(

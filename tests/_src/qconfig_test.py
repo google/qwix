@@ -132,7 +132,6 @@ class QconfigTest(absltest.TestCase):
         issubclass(lora.LoraProvider, boxed_param.BoxedParamProvider)
     )
     self.assertFalse(issubclass(lora.LoraProvider, ptq.PtqProvider))
-    self.assertIs(ptq.WithAux, boxed_param.WithAux)
 
 
 if __name__ == "__main__":
