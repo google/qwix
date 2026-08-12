@@ -146,9 +146,6 @@ def quantized_matmul_kernel(
     bm: int,
     bk: int,
     bn: int,
-    max_sublock_size_m: int = 128,
-    max_sublock_size_n: int = 128,
-    max_sublock_size_k: int = 128,
 ):
   """Quantized matmul kernel.
 
@@ -162,9 +159,6 @@ def quantized_matmul_kernel(
     bm: blockspec for the m dimension
     bk: blockspec for the k dimension
     bn: blockspec for the n dimension
-    max_sublock_size_m: maximum size of the sublock for the m dimension
-    max_sublock_size_n: maximum size of the sublock for the n dimension
-    max_sublock_size_k: maximum size of the sublock for the k dimension
   """
 
   sm_global, sk_global, *_ = sx_hbm.shape
@@ -183,23 +177,11 @@ def quantized_matmul_kernel(
   # Blockspecs for the kernel
   x_spec = pl.BlockSpec((bm, bk), lambda a, b, c: (a, c))
   sx_spec = pl.BlockSpec(
-      (sm, sk, 1, 1),
-      lambda a, b, c: (
-          a if sm_global > 1 else 0,
-          c if sk_global > 1 else 0,
-          0,
-          0,
-      ),
+      (sm, sk_global), lambda a, b, c: (a, 0), memory_space=pltpu.SMEM
   )
   y_spec = pl.BlockSpec((bk, bn), lambda a, b, c: (c, b))
   sy_spec = pl.BlockSpec(
-      (sk, sn, 1, 1),
-      lambda a, b, c: (
-          c if sk_global > 1 else 0,
-          b if sn_global > 1 else 0,
-          0,
-          0,
-      ),
+      (sk, sn_global), lambda a, b, c: (c, 0), memory_space=pltpu.SMEM
   )
   o_spec = pl.BlockSpec((bm, bn), lambda a, b, c: (a, b))
 
@@ -207,35 +189,6 @@ def quantized_matmul_kernel(
   m_tile_size = pl.cdiv(bm, sm)
   k_tile_size = pl.cdiv(bk, sk)
   n_tile_size = pl.cdiv(bn, sn)
-
-  # Subblock info
-  subblock_size_m = min((m_tile_size, max_sublock_size_m))
-  subblock_size_n = min((n_tile_size, max_sublock_size_n))
-  subblock_size_k = min((k_tile_size, max_sublock_size_k))
-
-  if m_tile_size % subblock_size_m != 0:
-    raise ValueError(
-        f'Subblock size must divide tile size, {m_tile_size=}'
-        f' {subblock_size_m=}'
-    )
-  if n_tile_size % subblock_size_n != 0:
-    raise ValueError(
-        f'Subblock size must divide tile size, {n_tile_size=}'
-        f' {subblock_size_n=}'
-    )
-  if k_tile_size % subblock_size_k != 0:
-    raise ValueError(
-        f'Subblock size must divide tile size, {k_tile_size=}'
-        f' {subblock_size_k=}'
-    )
-
-  subblock_iters_m = pl.cdiv(bm, subblock_size_m)
-  subblock_iters_n = pl.cdiv(bn, subblock_size_n)
-  subblock_iters_k = pl.cdiv(bk, subblock_size_k)
-
-  m_scale_reuse = subblock_iters_m // sm
-  n_scale_reuse = subblock_iters_n // sn
-  k_scale_reuse = subblock_iters_k // sk
 
   # Kernel body
   def quantized_matmul_body(
@@ -246,24 +199,25 @@ def quantized_matmul_kernel(
       o_vmem: jax.Ref,
   ):
     kind = pl.program_id(2)
+    nind = pl.program_id(1)
 
     # Initialize accumulation buffer
     @pl.when(kind == 0)
     def _init():
       accum_vmem[...] = jnp.zeros_like(accum_vmem)
 
-    # Subblock loops
-    for mloop in range(subblock_iters_m):
-      data_m_slc = pl.Slice(mloop * subblock_size_m, subblock_size_m)
-      scale_m_ind = mloop // m_scale_reuse
+    for mloop in range(sm):
+      data_m_slc = pl.Slice(mloop * m_tile_size, m_tile_size)
 
-      for nloop in range(subblock_iters_n):
-        data_n_slc = pl.Slice(nloop * subblock_size_n, subblock_size_n)
-        scale_n_ind = nloop // n_scale_reuse
+      for nloop in range(sn):
+        data_n_slc = pl.Slice(nloop * n_tile_size, n_tile_size)
+        global_nloop = nind * sn + nloop
 
-        for kloop in range(subblock_iters_k):
-          data_k_slc = pl.Slice(kloop * subblock_size_k, subblock_size_k)
-          scale_k_ind = kloop // k_scale_reuse
+        res = accum_vmem[data_m_slc, data_n_slc]
+        # Loop over subchannel axis
+        for kloop in range(sk):
+          data_k_slc = pl.Slice(kloop * k_tile_size, k_tile_size)
+          global_kloop = kind * sk + kloop
 
           # Load lhs and rhs
           x = x_vmem[data_m_slc, data_k_slc]
@@ -273,17 +227,21 @@ def quantized_matmul_kernel(
           xy = jnp.matmul(x, y, preferred_element_type=reduction_dtype)
 
           # Access the scales we need
-          sx = sx_vmem[scale_m_ind, scale_k_ind, :, :]
-          sy = sy_vmem[scale_k_ind, scale_n_ind, :, :]
+          sx = sx_vmem[mloop, global_kloop]
+          sy = sy_vmem[kloop, global_nloop]
+          s = sx * sy
 
           # Dequantize
-          xys = (xy * sx) * sy
+          xys = xy * s
 
           # Accumulate results
-          accum_vmem[data_m_slc, data_n_slc] += xys
+          res += xys
+
+        # Write to accumulation buffer
+        accum_vmem[data_m_slc, data_n_slc] = res
 
     # Write results to output buffer.
-    @pl.when(pl.program_id(2) == pl.num_programs(2) - 1)
+    @pl.when(kind == pl.num_programs(2) - 1)
     def _write():
       o_vmem[...] = accum_vmem[...].astype(o_vmem.dtype)
 
@@ -310,9 +268,6 @@ def quantized_matmul(
     bm: int,
     bk: int,
     bn: int,
-    max_sublock_size_m: int = 128,
-    max_sublock_size_n: int = 128,
-    max_sublock_size_k: int = 128,
     accum_dtype=jnp.float32,
     dtype,
 ):
@@ -334,9 +289,6 @@ def quantized_matmul(
     bm: blockspec for the m dimension
     bk: blockspec for the k dimension
     bn: blockspec for the n dimension
-    max_sublock_size_m: maximum size of the sublock for the m dimension
-    max_sublock_size_n: maximum size of the sublock for the n dimension
-    max_sublock_size_k: maximum size of the sublock for the k dimension
     accum_dtype: The dtype of the accumulation buffer
     dtype: The dtype of the output array
 
@@ -369,10 +321,6 @@ def quantized_matmul(
         f' {sy.shape[0]=}'
     )
 
-  # Pre-process the scales
-  sx = jnp.expand_dims(sx, axis=(-1, -2))
-  sy = jnp.expand_dims(sy, axis=(-1, -2))
-
   # Create the tensor core mesh
   tc_mesh = pltpu.create_tensorcore_mesh(axis_name=_CORE_AXIS_NAME)
 
@@ -385,9 +333,6 @@ def quantized_matmul(
       bm=bm,
       bk=bk,
       bn=bn,
-      max_sublock_size_m=max_sublock_size_m,
-      max_sublock_size_n=max_sublock_size_n,
-      max_sublock_size_k=max_sublock_size_k,
   )
 
   if sx.dtype != jnp.float32 or sy.dtype != jnp.float32:
@@ -396,7 +341,7 @@ def quantized_matmul(
   # Call the kernel
   return pl.kernel(
       kernel,
-      out_type=out_type,  # pyrefly: ignore
-      mesh=tc_mesh,  # pyrefly: ignore
-      scratch_types=[pltpu.VMEM((bm, bn), accum_dtype)],  # pyrefly: ignore
+      out_type=out_type,
+      mesh=tc_mesh,
+      scratch_types=[pltpu.VMEM((bm, bn), accum_dtype)],
   )(x, sx, y, sy)
