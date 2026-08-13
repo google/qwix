@@ -1,3 +1,4 @@
+import functools
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
@@ -17,7 +18,9 @@ class LHSFusedQuantizedMatmulTest(parameterized.TestCase):
     y = y.reshape(sk, k // sk, sn, n // sn)
 
     # Quantize the LHS
-    vqfn = jax.vmap(lfqmm.quantize_a_tile, in_axes=0, out_axes=(0, 0))
+    fn_axes = 0 if sm == m else None
+    fn = functools.partial(lfqmm.quantize_a_tile, axis=fn_axes)
+    vqfn = jax.vmap(fn, in_axes=0, out_axes=(0, 0))
     vvqfn = jax.vmap(vqfn, in_axes=2, out_axes=(2, 2))
     xq, sx = vvqfn(x)
     sx = sx.reshape(sm, sk)

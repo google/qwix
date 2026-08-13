@@ -41,17 +41,13 @@ import jax.numpy as jnp
 _CORE_AXIS_NAME = "core"
 
 
-def quantize_a_tile(x: jax.Array, *, qtype=jnp.int8, method="absmax"):
+def quantize_a_tile(x, axis, dtype=jnp.int8):
   """Quantizes a tile of LHS values."""
-  # TODO(chapmanjames): Update to support stochastic rounding.
-  max_val = jnp.iinfo(qtype).max + 0.49
-  if method == "absmax":
-    s = jnp.max(jnp.abs(x), axis=(-1, -2), keepdims=True) / max_val
-    s_inv = jax.lax.reciprocal(s)
-    xq = jnp.round(x * s_inv).astype(qtype)
-  else:
-    raise ValueError(f"Unsupported quantization method: {method}")
-  return xq, s
+  s = jnp.max(jnp.abs(x), axis=axis, keepdims=True) / (
+      jnp.iinfo(dtype).max + 0.5
+  )
+  x = jnp.rint(x / s).astype(dtype)
+  return x, s
 
 
 def lhs_fused_qmm_kernel(
@@ -65,6 +61,7 @@ def lhs_fused_qmm_kernel(
     bk: int,
     bn: int,
     sm_global: int,
+    quantize_tile_fn=quantize_a_tile,
 ):
   """Fused Quantized Matmul kernel.
 
@@ -78,8 +75,11 @@ def lhs_fused_qmm_kernel(
     bk: blockspec for the k dimension
     bn: blockspec for the n dimension
     sm_global: Scale shape for the m dimension
+    quantize_tile_fn: Function to quantize a tile of LHS values.
   """
-  sk_global, sn_global = sy_hbm.shape[:2]
+  sk_global, sn_global = sy_hbm.shape
+  qtype = y_hbm.dtype
+  reduction_dtype = jnp.int32
 
   # Grid
   m, k = x_hbm.shape
@@ -94,7 +94,9 @@ def lhs_fused_qmm_kernel(
   # Blockspecs for the kernel
   x_spec = pl.BlockSpec((bm, bk), lambda a, b, c: (a, c))
   y_spec = pl.BlockSpec((bk, bn), lambda a, b, c: (c, b))
-  sy_spec = pl.BlockSpec((sk, sn, 1, 1), lambda a, b, c: (c, b, 0, 0))
+  sy_spec = pl.BlockSpec(
+      (sk, sn_global), lambda a, b, c: (c, 0), memory_space=pltpu.SMEM
+  )
   o_spec = pl.BlockSpec((bm, bn), lambda a, b, c: (a, b))
 
   # Tile sizes corresponding to scale entries
@@ -102,58 +104,158 @@ def lhs_fused_qmm_kernel(
   k_tile_size = pl.cdiv(bk, sk)
   n_tile_size = pl.cdiv(bn, sn)
 
-  def kernel_body(
+  # Check if sm == bm (e.g. lhs should use 1d sub-channel quantization)
+  quantize_tile_fn_axis = 1 if sm == bm else None
+  m_subtile_iter_size = min(128, bm) if sm == bm else m_tile_size
+  m_sub_iters = bm // m_subtile_iter_size
+  assert bm % m_subtile_iter_size == 0
+
+  def kernel_body_single_k(
       x_vmem: jax.Ref, y_vmem: jax.Ref, sy_vmem: jax.Ref, o_vmem: jax.Ref
   ):
-    kind = pl.program_id(2)
+    """Quantize then matmul when bk == k."""
+    nind = pl.program_id(1)
 
-    @pl.when(kind == 0)
-    def _init():
-      accum_vmem[...] = jnp.zeros_like(accum_vmem)
+    # Quantize
+    all_xq, all_sx = dict(), dict()
+    for mloop in range(m_sub_iters):
+      data_m_slc = pl.Slice(mloop * m_subtile_iter_size, m_subtile_iter_size)
+      for kloop in range(sk):
+        data_k_slc = pl.Slice(kloop * k_tile_size, k_tile_size)
+        x = x_vmem[data_m_slc, data_k_slc]
+        xq, sx = quantize_tile_fn(x, quantize_tile_fn_axis, qtype)
+        all_xq[(mloop, kloop)] = xq
+        all_sx[(mloop, kloop)] = sx
 
-    for mloop in range(sm):
-      data_m_slc = pl.Slice(mloop * m_tile_size, m_tile_size)
-      xq_list, sx_list = [], []
-
+    # Quantized Matmul
+    for mloop in range(m_sub_iters):
+      data_m_slc = pl.Slice(mloop * m_subtile_iter_size, m_subtile_iter_size)
       for nloop in range(sn):
         data_n_slc = pl.Slice(nloop * n_tile_size, n_tile_size)
-
-        # Loop over subchannel axis
+        res = jnp.zeros(
+            (m_subtile_iter_size, n_tile_size), dtype=accum_vmem.dtype
+        )
         for kloop in range(sk):
           data_k_slc = pl.Slice(kloop * k_tile_size, k_tile_size)
 
-          # Quantize/Load x
-          if nloop == 0:
-            # Quantize x
-            x = x_vmem[data_m_slc, data_k_slc]
-            xq, sx = quantize_a_tile(x)
-            xq_list.append(xq)
-            sx_list.append(sx)
-          else:
-            # Load xq and sx
-            xq, sx = xq_list[kloop], sx_list[kloop]
-
-          # Load y
+          xq = all_xq[(mloop, kloop)]
+          sx = all_sx[(mloop, kloop)]
           y = y_vmem[data_k_slc, data_n_slc]
-
-          # Low Precision Matmul
           xy = jnp.matmul(xq, y, preferred_element_type=reduction_dtype)
+          sy = sy_vmem[kloop, nind * sn + nloop]
+          xys = xy * (sx * sy)
+          res += xys
 
-          # Access the sy scales we need
-          sy = sy_vmem[kloop, nloop, :, :]
+        # Write results to output buffer.
+        o_vmem[data_m_slc, data_n_slc] = res.astype(o_vmem.dtype)
 
-          # Dequantize
-          xys = (xy * sx) * sy
+  def kernel_body_multiple_k(
+      x_vmem: jax.Ref,
+      y_vmem: jax.Ref,
+      sy_vmem: jax.Ref,
+      o_vmem: jax.Ref,
+  ):
+    """Quantize then matmul when bk != k."""
+    nind, kind = pl.program_id(1), pl.program_id(2)
 
-          # Accumulate results
-          accum_vmem[data_m_slc, data_n_slc] += xys
+    @pl.when(kind == 0)
+    def _init():
+      # Hadamard and quantize
+      all_xq, all_sx = dict(), dict()
+      for mloop in range(m_sub_iters):
+        data_m_slc = pl.Slice(mloop * m_subtile_iter_size, m_subtile_iter_size)
+        for kloop in range(sk):
+          data_k_slc = pl.Slice(kloop * k_tile_size, k_tile_size)
+          x = x_vmem[data_m_slc, data_k_slc]
+          xq, sx = quantize_tile_fn(x, quantize_tile_fn_axis, qtype)
+          all_xq[(mloop, kloop)] = xq
+          all_sx[(mloop, kloop)] = sx
+
+      # Quantized Matmul
+      res = None
+      for mloop in range(m_sub_iters):
+        data_m_slc = pl.Slice(mloop * m_subtile_iter_size, m_subtile_iter_size)
+        for nloop in range(sn):
+          data_n_slc = pl.Slice(nloop * n_tile_size, n_tile_size)
+          for kloop in range(sk):
+            data_k_slc = pl.Slice(kloop * k_tile_size, k_tile_size)
+
+            xq = all_xq[(mloop, kloop)]
+            sx = all_sx[(mloop, kloop)]
+            y = y_vmem[data_k_slc, data_n_slc]
+            xy = jnp.matmul(xq, y, preferred_element_type=reduction_dtype)
+            sy = sy_vmem[kloop, nind * sn + nloop]
+            xys = xy * (sx * sy)
+            if kloop == 0:
+              res = xys
+            else:
+              res += xys
+          accum_vmem[data_m_slc, data_n_slc] = res
+
+    @pl.when((kind > 0) & (kind < pl.num_programs(2) - 1))
+    def _middle():
+      # Hadamard and quantize
+      all_xq, all_sx = dict(), dict()
+      for mloop in range(m_sub_iters):
+        data_m_slc = pl.Slice(mloop * m_subtile_iter_size, m_subtile_iter_size)
+        for kloop in range(sk):
+          data_k_slc = pl.Slice(kloop * k_tile_size, k_tile_size)
+          x = x_vmem[data_m_slc, data_k_slc]
+          xq, sx = quantize_tile_fn(x, quantize_tile_fn_axis, qtype)
+          all_xq[(mloop, kloop)] = xq
+          all_sx[(mloop, kloop)] = sx
+
+      # Quantized Matmul
+      for mloop in range(m_sub_iters):
+        data_m_slc = pl.Slice(mloop * m_subtile_iter_size, m_subtile_iter_size)
+        for nloop in range(sn):
+          data_n_slc = pl.Slice(nloop * n_tile_size, n_tile_size)
+          res = accum_vmem[data_m_slc, data_n_slc]
+          for kloop in range(sk):
+            data_k_slc = pl.Slice(kloop * k_tile_size, k_tile_size)
+
+            xq = all_xq[(mloop, kloop)]
+            sx = all_sx[(mloop, kloop)]
+            y = y_vmem[data_k_slc, data_n_slc]
+            xy = jnp.matmul(xq, y, preferred_element_type=reduction_dtype)
+            sy = sy_vmem[kloop, nind * sn + nloop]
+            xys = xy * (sx * sy)
+            res += xys
+          accum_vmem[data_m_slc, data_n_slc] = res
 
     # Write results to output buffer.
     @pl.when(kind == pl.num_programs(2) - 1)
     def _write():
-      o_vmem[...] = accum_vmem[...].astype(o_hbm.dtype)
+      # Quantize
+      all_xq, all_sx = dict(), dict()
+      for mloop in range(m_sub_iters):
+        data_m_slc = pl.Slice(mloop * m_subtile_iter_size, m_subtile_iter_size)
+        for kloop in range(sk):
+          data_k_slc = pl.Slice(kloop * k_tile_size, k_tile_size)
+          x = x_vmem[data_m_slc, data_k_slc]
+          xq, sx = quantize_tile_fn(x, quantize_tile_fn_axis, qtype)
+          all_xq[(mloop, kloop)] = xq
+          all_sx[(mloop, kloop)] = sx
 
-  reduction_dtype = jnp.int32
+      # Quantized Matmul
+      for mloop in range(m_sub_iters):
+        data_m_slc = pl.Slice(mloop * m_subtile_iter_size, m_subtile_iter_size)
+        for nloop in range(sn):
+          data_n_slc = pl.Slice(nloop * n_tile_size, n_tile_size)
+          res = accum_vmem[data_m_slc, data_n_slc]
+          for kloop in range(sk):
+            data_k_slc = pl.Slice(kloop * k_tile_size, k_tile_size)
+
+            xq = all_xq[(mloop, kloop)]
+            sx = all_sx[(mloop, kloop)]
+            y = y_vmem[data_k_slc, data_n_slc]
+            xy = jnp.matmul(xq, y, preferred_element_type=reduction_dtype)
+            sy = sy_vmem[kloop, nind * sn + nloop]
+            xys = xy * (sx * sy)
+            res += xys
+          o_vmem[data_m_slc, data_n_slc] = res.astype(o_vmem.dtype)
+
+  kernel_body = kernel_body_multiple_k if grid[2] > 1 else kernel_body_single_k
 
   # Call the kernel.
   pltpu.emit_pipeline(
@@ -176,6 +278,7 @@ def lhs_fused_quantized_matmul(
     bn: int,
     sm: int,
     accum_dtype=jnp.float32,
+    quantize_tile_fn=quantize_a_tile,
 ):
   """LHS Fused Quantized Matmul.
 
@@ -192,19 +295,16 @@ def lhs_fused_quantized_matmul(
     bn: blockspec for the n dimension
     sm: Scale shape for the m dimension
     accum_dtype: The dtype of the accumulation buffer
+    quantize_tile_fn: Function to quantize a tile of LHS values.
 
   Returns:
     The output array (m, n)
   """
-
-  sy = jnp.expand_dims(sy, axis=(-1, -2))
-  dtype = x.dtype
-
   # Create the tensor core mesh
   tc_mesh = pltpu.create_tensorcore_mesh(axis_name=_CORE_AXIS_NAME)
 
   # Create the output type
-  out_type = jax.core.ShapedArray((x.shape[0], y.shape[1]), dtype)
+  out_type = jax.core.ShapedArray((x.shape[0], y.shape[1]), x.dtype)
 
   # Create the kernel with kwargs
   kernel = functools.partial(
@@ -213,6 +313,7 @@ def lhs_fused_quantized_matmul(
       bk=bk,
       bn=bn,
       sm_global=sm,
+      quantize_tile_fn=quantize_tile_fn,
   )
 
   accum_buffer = pltpu.VMEM((bm, bn), accum_dtype)
@@ -220,7 +321,7 @@ def lhs_fused_quantized_matmul(
   # Call the kernel
   return pl.kernel(
       kernel,
-      out_type=out_type,  # pyrefly: ignore
-      mesh=tc_mesh,  # pyrefly: ignore
-      scratch_types=[accum_buffer],  # pyrefly: ignore
+      out_type=out_type,
+      mesh=tc_mesh,
+      scratch_types=[accum_buffer],
   )(x, y, sy)
