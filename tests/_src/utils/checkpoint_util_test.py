@@ -214,6 +214,139 @@ class PrequantizedPtqTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       dict(
+          testcase_name="symmetric",
+          source_qtype=jnp.float8_e4m3fn,
+          target_qtype=jnp.int4,
+          calibration_method="absmax",
+          check_zero_point=False,
+      ),
+      dict(
+          testcase_name="asymmetric",
+          source_qtype=jnp.int8,
+          target_qtype=jnp.int4,
+          calibration_method="minmax",
+          check_zero_point=True,
+      ),
+  )
+  def test_process_prequantized_params_requantized(
+      self, source_qtype, target_qtype, calibration_method, check_zero_point
+  ):
+    model_input = jnp.ones((10, 12))
+    source_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*", weight_qtype=source_qtype, tile_size=4
+        )
+    ]
+    _, orig_params, source_ref = _build_linear_reference(
+        source_rules, model_input
+    )
+    target_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*",
+            weight_qtype=target_qtype,
+            weight_calibration_method=calibration_method,
+            tile_size=4,
+        )
+    ]
+    abs_target_linear, _, _ = _build_linear_reference(target_rules, model_input)
+
+    orbax_payload = _to_orbax_payload(source_ref)
+    processed_params = checkpoint_util.process_prequantized_params(
+        orbax_payload, abs_target_linear
+    )
+    source_kernel = source_ref["kernel"]["array"]
+    source_qarray = qarray.QArray(
+        qvalue=source_kernel["qvalue"],
+        scale=source_kernel["scale"],
+        zero_point=source_kernel.get("zero_point"),
+    )
+    dequantized_kernel = qarray.dequantize(source_qarray)
+    expected_params = ptq.quantize_params(
+        {"kernel": dequantized_kernel, "bias": orig_params["bias"]},
+        abs_target_linear,
+    )
+
+    self.assertEqual(
+        check_zero_point, "zero_point" in processed_params["kernel"]["array"]
+    )
+    self.assertEqual(
+        processed_params["kernel"]["array"]["qvalue"].dtype, target_qtype
+    )
+    _assert_trees_allclose(self, processed_params, expected_params)
+    nnx.update(abs_target_linear, processed_params)
+    abs_target_linear(model_input)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="asymmetric_to_symmetric",
+          source_calibration_method="minmax",
+          target_calibration_method="absmax",
+          expect_zero_point=False,
+      ),
+      dict(
+          testcase_name="symmetric_to_asymmetric",
+          source_calibration_method="absmax",
+          target_calibration_method="minmax",
+          expect_zero_point=True,
+      ),
+  )
+  def test_process_prequantized_params_requantized_calibration_change(
+      self,
+      source_calibration_method,
+      target_calibration_method,
+      expect_zero_point,
+  ):
+    model_input = jnp.ones((10, 12))
+    source_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*",
+            weight_qtype=jnp.int8,
+            weight_calibration_method=source_calibration_method,
+            tile_size=4,
+        )
+    ]
+    _, orig_params, source_ref = _build_linear_reference(
+        source_rules, model_input
+    )
+    target_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*",
+            weight_qtype=jnp.int8,
+            weight_calibration_method=target_calibration_method,
+            tile_size=4,
+        )
+    ]
+    abs_target_linear, _, _ = _build_linear_reference(target_rules, model_input)
+
+    orbax_payload = _to_orbax_payload(source_ref)
+    processed_params = checkpoint_util.process_prequantized_params(
+        orbax_payload, abs_target_linear
+    )
+
+    source_kernel = source_ref["kernel"]["array"]
+    source_qarray = qarray.QArray(
+        qvalue=source_kernel["qvalue"],
+        scale=source_kernel["scale"],
+        zero_point=source_kernel.get("zero_point"),
+    )
+    dequantized_kernel = qarray.dequantize(source_qarray)
+    expected_params = ptq.quantize_params(
+        {"kernel": dequantized_kernel, "bias": orig_params["bias"]},
+        abs_target_linear,
+    )
+
+    self.assertEqual(
+        expect_zero_point, "zero_point" in processed_params["kernel"]["array"]
+    )
+    self.assertEqual(
+        processed_params["kernel"]["array"]["qvalue"].dtype, jnp.int8
+    )
+    _assert_trees_allclose(self, processed_params, expected_params)
+    nnx.update(abs_target_linear, processed_params)
+    abs_target_linear(model_input)
+
+  @parameterized.named_parameters(
+      dict(
           testcase_name="missing_scale",
           modify_payload_fn=lambda p: p["kernel"]["array"].pop("scale"),
           expected_regex="scale",
@@ -224,16 +357,6 @@ class PrequantizedPtqTest(parameterized.TestCase):
               {"qvalue": p["kernel"]["array"]["qvalue"][:-1]}
           ),
           expected_regex="shape",
-      ),
-      dict(
-          testcase_name="rejects_unexpected_zero_point",
-          modify_payload_fn=lambda p: p["kernel"]["array"].update({
-              "zero_point": np.zeros_like(
-                  p["kernel"]["array"]["scale"],
-                  dtype=p["kernel"]["array"]["qvalue"].dtype,
-              )
-          }),
-          expected_regex="unexpected",
       ),
   )
   def test_process_prequantized_params_errors(
@@ -522,6 +645,63 @@ class PrequantizedQtTest(parameterized.TestCase):
     _assert_trees_allclose(self, processed_params["bias"], orig_params["bias"])
     nnx.update(fp_linear, processed_params)
     fp_linear(model_input)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="symmetric",
+          source_qtype=jnp.float8_e4m3fn,
+          target_qtype=jnp.int4,
+          calibration_method="absmax",
+      ),
+      dict(
+          testcase_name="asymmetric",
+          source_qtype=jnp.int8,
+          target_qtype=jnp.int4,
+          calibration_method="minmax",
+      ),
+  )
+  def test_process_prequantized_params_requantized(
+      self, source_qtype, target_qtype, calibration_method
+  ):
+    model_input = jnp.ones((10, 12))
+    source_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*", weight_qtype=source_qtype, tile_size=4
+        )
+    ]
+    _, orig_params, source_ref = _build_linear_reference(
+        source_rules, model_input
+    )
+    target_rules = [
+        qt.QtRule(
+            module_path=".*",
+            weight_qtype=target_qtype,
+            weight_calibration_method=calibration_method,
+            act_qtype=target_qtype,
+            bwd_qtype=target_qtype,
+            tile_size=4,
+        )
+    ]
+    abs_target_linear, _, _ = _build_linear_reference(
+        target_rules, model_input, qt.QtProvider
+    )
+
+    orbax_payload = _to_orbax_payload(source_ref)
+    processed_params = checkpoint_util.process_prequantized_params(
+        orbax_payload, abs_target_linear
+    )
+    source_kernel = source_ref["kernel"]["array"]
+    source_qarray = qarray.QArray(
+        qvalue=source_kernel["qvalue"],
+        scale=source_kernel["scale"],
+        zero_point=source_kernel.get("zero_point"),
+    )
+    expected_kernel = qarray.dequantize(source_qarray)
+
+    _assert_trees_allclose(self, processed_params["kernel"], expected_kernel)
+    _assert_trees_allclose(self, processed_params["bias"], orig_params["bias"])
+    nnx.update(abs_target_linear, processed_params)
+    abs_target_linear(model_input)
 
   def test_process_prequantized_params_full_precision(self):
     qt_rules = [
