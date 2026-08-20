@@ -248,13 +248,6 @@ def _process_quantized_param(
 
   template_zero_point = _get_template_field(template_param, 'zero_point')
   zero_point = checkpoint_param.get('zero_point')
-  if template_zero_point is None and zero_point is not None:
-    raise ValueError(
-        f'{path} provided an unexpected "zero_point" for a symmetric'
-        ' quantized param.'
-    )
-  if template_zero_point is not None and zero_point is None:
-    raise ValueError(f'{path} is missing required quantized leaf "zero_point".')
   if template_zero_point is not None:
     zero_point = _apply_sharding_and_dtype(
         zero_point,
@@ -266,6 +259,218 @@ def _process_quantized_param(
 
   qarray_leaf = qarray.QArray(
       qvalue=qvalue,
+      scale=scale,
+      zero_point=zero_point,
+  )
+  qarray.validate_qarray(qarray_leaf)
+  return qarray_leaf
+
+
+def _is_same_quantization_schema(
+    checkpoint_param: Mapping[str, Any], template_param: Any
+) -> bool:
+  """Checks if the checkpoint and template have the same quantization schema.
+
+  Args:
+    checkpoint_param: A dictionary containing quantized leaves (`qvalue`,
+      `scale`, and optional `zero_point`).
+    template_param: An abstract template parameter containing the target shapes
+      and types for coercion.
+
+  Returns:
+    True if the checkpoint and template have the same quantization schema, False
+    otherwise.
+  """
+  if 'qvalue' not in checkpoint_param or 'scale' not in checkpoint_param:
+    return False
+
+  ckpt_qtype = checkpoint_param['qvalue'].dtype
+  template_qvalue = flax_util.unbox(
+      _get_template_field(template_param, 'qvalue')
+  )
+  if (
+      isinstance(template_param, qarray.QArray)
+      and template_param.qtype is not None
+  ):
+    template_qtype = template_param.qtype
+  else:
+    template_qtype = template_qvalue.dtype
+  if jnp.dtype(ckpt_qtype) != jnp.dtype(template_qtype):
+    return False
+
+  template_scale = flax_util.unbox(_get_template_field(template_param, 'scale'))
+  if tuple(checkpoint_param['scale'].shape) != tuple(template_scale.shape):
+    return False
+
+  ckpt_has_zero_point = checkpoint_param.get('zero_point') is not None
+  template_has_zero_point = (
+      _get_template_field(template_param, 'zero_point') is not None
+  )
+  return ckpt_has_zero_point == template_has_zero_point
+
+
+def _place_quantized_leaves(
+    qvalue: Any,
+    scale: Any,
+    zero_point: Any,
+    sharding: Any,
+) -> qarray.QArray:
+  """Places quantized leaves onto a device sharding without any dtype/shape coercion.
+
+  Args:
+    qvalue: The quantized value array.
+    scale: The scale array.
+    zero_point: The optional zero point array, or None.
+    sharding: The resolved sharding for the quantized value, or None.
+
+  Returns:
+    A `QArray` leaf with the given quantized leaves placed onto the given
+    sharding.
+  """
+  if isinstance(sharding, jax.sharding.NamedSharding):
+    # Handle multi-device sharding.
+    qvalue = jax.device_put(qvalue, sharding)
+    scale_ndim = jnp.ndim(scale)
+    scale_sharding = jax.sharding.NamedSharding(
+        sharding.mesh, jax.sharding.PartitionSpec(*[None] * scale_ndim)
+    )
+    scale = jax.device_put(scale, scale_sharding)
+    if zero_point is not None:
+      zp_ndim = jnp.ndim(zero_point)
+      zp_sharding = jax.sharding.NamedSharding(
+          sharding.mesh, jax.sharding.PartitionSpec(*[None] * zp_ndim)
+      )
+      zero_point = jax.device_put(zero_point, zp_sharding)
+    else:
+      zero_point = None
+  elif sharding is not None and hasattr(sharding, 'device'):
+    # Handle single-device sharding.
+    qvalue = jax.device_put(qvalue, sharding)
+    scale = jax.device_put(scale, sharding.device)
+    if zero_point is not None:
+      zero_point = jax.device_put(zero_point, sharding.device)
+    else:
+      zero_point = None
+  else:
+    qvalue = jnp.asarray(qvalue)
+    scale = jnp.asarray(scale)
+    if zero_point is not None:
+      zero_point = jnp.asarray(zero_point)
+    else:
+      zero_point = None
+
+  return qarray.QArray(
+      qvalue=qvalue,
+      scale=scale,
+      zero_point=zero_point,
+  )
+
+
+def _reconstruct_how_from_template(template_param: Any) -> qarray.HowToQuantize:
+  """Reconstructs a HowToQuantize from an abstract quantized template leaf.
+
+  Args:
+    template_param: An abstract template parameter containing the target shapes
+      and types for coercion.
+
+  Returns:
+    A `qarray.HowToQuantize` object.
+  """
+  qvalue = flax_util.unbox(_get_template_field(template_param, 'qvalue'))
+  scale = flax_util.unbox(_get_template_field(template_param, 'scale'))
+  zero_point = _get_template_field(template_param, 'zero_point')
+  if (
+      isinstance(template_param, qarray.QArray)
+      and template_param.qtype is not None
+  ):
+    qtype = template_param.qtype
+  else:
+    qtype = qvalue.dtype
+  # Reconstruct channelwise and tiled axes from the scale shape, per
+  # qarray.get_scale_shape:
+  channelwise_axes = []
+  tiled_axes = {}
+  for axis, (qdim, sdim) in enumerate(zip(qvalue.shape, scale.shape)):
+    # scale_dim == qvalue_dim -> channelwise (per-channel scale)
+    if sdim == qdim:
+      channelwise_axes.append(axis)
+    # scale_dim == 1 -> neither (single shared scale)
+    elif sdim == 1:
+      continue
+    # otherwise -> tiled with tile_size = qvalue_dim // scale_dim
+    else:
+      tiled_axes[axis] = qdim // sdim
+  calibration_method = 'minmax' if zero_point is not None else 'absmax'
+  return qarray.HowToQuantize(
+      qtype=qtype,
+      channelwise_axes=tuple(channelwise_axes),
+      tiled_axes=tiled_axes,
+      calibration_method=calibration_method,
+  )
+
+
+def _requantize_quantized_param(
+    checkpoint_param: Mapping[str, Any],
+    template_param: Any,
+    path: tuple[str, ...],
+    *,
+    use_checkpoint_sharding: bool,
+) -> qarray.QArray:
+  """Requantizes a prequantized parameter dictionary to a QArray leaf.
+
+  Args:
+    checkpoint_param: A dictionary containing quantized leaves (`qvalue`,
+      `scale`, and optional `zero_point`).
+    template_param: An abstract template parameter containing the target shapes
+      and types for coercion.
+    path: The parameter path for error messages.
+    use_checkpoint_sharding: Whether to use sharding from the checkpoint.
+
+  Returns:
+    A new `QArray` leaf whose contents have been requantized to the correct
+    device placement, shape, and dtype.
+  """
+  _validate_prequantized_dict(checkpoint_param, path)
+  ckpt_qvalue = checkpoint_param['qvalue']
+  ckpt_scale = checkpoint_param['scale']
+  ckpt_zero_point = checkpoint_param.get('zero_point')
+
+  if use_checkpoint_sharding:
+    sharding = _get_sharding(getattr(ckpt_qvalue, 'sharding', None), path)
+  else:
+    template_qvalue = _get_template_field(template_param, 'qvalue')
+    sharding = _get_sharding(
+        getattr(flax_util.unbox(template_qvalue), 'sharding', None), path
+    )
+    if sharding is None:
+      sharding = _sharding_from_template_metadata(template_qvalue)
+
+  ckpt_qarray_leaf = _place_quantized_leaves(
+      ckpt_qvalue, ckpt_scale, ckpt_zero_point, sharding
+  )
+  dequantized = qarray.dequantize(ckpt_qarray_leaf)
+  how = _reconstruct_how_from_template(template_param)
+  requantized = qarray.quantize(dequantized, how)
+
+  scale = _apply_sharding_and_dtype(
+      requantized.scale,
+      _get_template_field(template_param, 'scale'),
+      path,
+      allow_broadcast=True,
+      use_checkpoint_sharding=use_checkpoint_sharding,
+  )
+  template_zero_point = _get_template_field(template_param, 'zero_point')
+  zero_point = requantized.zero_point
+  if template_zero_point is not None and zero_point is not None:
+    zero_point = _apply_sharding_and_dtype(
+        zero_point,
+        template_zero_point,
+        path,
+        allow_broadcast=True,
+        use_checkpoint_sharding=use_checkpoint_sharding,
+    )
+  qarray_leaf = qarray.QArray(
+      qvalue=requantized.qvalue,
       scale=scale,
       zero_point=zero_point,
   )
@@ -303,44 +508,11 @@ def _dequantize_quantized_param(
     sharding = _get_sharding(getattr(ckpt_qvalue, 'sharding', None), path)
   else:
     sharding = _get_sharding(getattr(template_param, 'sharding', None), path)
-  if isinstance(sharding, jax.sharding.NamedSharding):
-    # Handle multi-device sharding.
-    qvalue = jax.device_put(ckpt_qvalue, sharding)
-    scale_ndim = jnp.ndim(ckpt_scale)
-    scale_sharding = jax.sharding.NamedSharding(
-        sharding.mesh, jax.sharding.PartitionSpec(*[None] * scale_ndim)
-    )
-    scale = jax.device_put(ckpt_scale, scale_sharding)
-    if ckpt_zero_point is not None:
-      zp_ndim = jnp.ndim(ckpt_zero_point)
-      zp_sharding = jax.sharding.NamedSharding(
-          sharding.mesh, jax.sharding.PartitionSpec(*[None] * zp_ndim)
-      )
-      zero_point = jax.device_put(ckpt_zero_point, zp_sharding)
-    else:
-      zero_point = None
-  elif sharding is not None and hasattr(sharding, 'device'):
-    # Handle single-device sharding.
-    qvalue = jax.device_put(ckpt_qvalue, sharding)
-    scale = jax.device_put(ckpt_scale, sharding.device)
-    if ckpt_zero_point is not None:
-      zero_point = jax.device_put(ckpt_zero_point, sharding.device)
-    else:
-      zero_point = None
-  else:
-    qvalue = jnp.asarray(ckpt_qvalue)
-    scale = jnp.asarray(ckpt_scale)
-    if ckpt_zero_point is not None:
-      zero_point = jnp.asarray(ckpt_zero_point)
-    else:
-      zero_point = None
 
-  qarray_leaf = qarray.QArray(
-      qvalue=qvalue,
-      scale=scale,
-      zero_point=zero_point,
+  ckpt_qarray_leaf = _place_quantized_leaves(
+      ckpt_qvalue, ckpt_scale, ckpt_zero_point, sharding
   )
-  dequantized = qarray.dequantize(qarray_leaf)
+  dequantized = qarray.dequantize(ckpt_qarray_leaf)
   return _apply_sharding_and_dtype(
       dequantized,
       template_param,
@@ -447,12 +619,26 @@ def process_prequantized_params(
     if isinstance(checkpoint_param, dict) and isinstance(
         template_param, (dict, qarray.QArray)
     ):
-      processed = _process_quantized_param(
-          checkpoint_param,
-          template_param,
-          resolved_path,
-          use_checkpoint_sharding=use_checkpoint_sharding,
-      )
+      # Case 1a: checkpoint_param and template_param have the same
+      # quantization schema and can be coerced directly into the target
+      # template schema.
+      if _is_same_quantization_schema(checkpoint_param, template_param):
+        processed = _process_quantized_param(
+            checkpoint_param,
+            template_param,
+            resolved_path,
+            use_checkpoint_sharding=use_checkpoint_sharding,
+        )
+      # Case 1b: checkpoint_param and template_param have different
+      # quantization schemas and need to be requantized to match the target
+      # template schema.
+      else:
+        processed = _requantize_quantized_param(
+            checkpoint_param,
+            template_param,
+            resolved_path,
+            use_checkpoint_sharding=use_checkpoint_sharding,
+        )
 
     # Case 2: checkpoint_param is prequantized (dict), template_param is fp.
     elif isinstance(checkpoint_param, dict) and not isinstance(
