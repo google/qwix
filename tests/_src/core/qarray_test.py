@@ -531,6 +531,113 @@ class QArrayTest(parameterized.TestCase):
         jnp.array_equal(scale, jnp.array(expected_scales, dtype=scale.dtype))
     )
 
+  def test_reshape(self):
+    """Test reshape on QArray with per-channel and subchannel scale/zero_point."""
+    # Tiled along channel axes: shape (4, 8, 2) with varying scale
+    # across axis 0 of shape (4, 1, 2).
+    qvalue = jnp.arange(64, dtype=jnp.int8).reshape((4, 8, 2))
+    scale = jnp.array([1.0, 2.0, 3.0, 4.0], dtype=jnp.float32).reshape(
+        (4, 1, 1)
+    ) * jnp.ones((4, 1, 2))
+    zero_point = jnp.zeros((4, 1, 2), dtype=jnp.int8)
+    arr = qarray.QArray(
+        qvalue=qvalue, scale=scale, zero_point=zero_point, qtype=jnp.int8
+    )
+
+    # Reshape (4, 8, 2) -> (32, 2). Across dim 0 of size 32, 4 chunks
+    # of size 8 share scales, and across dim 1 of size 2 there
+    # are 2 scale elements.
+    reshaped = arr.reshape((32, 2))
+    self.assertEqual(reshaped.shape, (32, 2))
+    self.assertEqual(reshaped.scale.shape, (4, 2))
+    self.assertIsNotNone(reshaped.zero_point)
+    self.assertEqual(reshaped.zero_point.shape, (4, 2))
+
+    dq_orig = qarray.dequantize(arr).reshape((32, 2))
+    dq_reshaped = qarray.dequantize(reshaped)
+    self.assertTrue(jnp.array_equal(dq_reshaped, dq_orig))
+
+    # Second reshape (4, 8, 2) -> (32, 2).
+    auto_reshaped = arr.reshape((32, 2))
+    self.assertEqual(auto_reshaped.shape, (32, 2))
+    self.assertEqual(auto_reshaped.scale.shape, (4, 2))
+    self.assertIsNotNone(auto_reshaped.zero_point)
+    self.assertEqual(auto_reshaped.zero_point.shape, (4, 2))
+
+    # Incompatible size for array of 28 elements should raise ValueError.
+    qvalue_prim = jnp.arange(28, dtype=jnp.int8).reshape((4, 7, 1))
+    scale_incompat = jnp.arange(1, 29, dtype=jnp.float32).reshape((4, 7, 1))
+    arr_incompat = qarray.QArray(
+        qvalue=qvalue_prim,
+        scale=scale_incompat,
+        zero_point=None,
+        qtype=jnp.int8,
+    )
+    with self.assertRaises((ValueError, TypeError)):
+      arr_incompat.reshape((3, 10))
+
+  def test_transpose_and_swapaxes(self):
+    """Test transpose and swapaxes on QArray."""
+    qvalue = jnp.arange(24, dtype=jnp.int8).reshape((2, 3, 4))
+    scale = jnp.arange(1, 3, dtype=jnp.float32).reshape((2, 1, 1))
+    zero_point = jnp.zeros((2, 1, 1), dtype=jnp.int8)
+    arr = qarray.QArray(
+        qvalue=qvalue, scale=scale, zero_point=zero_point, qtype=jnp.int8
+    )
+
+    trans = arr.transpose((2, 0, 1))
+    self.assertEqual(trans.shape, (4, 2, 3))
+    self.assertEqual(trans.scale.shape, (1, 2, 1))
+    self.assertIsNotNone(trans.zero_point)
+    self.assertEqual(trans.zero_point.shape, (1, 2, 1))
+
+    dq_trans = qarray.dequantize(trans)
+    dq_orig_trans = jnp.transpose(qarray.dequantize(arr), (2, 0, 1))
+    self.assertTrue(jnp.allclose(dq_trans, dq_orig_trans))
+
+    swapped = arr.swapaxes(0, 1)
+    self.assertEqual(swapped.shape, (3, 2, 4))
+    self.assertEqual(swapped.scale.shape, (1, 2, 1))
+
+  def test_indexing_and_rewriting_take(self):
+    """Test __getitem__ and rewriting_take on QArray."""
+    qvalue = jnp.arange(60, dtype=jnp.int8).reshape((3, 4, 5))
+    scale = jnp.ones((3, 4, 5), dtype=jnp.float32)
+    zero_point = jnp.zeros((3, 4, 5), dtype=jnp.int8)
+    arr = qarray.QArray(
+        qvalue=qvalue, scale=scale, zero_point=zero_point, qtype=jnp.int8
+    )
+    dq_orig = qarray.dequantize(arr)
+
+    # Integer indexing
+    sub1 = arr[1]
+    self.assertEqual(sub1.shape, (4, 5))
+    self.assertEqual(sub1.scale.shape, (4, 5))
+    self.assertTrue(jnp.array_equal(qarray.dequantize(sub1), dq_orig[1]))
+
+    # Slice indexing
+    sub2 = arr[0:2, 1:3, ...]
+    self.assertEqual(sub2.shape, (2, 2, 5))
+    self.assertEqual(sub2.scale.shape, (2, 2, 5))
+    self.assertTrue(
+        jnp.array_equal(qarray.dequantize(sub2), dq_orig[0:2, 1:3, ...])
+    )
+
+    # Fancy index array
+    idx_arr = jnp.array([0, 2])
+    sub3 = arr[idx_arr]
+    self.assertEqual(sub3.shape, (2, 4, 5))
+    self.assertEqual(sub3.scale.shape, (2, 4, 5))
+    self.assertTrue(jnp.array_equal(qarray.dequantize(sub3), dq_orig[idx_arr]))
+
+    # Verify rewriting_take directly
+    take_sub = qarray.rewriting_take(arr, (slice(1, 3), 0))
+    self.assertEqual(take_sub.shape, (2, 5))
+    self.assertEqual(take_sub.scale.shape, (2, 5))
+    self.assertTrue(
+        jnp.array_equal(qarray.dequantize(take_sub), dq_orig[1:3, 0])
+    )
+
 
 if __name__ == '__main__':
   absltest.main()
