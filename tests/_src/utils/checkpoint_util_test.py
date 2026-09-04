@@ -212,6 +212,41 @@ class PrequantizedPtqTest(parameterized.TestCase):
 
     _assert_trees_allclose(self, processed_params, reference_params)
 
+  def test_process_prequantized_params_coerced_not_requantized(
+      self,
+  ):
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*", weight_qtype=jnp.int8, tile_size=4
+        ),
+    ]
+    model_input = jnp.ones((10, 12))
+    abs_ptq_linear, _, reference_params = _build_linear_reference(
+        q_rules, model_input
+    )
+
+    kernel_template = reference_params["kernel"]["array"]
+    qvalue = kernel_template["qvalue"]
+    per_tensor_scale = jnp.ones((1,) * qvalue.ndim, dtype=jnp.bfloat16)
+    orbax_payload = _to_orbax_payload({
+        "kernel": {"array": {"qvalue": qvalue, "scale": per_tensor_scale}},
+        "bias": reference_params["bias"],
+    })
+
+    processed = checkpoint_util.process_prequantized_params(
+        orbax_payload, abs_ptq_linear
+    )
+    processed_kernel = processed["kernel"]["array"]
+
+    # Per-tensor checkpoint scale is broadcastable up to the tiled template
+    # scale, so it is coerced not requantized.
+    np.testing.assert_array_equal(
+        jax.device_get(processed_kernel["qvalue"]), jax.device_get(qvalue)
+    )
+    self.assertEqual(
+        processed_kernel["scale"].shape, kernel_template["scale"].shape
+    )
+
   @parameterized.named_parameters(
       dict(
           testcase_name="symmetric",
