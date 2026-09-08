@@ -86,6 +86,7 @@ def get_all_ops():
       'jax.lax.dot_general': DotEinsumConv,
       'jax.nn.gelu': quantize(0),
       'jax.nn.leaky_relu': quantize(0),
+      'jax.nn.sigmoid': quantize(0),
       'jax.nn.silu': Silu,
       'jax.nn.softmax': Softmax,
       'jax.numpy.clip': OnlyOutputOp,
