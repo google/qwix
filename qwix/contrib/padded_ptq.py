@@ -33,6 +33,7 @@ from qwix._src.core import dot_general as core_dot_general
 from qwix._src.core import einsum as core_einsum
 from qwix._src.core import einsum_info as core_einsum_info
 from qwix._src.core import qarray
+from qwix._src.providers import boxed_param as _boxed_param
 from qwix._src.providers import ptq as _ptq
 
 
@@ -276,7 +277,7 @@ def quantize_act(
     act_name: str | None,
 ):
   """Wrapper to reuse PTQ.quantize_act with this module as qarray backend."""
-  return _ptq.quantize_act(
+  return _boxed_param.quantize_act(
       array, how, rule, act_name, _qarray_module=sys.modules[__name__]  # pyrefly: ignore[bad-argument-type]
   )
 
@@ -285,9 +286,9 @@ def create_quantized_param(
     name: str,
     value: jax.Array,
     how: HowToQuantize,
-) -> _ptq.WithAux[qarray.QArray]:
+) -> _boxed_param.WithAux[qarray.QArray]:
   """Wrapper that delegates to PTQ.create_quantized_param using this backend."""
-  return _ptq.create_quantized_param(
+  return _boxed_param.create_quantized_param(
       name, value, how, _qarray_module=sys.modules[__name__]
   )
 

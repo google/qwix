@@ -20,6 +20,7 @@ from qwix._src import model as qwix_model
 from qwix._src import qconfig
 from qwix._src.core import dot_general as core_dot
 from qwix._src.core import einsum as core_einsum
+from qwix._src.providers import boxed_param
 from qwix._src.providers import ptq
 from qwix.contrib import padded_ptq
 
@@ -62,7 +63,7 @@ class PaddedPtqTest(parameterized.TestCase):
     )
 
     w_qarray_pad = padded_ptq.quantize_act(w, how, rule, None)
-    w_qarray_ptq = ptq.quantize_act(w_padded, how, rule, None)
+    w_qarray_ptq = boxed_param.quantize_act(w_padded, how, rule, None)
 
     q_diff = jnp.max(
         jnp.abs(w_qarray_pad.qvalue[:, :D, :] - w_qarray_ptq.qvalue[:, :D, :])
@@ -139,7 +140,7 @@ class PaddedPtqTest(parameterized.TestCase):
     )
 
     w_qarray_pad = padded_ptq.quantize_act(w, how, rule, None)
-    w_qarray_ptq = ptq.quantize_act(w_padded, how, rule, None)
+    w_qarray_ptq = boxed_param.quantize_act(w_padded, how, rule, None)
 
     q_diff = jnp.max(
         jnp.abs(w_qarray_pad.qvalue[:, :D, :] - w_qarray_ptq.qvalue[:, :D, :])
@@ -211,7 +212,7 @@ class PaddedPtqTest(parameterized.TestCase):
     )
 
     w_qarray_pad = padded_ptq.quantize_act(w, how, rule, None)
-    w_qarray_ptq = ptq.quantize_act(w_padded, how, rule, None)
+    w_qarray_ptq = boxed_param.quantize_act(w_padded, how, rule, None)
 
     q_diff = jnp.max(
         jnp.abs(w_qarray_pad.qvalue - w_qarray_ptq.qvalue[:E, :D, :F])

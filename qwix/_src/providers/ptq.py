@@ -24,13 +24,14 @@ from qwix._src.providers import boxed_param
 from qwix._src.utils import flax_util
 
 # Backwards-compatible aliases for existing ptq.* users.
+# TODO(guoren): safely remove after users move to boxed_param.
 BoxedParamProvider = boxed_param.BoxedParamProvider
 WithAux = boxed_param.WithAux
 create_quantized_param = boxed_param.create_quantized_param
 quantize_act = boxed_param.quantize_act
 
 
-class PtqProvider(BoxedParamProvider):
+class PtqProvider(boxed_param.BoxedParamProvider):
   """Quantization provider for PTQ.
 
   In PTQ mode, weights needs to be pre-quantized. However, Qwix doesn't know
@@ -94,7 +95,7 @@ def quantize_params(
       if allow_extra_params:
         continue
       raise ValueError(f'{path} is not found in the abstract_quantized_params.')
-    if isinstance(abs_param, WithAux):
+    if isinstance(abs_param, boxed_param.WithAux):
       # The param might not be in the shape needed for compute, in case the
       # module reshapes before compute. Abstract param has the compute shape.
       param = param.reshape(abs_param.shape)
@@ -112,12 +113,13 @@ def quantize_params(
     if quant_stat['count'] == 0:
       raise ValueError(f'quant_stats is not initialized for {path}.')
 
-    # Get the act_qtype from the scale, which is a WithAux[jax.Array].
+    # Get the act_qtype from the scale, which is a
+    # boxed_param.WithAux[jax.Array].
     scale_path = (*path[:-1], path[-1] + '_scale')
     abs_scale = flax_util.get_value_from_path(
         abstract_quantized_params, scale_path
     )
-    assert isinstance(abs_scale, WithAux)
+    assert isinstance(abs_scale, boxed_param.WithAux)
     act_qtype = abs_scale.how.qtype
 
     calibration = averaging.SimpleMovingAverage().get_calibration(quant_stat)
@@ -129,7 +131,7 @@ def quantize_params(
       quantized_params[(*path[:-1], path[-1] + '_zero_point')] = zero_point
 
   if isinstance(abstract_quantized_params, nnx.Module):
-    # Convert WithAux to a pure dict so that nnx.update() can work.
+    # Convert boxed_param.WithAux to a pure dict so that nnx.update() can work.
     quantized_params = nnx.to_pure_dict(nnx.state(quantized_params))
 
   return flax.traverse_util.unflatten_dict(quantized_params)
