@@ -76,7 +76,7 @@ class ToHiQArray(hjx.HiPrim):
     self.out_aval = hq.HiQArrayTy(out_qvalue_ty, scale_ty, zero_point_ty)
     self.params = dict(  # pyrefly: ignore [bad-assignment]
         quantize_fn=quantize_fn,
-        quantize_kwargs=quantize_kwargs,
+        quantize_kwargs=quantize_kwargs,  # pyrefly: ignore[bad-assignment]
     )
     # For type checking
     self.quantize_fn = quantize_fn

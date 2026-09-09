@@ -275,7 +275,7 @@ class QtProvider(qconfig.QuantizationProvider):
     lhs_collect_quant_stat = None
     if rule.act_qtype is not None and rule.act_static_scale:
       lhs_collect_quant_stat = functools.partial(
-          self._update_and_get_quant_stat, f'{op_id}_lhs', rule.act_batch_axes
+          self._update_and_get_quant_stat, f'{op_id}_lhs', rule.act_batch_axes  # pyrefly: ignore[bad-argument-type]
       )
     assert flax_util.find_param(rhs) is not None
 
@@ -323,7 +323,7 @@ class QtProvider(qconfig.QuantizationProvider):
       lhs_calibration_method = rule.act_calibration_method
       if rule.act_static_scale:
         lhs_collect_quant_stat = functools.partial(
-            self._update_and_get_quant_stat, f'{op_id}_lhs', rule.act_batch_axes
+            self._update_and_get_quant_stat, f'{op_id}_lhs', rule.act_batch_axes  # pyrefly: ignore[bad-argument-type]
         )
 
     # RHS configs based on whether it's a weight or an activation.
@@ -342,7 +342,7 @@ class QtProvider(qconfig.QuantizationProvider):
       rhs_calibration_method = rule.act_calibration_method
       if rule.act_static_scale:
         rhs_collect_quant_stat = functools.partial(
-            self._update_and_get_quant_stat, f'{op_id}_rhs', rule.act_batch_axes
+            self._update_and_get_quant_stat, f'{op_id}_rhs', rule.act_batch_axes  # pyrefly: ignore[bad-argument-type]
         )
 
     # bwd config, which is only enabled when bwd_qtype is set.
