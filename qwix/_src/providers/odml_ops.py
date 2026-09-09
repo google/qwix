@@ -86,6 +86,7 @@ def get_all_ops():
       'jax.lax.dot_general': DotEinsumConv,
       'jax.nn.gelu': quantize(0),
       'jax.nn.leaky_relu': quantize(0),
+      'jax.nn.sigmoid': Sigmoid,
       'jax.nn.silu': Silu,
       'jax.nn.softmax': Softmax,
       'jax.numpy.clip': OnlyOutputOp,
@@ -718,6 +719,15 @@ class Softmax(QuantizedOp):
   fixed_range_for_output = (0.0, 255 / 256)
 
 
+class Sigmoid(QuantizedOp):
+  """Sigmoid op."""
+
+  input_idx = [0]
+  # The converter requires (scale, zero_point) = (1.0 / 256.0, -128). Qwix uses
+  # [-128, 127], which maps to [0, 255 / 256] with the above scale/zp.
+  fixed_range_for_output = (0.0, 255 / 256)
+
+
 class Tanh(QuantizedOp):
   """tanh op."""
 
@@ -832,7 +842,7 @@ class Silu(QuantizedOp):
     rule, op_id = self._get_rule_and_op_id_fn(self._op_name)
     x = self._maybe_fake_quant(x, rule, op_id)
     y = jax.nn.sigmoid(x)
-    aux_data.set(y, AuxDataKey.FIXED_RANGE, Softmax.fixed_range_for_output)
+    aux_data.set(y, AuxDataKey.FIXED_RANGE, Sigmoid.fixed_range_for_output)
     y = self._maybe_fake_quant(y, rule, op_id + '_sigmoid')
     return self._fake_quant_output(x * y, rule)
 

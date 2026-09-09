@@ -30,7 +30,6 @@ from qwix._src import qconfig
 from qwix._src.providers import odml
 from qwix._src.utils import flax_util
 
-
 jax.config.update('jax_threefry_partitionable', False)
 
 
@@ -229,6 +228,39 @@ class GroupNormSilu(nn.Module):
       'dequantize_op_count': 2,
       'fp_op_count': 1,
       'int_op_count': 2,
+  }
+
+
+@srq_test_case
+@drq_test_case
+class Sigmoid(nn.Module):
+  """A simple model with Sigmoid activation."""
+
+  @nn.compact
+  def __call__(self, x):
+    x = nn.Dense(features=10)(x)
+    x = nn.sigmoid(x)
+    return x
+
+  def create_input(self):
+    return jax.random.uniform(jax.random.key(0), (2, 5), jnp.float32)
+
+  expected_quant_stats_keys = {
+      'Dense_0/dot_general0_lhs',
+      'sigmoid0',
+      'final_output0',
+  }
+
+  expected_ops_summary = {
+      'quantize_op_count': 1,
+      'dequantize_op_count': 1,
+      'fp_op_count': 0,
+      'int_op_count': 2,
+  }
+
+  drq_expected_ops_summary = {
+      'quantize_op_count': 0,
+      'dequantize_op_count': 0,
   }
 
 
