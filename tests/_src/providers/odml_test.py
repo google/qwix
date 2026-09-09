@@ -1271,6 +1271,33 @@ class OdmlTest(parameterized.TestCase):
         )
     )
 
+  def test_custom_ops_registration(self):
+
+    class CustomOp(odml_ops.QuantizedOp):
+      input_idx = [0]
+
+    custom_ops = {'custom.op': CustomOp}
+
+    # Verify default provider does not have the custom op.
+    default_provider = odml.OdmlQatProvider([])
+    self.assertNotIn('custom.op', default_provider._ops)
+
+    # Verify QAT provider registers custom_ops.
+    qat_provider = odml.OdmlQatProvider([], custom_ops=custom_ops)
+    self.assertIs(qat_provider._ops['custom.op'], CustomOp)
+    self.assertIsInstance(
+        qat_provider.get_intercept_map()['custom.op'], CustomOp
+    )
+
+    # Verify Conversion provider registers custom_ops.
+    conv_provider = odml.OdmlConversionProvider(
+        [], {}, {}, custom_ops=custom_ops
+    )
+    self.assertIs(conv_provider._ops['custom.op'], CustomOp)
+    self.assertIsInstance(
+        conv_provider.get_intercept_map()['custom.op'], CustomOp
+    )
+
 
 if __name__ == '__main__':
   absltest.main()
