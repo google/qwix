@@ -456,6 +456,138 @@ class DotGeneralQtTest(parameterized.TestCase):
     )
     self.assertNotIsInstance(res[0], qarray.QArray)
     self.assertNotIsInstance(res[1], qarray.QArray)
+    self.assertIsNotNone(res[0])
+    self.assertIsNotNone(res[1])
+
+  def test_unquantized_residuals_freed_when_unused(self):
+    """Verifies unquantized inputs are not stored when not needed."""
+    config = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='int8',
+        rhs_qtype='int8',
+        dlhs_grad_qtype='int8',
+        drhs_grad_qtype='int8',
+        use_original_residuals=False,
+    )
+    lhs = jnp.ones((4, 8), dtype=jnp.float32)
+    rhs = jnp.ones((8, 4), dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+
+    how_lhs = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=True,
+        tile_size=None,
+        qtype='int8',
+    )
+    how_rhs = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=False,
+        tile_size=None,
+        qtype='int8',
+    )
+    lhs_cal = qarray.calibrate(lhs, how_lhs)
+    rhs_cal = qarray.calibrate(rhs, how_rhs)
+    _, res = dot_general_qt.dot_general_qt_fwd_bwd.fwd(
+        lhs, rhs, lhs_cal, rhs_cal, dnums, config
+    )
+    # lhs_in and rhs_in should be None to prevent memory pinning
+    self.assertIsNone(res[0])
+    self.assertIsNone(res[1])
+    # Quantized residuals should be retained
+    self.assertIsInstance(res[2], qarray.QArray)
+    self.assertIsInstance(res[3], qarray.QArray)
+
+    # Verify end-to-end grad computation works
+    def f(l, r):
+      return dot_general_qt.dot_general_qt(l, r, dnums, config=config).sum()
+
+    grad_lhs, grad_rhs = jax.grad(f, argnums=(0, 1))(lhs, rhs)
+    self.assertEqual(grad_lhs.shape, lhs.shape)
+    self.assertEqual(grad_rhs.shape, rhs.shape)
+
+  def test_unquantized_residuals_retained_when_clipping_needed(self):
+    """Verifies unquantized inputs are retained if clipping requires them."""
+    config = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='int8',
+        rhs_qtype='int8',
+        lhs_calibration_method='absmax,0.5',
+        rhs_calibration_method='absmax',
+        use_original_residuals=False,
+    )
+    lhs = jnp.array([[-2.0, 0.0, 2.0]], dtype=jnp.float32)
+    rhs = jnp.array([[1.0], [1.0], [1.0]], dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+
+    how_lhs = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=True,
+        tile_size=None,
+        qtype='int8',
+        calibration_method='absmax,0.5',
+    )
+    how_rhs = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=False,
+        tile_size=None,
+        qtype='int8',
+        calibration_method='absmax',
+    )
+    lhs_cal = qarray.calibrate(lhs, how_lhs)
+    rhs_cal = qarray.calibrate(rhs, how_rhs)
+    _, res = dot_general_qt.dot_general_qt_fwd_bwd.fwd(
+        lhs, rhs, lhs_cal, rhs_cal, dnums, config
+    )
+    # lhs_in retained because absmax,0.5 requires clipping against bounds
+    self.assertIsNotNone(res[0])
+    # rhs_in is None because standard absmax does not require clipping
+    self.assertIsNone(res[1])
+
+    def f(l, r):
+      return dot_general_qt.dot_general_qt(l, r, dnums, config=config).sum()
+
+    grad_lhs, grad_rhs = jax.grad(f, argnums=(0, 1))(lhs, rhs)
+    # Verify clipping masked the outer elements of lhs grad
+    self.assertEqual(grad_lhs[0, 0], 0.0)
+    self.assertEqual(grad_lhs[0, 2], 0.0)
+    self.assertEqual(grad_rhs.shape, rhs.shape)
+
+  def test_unquantized_residuals_retained_when_use_original_residuals_true(
+      self,
+  ):
+    """Verifies unquantized inputs retained if use_original_residuals=True."""
+    config = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='int8',
+        rhs_qtype='int8',
+        use_original_residuals=True,
+    )
+    lhs = jnp.ones((4, 8), dtype=jnp.float32)
+    rhs = jnp.ones((8, 4), dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+
+    how_lhs = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=True,
+        tile_size=None,
+        qtype='int8',
+    )
+    how_rhs = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=False,
+        tile_size=None,
+        qtype='int8',
+    )
+    lhs_cal = qarray.calibrate(lhs, how_lhs)
+    rhs_cal = qarray.calibrate(rhs, how_rhs)
+    _, res = dot_general_qt.dot_general_qt_fwd_bwd.fwd(
+        lhs, rhs, lhs_cal, rhs_cal, dnums, config
+    )
+    self.assertIsNotNone(res[0])
+    self.assertIsNotNone(res[1])
 
 
 if __name__ == '__main__':

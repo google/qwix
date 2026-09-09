@@ -730,6 +730,23 @@ def clip_to_calibration(
   return array.reshape(original_shape)
 
 
+def is_gradient_clipping_noop(calibration_method: str) -> bool:
+  """Returns whether gradient clipping is a no-op for the calibration method.
+
+  If the calibration method is data-derived (absmax/minmax) and the scale
+  factor is >= 1.0, all data is within bounds and gradient clipping is a no-op.
+
+  Args:
+    calibration_method: The string defining the method (e.g., 'absmax,0.9').
+
+  Returns:
+    True if gradient clipping is a no-op, False otherwise.
+  """
+  method, *args = calibration_method.lower().split(',')
+  args = [float(a) for a in args]
+  return method in ('absmax', 'minmax') and (not args or args[0] >= 1.0)
+
+
 def clip_gradient_to_calibration(
     g: jax.Array,
     array: jax.Array,
@@ -751,11 +768,8 @@ def clip_gradient_to_calibration(
   Returns:
     The masked gradient.
   """
-  method, *args = calibration_method.lower().split(',')
-  args = [float(a) for a in args]
-
   # Optimization: Skip clipping if method covers the full data range.
-  if method in ('absmax', 'minmax') and (not args or args[0] >= 1.0):
+  if is_gradient_clipping_noop(calibration_method):
     return g
 
   # Retrieve bounds

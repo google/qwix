@@ -301,6 +301,20 @@ class QArrayTest(parameterized.TestCase):
       astype_array = q_array.astype(jnp.float32)
       self.assertEqual(astype_array.scale.dtype, jnp.float32)
 
+  @parameterized.named_parameters(
+      ('absmax_default', 'absmax', True),
+      ('absmax_full', 'absmax,1.0', True),
+      ('absmax_over', 'absmax,1.2', True),
+      ('absmax_clipped', 'absmax,0.9', False),
+      ('minmax_default', 'minmax', True),
+      ('minmax_full', 'minmax,1.0', True),
+      ('minmax_clipped', 'minmax,0.8', False),
+      ('fixed', 'fixed,1.0', False),
+      ('rms', 'rms,1.0', False),
+  )
+  def test_is_gradient_clipping_noop(self, method, expected):
+    self.assertEqual(qarray.is_gradient_clipping_noop(method), expected)
+
   def test_clip_gradient_to_calibration(self):
     with self.subTest('optimization_skip_masking'):
       array = jnp.array([100.0])

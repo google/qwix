@@ -170,7 +170,7 @@ def _apply_rhs_scale_to_lhs(lhs, rhs_scale, dnums):
 
 def _get_residual_for_backward(
     config: DotGeneralQtConfig,
-    operand_in: jax.Array,
+    operand_in: jax.Array | None,
     operand_qt: qarray.MaybeQArray,
 ) -> qarray.MaybeQArray:
   """Returns the residual to be used in the backward pass.
@@ -182,7 +182,7 @@ def _get_residual_for_backward(
 
   Args:
     config: The quantization configuration.
-    operand_in: The original, unquantized operand.
+    operand_in: The original, unquantized operand, or None if not retained.
     operand_qt: The potentially quantized operand.
   """
   if config.use_original_residuals or (
@@ -193,8 +193,46 @@ def _get_residual_for_backward(
           and operand_qt.qtype in ('mxfp8', 'mxfp8_16', 'mxfp4', 'nvfp4')
       )
   ):
+    assert operand_in is not None
     return operand_in
   return operand_qt
+
+
+def _needs_original_residual(
+    config: DotGeneralQtConfig,
+    operand_qt: qarray.MaybeQArray,
+    calibration: dict[str, jax.Array] | None,
+    calibration_method: str,
+) -> bool:
+  """Returns True if the unquantized operand must be retained in residuals."""
+  # 1. Contraction residual:
+  # The unquantized operand must be retained if:
+  #   a) The user explicitly opted into original residuals
+  #      (config.use_original_residuals).
+  #   b) The operand has tiled axes (transposed backward axes cannot align with
+  #      tiled scales).
+  #   c) The operand is an MXFP/microscaling type (block-level scales also
+  #      require original operands).
+  if config.use_original_residuals or (
+      isinstance(operand_qt, qarray.QArray)
+      and (
+          qarray.get_tiled_axes(operand_qt)
+          or (
+              isinstance(operand_qt.qtype, str)
+              and operand_qt.qtype in ('mxfp8', 'mxfp8_16', 'mxfp4', 'nvfp4')
+          )
+      )
+  ):
+    return True
+
+  # 2. Gradient clipping:
+  # Straight-through estimator clipping requires the unquantized operand
+  # unless clipping is a mathematical no-op (full-range absmax/minmax).
+  if not config.disable_gradient_clipping and calibration is not None:
+    if not qarray.is_gradient_clipping_noop(calibration_method):
+      return True
+
+  return False
 
 
 # See test_scan_custom_vjp in interception_test.py for why we need to manually
@@ -224,13 +262,32 @@ def dot_general_qt_fwd(
     rhs = qarray.quantize_with_scale_zero_point(  # pyrefly: ignore[bad-assignment]
         rhs, config.rhs_qtype, scale, zero_point  # pyrefly: ignore[bad-argument-type]
     )
+  saved_lhs_in = None
+  if _needs_original_residual(
+      config, lhs, lhs_calibration, config.lhs_calibration_method
+  ):
+    saved_lhs_in = lhs_in
+
+  saved_rhs_in = None
+  if _needs_original_residual(
+      config, rhs, rhs_calibration, config.rhs_calibration_method
+  ):
+    saved_rhs_in = rhs_in
+
+  saved_lhs_calibration = (
+      None if config.disable_gradient_clipping else lhs_calibration
+  )
+  saved_rhs_calibration = (
+      None if config.disable_gradient_clipping else rhs_calibration
+  )
+
   residuals = (
-      lhs_in,
-      rhs_in,
+      saved_lhs_in,
+      saved_rhs_in,
       lhs,
       rhs,
-      lhs_calibration,
-      rhs_calibration,
+      saved_lhs_calibration,
+      saved_rhs_calibration,
       config,
   )
   return dot_general.dot_general(lhs, rhs, dimension_numbers), residuals
@@ -239,8 +296,8 @@ def dot_general_qt_fwd(
 def dot_general_qt_bwd(
     fwd_dimension_numbers: jax.lax.DotDimensionNumbers,
     residuals: tuple[
-        jax.Array,
-        jax.Array,
+        jax.Array | None,
+        jax.Array | None,
         qarray.MaybeQArray,
         qarray.MaybeQArray,
         dict[str, jax.Array] | None,
@@ -325,11 +382,11 @@ def dot_general_qt_bwd(
   drhs = _compute_gradient_for_operand(g, for_dlhs=False)
 
   if not config.disable_gradient_clipping:
-    if lhs_calibration is not None:
+    if lhs_calibration is not None and lhs_in is not None:
       dlhs = qarray.clip_gradient_to_calibration(
           dlhs, lhs_in, lhs_calibration, config.lhs_calibration_method
       )
-    if rhs_calibration is not None:
+    if rhs_calibration is not None and rhs_in is not None:
       drhs = qarray.clip_gradient_to_calibration(
           drhs, rhs_in, rhs_calibration, config.rhs_calibration_method
       )
