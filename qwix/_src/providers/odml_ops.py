@@ -62,11 +62,13 @@ def get_all_ops():
   #   def l2_norm(x, eps=1e-6):
   #     return x / jnp.maximum(jnp.linalg.norm(x, axis=-1, keepdims=True), eps)
   #
-  # To support this op, register it manually in the provider (both QAT and
+  # To support this op, pass it via custom_ops to the provider (both QAT and
   # conversion) using the tanh handler, e.g.
   #
   #   l2_norm_full_name = l2_norm.__module__ + '.' + l2_norm.__name__
-  #   provider._ops[l2_norm_full_name] = provider._ops['jax.numpy.tanh']
+  #   provider = qwix.OdmlQatProvider(
+  #       rules, custom_ops={l2_norm_full_name: odml_ops.Tanh}
+  #   )
 
   quantize = lambda *a, **k: functools.partial(QuantizedOp, input_idx=a, **k)
 

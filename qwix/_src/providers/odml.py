@@ -13,6 +13,7 @@
 # limitations under the License.
 """Qwix for ODML."""
 
+from collections.abc import Mapping
 import dataclasses
 import functools
 from typing import Any, Callable, Sequence, Type
@@ -92,6 +93,7 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
       fixed_range_for_inputs: tuple[float, float] | None = None,
       fixed_range_for_outputs: tuple[float, float] | None = None,
       strict: bool = True,
+      custom_ops: Mapping[str, Any] | None = None,
   ):
     """Constructor.
 
@@ -104,6 +106,7 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
       fixed_range_for_outputs: Use a fixed range when quantizing the model
         outputs, e.g. (0, 1).
       strict: Whether to raise an error if an unknown op is discovered.
+      custom_ops: Custom ops to add to the provider.
     """
     # For ODML interception, we always disable JIT. This is because ODML relies
     # on execution at the Python level to:
@@ -117,6 +120,8 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
     self._fixed_range_for_outputs = fixed_range_for_outputs
     self._strict = strict
     self._ops = odml_ops.get_all_ops()
+    if custom_ops:
+      self._ops.update(custom_ops)
 
     # Only these contraction ops support toggling channelwise weight
     # quantization (standard for ODML). For other ops, per-channel weight
