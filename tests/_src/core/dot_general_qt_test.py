@@ -589,6 +589,32 @@ class DotGeneralQtTest(parameterized.TestCase):
     self.assertIsNotNone(res[0])
     self.assertIsNotNone(res[1])
 
+  def test_dot_general_qt_scale_method(self):
+    """Verifies that lhs/rhs scale_method work in DotGeneralQtConfig."""
+    lhs = jnp.ones((4, 32), dtype=jnp.float32)
+    rhs = jnp.ones((32, 4), dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+
+    config_ceil = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='mxint4',
+        rhs_qtype='mxint8',
+        tile_size=32,
+        lhs_scale_method='ceil',
+        rhs_scale_method='ceil',
+    )
+    res_ceil = dot_general_qt.dot_general_qt(lhs, rhs, dnums, config_ceil)
+    self.assertEqual(res_ceil.shape, (4, 4))
+
+    config_oas = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='mxint4',
+        rhs_qtype='mxint8',
+        tile_size=32,
+        lhs_scale_method='oas',
+        rhs_scale_method='oas',
+    )
+    res_oas = dot_general_qt.dot_general_qt(lhs, rhs, dnums, config_oas)
+    self.assertEqual(res_oas.shape, (4, 4))
+
 
 if __name__ == '__main__':
   absltest.main()

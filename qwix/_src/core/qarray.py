@@ -302,6 +302,8 @@ class HowToQuantize:
   calibration_method: str = 'absmax'
   # Noise function to use for stochastic rounding.
   noise_fn: numerics.NoiseFn | None = None
+  # Scale method for power-of-2 formats: 'default', 'oas', or 'ceil'.
+  scale_method: str = 'default'
 
   def __post_init__(self):
     if isinstance(self.qtype, str) and self.qtype in (
@@ -309,8 +311,12 @@ class HowToQuantize:
         'mxfp8_16',
         'mxfp4',
         'nvfp4',
+        'mxint8',
+        'mxint4',
     ):
-      resolved_tile_size = 32 if self.qtype in ('mxfp8', 'mxfp4') else 16
+      resolved_tile_size = (
+          32 if self.qtype in ('mxfp8', 'mxfp4', 'mxint8', 'mxint4') else 16
+      )
 
       if not self.tiled_axes:
         raise ValueError(
@@ -535,13 +541,29 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
 
 
 def compute_scale_zero_point(
-    calibration: Mapping[str, jax.Array], qtype: jax.typing.DTypeLike
+    calibration: Mapping[str, jax.Array],
+    qtype: jax.typing.DTypeLike,
+    scale_method: str = 'default',
 ) -> tuple[jax.Array, jax.Array | None]:
   """Computes the scale and zero_point from the calibration result.
 
   Args:
     calibration: The calibration returned by calibrate().
     qtype: The dtype of the qvalue.
+    scale_method: Scale method for power-of-2 formats: 'default', 'oas', or
+      'ceil'. - 'ceil': Uses exact power-of-2 ceiling (2 ** ceil(log2(scale))),
+      ensuring zero clipping of the maximum value in the block. - 'oas': Uses
+      Outlier-Aware Scaling (OAS). For floating-point formats (mxfp4, mxfp8),
+      applies theoretical biases optimizing the tradeoff between outlier
+      clipping and subnormal quantization errors. For integer formats (mxint4,
+      mxint8), uses multiplier C = 2.0 with floor power-of-2. This matches ceil
+      for all non-power-of-2 values, but rounds exact powers of 2 up by 1
+      power-of-2. For low-bit integer formats like mxint4 (only 16 discrete
+      levels), this tradeoff can be worth considering: avoiding clipping on a
+      rare block outlier by doubling the scale factor doubles the quantization
+      step size and loses 1 full bit of resolution across the remaining 31
+      elements in the block. - 'default': Uses OAS for mxfp8/16, mxfp4, and
+      mxint4; uses ceil for mxint8.
 
   Returns:
     A tuple of the scale and zero_point. The zero_point is None in symmetric
@@ -563,24 +585,58 @@ def compute_scale_zero_point(
     zero_point = None
   else:
     raise ValueError(f'Unsupported calibration: {calibration}')
-  if qtype in ('mxfp8', 'mxfp8_16', 'mxfp4'):
-    # Biases theoretically derived via Outlier Aware Scaling (OAS)
-    # (arxiv 2603.08713) to optimize the tradeoff between outlier clipping
-    # and subnormal quantization errors.
-    if qtype == 'mxfp4':
-      # Bias = 0.5 - log2(7/6). C = 2**(bias + 0.5) = 12 / 7.
-      c = 12.0 / 7.0
-    else:
-      # In E4M3 OCP, largest normal is 448.0 due to reserved values and
-      # max_cutoff = 464.0 which is 1/2 an ULP larger.
-      # Bias = 0.5 - log2(464.0/448.0). C = 2**(bias + 0.5) = 56 / 29.
-      c = 56.0 / 29.0
-    scale_bf16 = (scale * c).astype(jnp.bfloat16)
-    scale = (
-        (scale_bf16.view(jnp.int16) & 0x7F80)
-        .view(jnp.bfloat16)
-        .astype(scale.dtype)
+  if qtype in ('mxfp8', 'mxfp8_16', 'mxfp4', 'mxint4', 'mxint8'):
+    use_ceil = scale_method == 'ceil' or (
+        scale_method == 'default' and qtype == 'mxint8'
     )
+    if use_ceil:
+      # Efficient bit manipulation for 2 ** ceil(log2(scale)) without
+      # transcendentals:
+      # In IEEE-754 float32, adding the mantissa mask (0x007FFFFF) carries into
+      # the exponent if and only if the mantissa > 0 (scale is not already an
+      # exact power of 2). Masking with 0x7F800000 clears the mantissa, yielding
+      # the exact ceil power-of-2.
+      scale_f32 = scale.astype(jnp.float32)
+      scale_bits = scale_f32.view(jnp.int32)
+      scale_pow2 = (
+          ((scale_bits + 0x007FFFFF) & 0x7F800000)
+          .view(jnp.float32)
+          .astype(scale.dtype)
+      )
+      scale = jnp.where(scale > 0, scale_pow2, scale)
+    else:
+      # Biases theoretically derived via Outlier Aware Scaling (OAS)
+      # (arxiv 2603.08713) to optimize the tradeoff between outlier clipping
+      # and subnormal quantization errors.
+      if qtype in ('mxint4', 'mxint8'):
+        # For integer formats (mxint4, mxint8), multiplier c = 2.0 with floor
+        # power-of-2 matches ceil for all values except exact powers of 2,
+        # where it proactively provides +1 bit of headroom against outlier
+        # clipping. This is especially valuable for low-bit formats like mxint4,
+        # where doubling the step size to accommodate a rare outlier would waste
+        # 1 bit of effective precision for all other elements in the 32-element
+        # block.
+        # Instead of a floating-point multiply by 2.0, extract the exponent via
+        # right shift by 7, add 1, and left shift back to bits 7..14.
+        scale_bf16 = scale.astype(jnp.bfloat16)
+        scale_bits = scale_bf16.view(jnp.int16)
+        scale_pow2 = (((scale_bits >> 7) + 1) << 7).view(jnp.bfloat16)
+        scale = jnp.where(scale > 0, scale_pow2, scale).astype(scale.dtype)
+      else:
+        if qtype == 'mxfp4':
+          # Bias = 0.5 - log2(7/6). C = 2**(bias + 0.5) = 12 / 7.
+          c = 12.0 / 7.0
+        else:
+          # In E4M3 OCP, largest normal is 448.0 due to reserved values and
+          # max_cutoff = 464.0 which is 1/2 an ULP larger.
+          # Bias = 0.5 - log2(464.0/448.0). C = 2**(bias + 0.5) = 56 / 29.
+          c = 56.0 / 29.0
+        scale_bf16 = (scale * c).astype(jnp.bfloat16)
+        scale = (
+            (scale_bf16.view(jnp.int16) & 0x7F80)
+            .view(jnp.bfloat16)
+            .astype(scale.dtype)
+        )
   elif qtype == 'nvfp4':
     scale = numerics.convert_to(scale, jnp.float8_e4m3fn).astype(scale.dtype)
   return scale, zero_point
@@ -640,7 +696,12 @@ def quantize_with_scale_zero_point(
 def quantize(array: jax.Array, how: HowToQuantize) -> QArray:
   """Quantizes an array using a dynamic range."""
   calibration = calibrate(array, how)
-  scale, zero_point = compute_scale_zero_point(calibration, how.qtype)
+  if how.scale_method == 'default':
+    scale, zero_point = compute_scale_zero_point(calibration, how.qtype)
+  else:
+    scale, zero_point = compute_scale_zero_point(
+        calibration, how.qtype, scale_method=how.scale_method
+    )
   return quantize_with_scale_zero_point(
       array, how.qtype, scale, zero_point, how.noise_fn
   )
