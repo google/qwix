@@ -39,6 +39,11 @@ class DotGeneralQtConfig:
   tile_size: int | float | None = None
   lhs_calibration_method: str = 'absmax'
   rhs_calibration_method: str = 'absmax'
+  # Scale method for power-of-2 formats: 'default', 'oas', or 'ceil'. 'ceil'
+  # guarantees zero clipping; 'oas' optimizes MSE / SNR (e.g. for mxint4 where
+  # doubling the scale costs 1 bit of resolution across the block).
+  lhs_scale_method: str = 'default'
+  rhs_scale_method: str = 'default'
   lhs_collect_quant_stat: Callable[[Any], Any] | None = None
   rhs_collect_quant_stat: Callable[[Any], Any] | None = None
   lhs_disable_channelwise_axes: bool = False
@@ -47,6 +52,7 @@ class DotGeneralQtConfig:
   # Backward pass (dlhs).
   dlhs_grad_qtype: jax.typing.DTypeLike | None = None  # incoming gradient
   dlhs_grad_calibration_method: str = 'absmax'
+  dlhs_grad_scale_method: str = 'default'
   dlhs_tile_size: int | float | None = None
   dlhs_stochastic_rounding_noise_fn: stochastic_rounding.NoiseFn | None = None
   dlhs_grad_disable_channelwise_axes: bool = False
@@ -54,6 +60,7 @@ class DotGeneralQtConfig:
   # Backward pass (drhs).
   drhs_grad_qtype: jax.typing.DTypeLike | None = None  # incoming gradient
   drhs_grad_calibration_method: str = 'absmax'
+  drhs_grad_scale_method: str = 'default'
   drhs_tile_size: int | float | None = None
   drhs_stochastic_rounding_noise_fn: stochastic_rounding.NoiseFn | None = None
   drhs_grad_disable_channelwise_axes: bool = False
@@ -77,9 +84,11 @@ class DotGeneralQtConfig:
   # corresponding qtype in the fwd pass is None.
   dlhs_residual_qtype: jax.typing.DTypeLike | None = None
   dlhs_residual_calibration_method: str = 'absmax'
+  dlhs_residual_scale_method: str = 'default'
   dlhs_residual_disable_channelwise_axes: bool = False
   drhs_residual_qtype: jax.typing.DTypeLike | None = None
   drhs_residual_calibration_method: str = 'absmax'
+  drhs_residual_scale_method: str = 'default'
   drhs_residual_disable_channelwise_axes: bool = False
 
   sparsity_rule: sparsity.SparsityRule | None = None
@@ -190,7 +199,15 @@ def _get_residual_for_backward(
       and (
           qarray.get_tiled_axes(operand_qt)
           or isinstance(operand_qt.qtype, str)
-          and operand_qt.qtype in ('mxfp8', 'mxfp8_16', 'mxfp4', 'nvfp4')
+          and operand_qt.qtype
+          in (
+              'mxfp8',
+              'mxfp8_16',
+              'mxfp4',
+              'nvfp4',
+              'mxint8',
+              'mxint4',
+          )
       )
   ):
     assert operand_in is not None
@@ -219,7 +236,15 @@ def _needs_original_residual(
           qarray.get_tiled_axes(operand_qt)
           or (
               isinstance(operand_qt.qtype, str)
-              and operand_qt.qtype in ('mxfp8', 'mxfp8_16', 'mxfp4', 'nvfp4')
+              and operand_qt.qtype
+              in (
+                  'mxfp8',
+                  'mxfp8_16',
+                  'mxfp4',
+                  'nvfp4',
+                  'mxint8',
+                  'mxint4',
+              )
           )
       )
   ):
@@ -250,14 +275,18 @@ def dot_general_qt_fwd(
   lhs_in, rhs_in = lhs, rhs
   if lhs_calibration is not None:
     scale, zero_point = qarray.compute_scale_zero_point(
-        lhs_calibration, config.lhs_qtype  # pyrefly: ignore[bad-argument-type]
+        lhs_calibration,
+        config.lhs_qtype,  # pyrefly: ignore[bad-argument-type]
+        scale_method=config.lhs_scale_method,
     )
     lhs = qarray.quantize_with_scale_zero_point(  # pyrefly: ignore[bad-assignment]
         lhs, config.lhs_qtype, scale, zero_point  # pyrefly: ignore[bad-argument-type]
     )
   if rhs_calibration is not None:
     scale, zero_point = qarray.compute_scale_zero_point(
-        rhs_calibration, config.rhs_qtype  # pyrefly: ignore[bad-argument-type]
+        rhs_calibration,
+        config.rhs_qtype,  # pyrefly: ignore[bad-argument-type]
+        scale_method=config.rhs_scale_method,
     )
     rhs = qarray.quantize_with_scale_zero_point(  # pyrefly: ignore[bad-assignment]
         rhs, config.rhs_qtype, scale, zero_point  # pyrefly: ignore[bad-argument-type]
@@ -318,21 +347,25 @@ def dot_general_qt_bwd(
       g_qtype = config.dlhs_grad_qtype
       g_tile_size = config.dlhs_tile_size
       g_calibration_method = config.dlhs_grad_calibration_method
+      g_scale_method = config.dlhs_grad_scale_method
       g_noise_fn = config.dlhs_stochastic_rounding_noise_fn
       g_disable_channelwise_axes = config.dlhs_grad_disable_channelwise_axes
       y = _get_residual_for_backward(config, rhs_in, rhs)
       y_qtype = config.dlhs_residual_qtype
       y_calibration_method = config.dlhs_residual_calibration_method
+      y_scale_method = config.dlhs_residual_scale_method
       y_disable_channelwise_axes = config.dlhs_residual_disable_channelwise_axes
     else:
       g_qtype = config.drhs_grad_qtype
       g_tile_size = config.drhs_tile_size
       g_calibration_method = config.drhs_grad_calibration_method
+      g_scale_method = config.drhs_grad_scale_method
       g_noise_fn = config.drhs_stochastic_rounding_noise_fn
       g_disable_channelwise_axes = config.drhs_grad_disable_channelwise_axes
       y = _get_residual_for_backward(config, lhs_in, lhs)
       y_qtype = config.drhs_residual_qtype
       y_calibration_method = config.drhs_residual_calibration_method
+      y_scale_method = config.drhs_residual_scale_method
       y_disable_channelwise_axes = config.drhs_residual_disable_channelwise_axes
 
     if g_qtype and numerics.should_quantize(g.dtype):
@@ -351,6 +384,7 @@ def dot_general_qt_bwd(
           qtype=g_qtype,
           tile_size=g_tile_size,
           calibration_method=g_calibration_method,
+          scale_method=g_scale_method,
           noise_fn=g_noise_fn,
       )
       if g_disable_channelwise_axes:
@@ -370,6 +404,7 @@ def dot_general_qt_bwd(
           qtype=y_qtype,
           tile_size=g_tile_size,
           calibration_method=y_calibration_method,
+          scale_method=y_scale_method,
       )
       if y_disable_channelwise_axes:
         y_how = dataclasses.replace(y_how, channelwise_axes=[])
