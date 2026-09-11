@@ -202,6 +202,39 @@ class NumericsTest(absltest.TestCase):
       out_nvfp4 = numerics.convert_from(in_nvfp4, "nvfp4")
       self.assertIs(in_nvfp4, out_nvfp4)
 
+  def test_mxint(self):
+    with self.subTest("mxint8_bound"):
+      bound = numerics.get_symmetric_bound("mxint8")
+      self.assertEqual(bound, numerics.get_symmetric_bound(jnp.int8))
+
+    with self.subTest("mxint8_conversion"):
+      in_array = jnp.array([10.0, 150.0, -200.0], dtype=jnp.float32)
+      converted = numerics.convert_to(in_array, "mxint8")
+      self.assertEqual(converted.dtype, jnp.int8)
+      expected = jnp.array([10, 127, -128], dtype=jnp.int8)
+      self._assert_equal(converted, expected)
+
+    with self.subTest("mxint8_convert_from"):
+      in_mxint8 = jnp.array([1, -2], dtype=jnp.int8)
+      out_mxint8 = numerics.convert_from(in_mxint8, "mxint8")
+      self.assertIs(in_mxint8, out_mxint8)
+
+    with self.subTest("mxint4_bound"):
+      bound = numerics.get_symmetric_bound("mxint4")
+      self.assertEqual(bound, 7.5)
+
+    with self.subTest("mxint4_conversion"):
+      in_array = jnp.array([3.0, 15.0, -20.0], dtype=jnp.float32)
+      converted = numerics.convert_to(in_array, "mxint4")
+      self.assertEqual(converted.dtype, jnp.int4)
+      expected = jnp.array([3, 7, -8], dtype=jnp.int4)
+      self._assert_equal(converted, expected)
+
+    with self.subTest("mxint4_convert_from"):
+      in_mxint4 = jnp.array([1, -2], dtype=jnp.int4)
+      out_mxint4 = numerics.convert_from(in_mxint4, "mxint4")
+      self.assertIs(in_mxint4, out_mxint4)
+
 
 if __name__ == "__main__":
   absltest.main()
