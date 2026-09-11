@@ -309,8 +309,12 @@ class HowToQuantize:
         'mxfp8_16',
         'mxfp4',
         'nvfp4',
+        'mxint8',
+        'mxint4',
     ):
-      resolved_tile_size = 32 if self.qtype in ('mxfp8', 'mxfp4') else 16
+      resolved_tile_size = (
+          32 if self.qtype in ('mxfp8', 'mxfp4', 'mxint8', 'mxint4') else 16
+      )
 
       if not self.tiled_axes:
         raise ValueError(
@@ -563,24 +567,48 @@ def compute_scale_zero_point(
     zero_point = None
   else:
     raise ValueError(f'Unsupported calibration: {calibration}')
-  if qtype in ('mxfp8', 'mxfp8_16', 'mxfp4'):
+  if qtype in ('mxfp8', 'mxfp8_16', 'mxfp4', 'mxint4'):
     # Biases theoretically derived via Outlier Aware Scaling (OAS)
     # (arxiv 2603.08713) to optimize the tradeoff between outlier clipping
     # and subnormal quantization errors.
-    if qtype == 'mxfp4':
-      # Bias = 0.5 - log2(7/6). C = 2**(bias + 0.5) = 12 / 7.
-      c = 12.0 / 7.0
+    if qtype == 'mxint4':
+      # For signed int4 with cutoff 7.5 and qmax 7.5: C = 2.0 * 7.5 / 7.5 = 2.0.
+      # Instead of a floating-point multiply by 2.0, extract the exponent via
+      # right shift by 7, add 1, and left shift back to bits 7..14.
+      scale_bf16 = scale.astype(jnp.bfloat16)
+      scale_bits = scale_bf16.view(jnp.int16)
+      scale_pow2 = (((scale_bits >> 7) + 1) << 7).view(jnp.bfloat16)
+      scale = jnp.where(scale > 0, scale_pow2, scale).astype(scale.dtype)
     else:
-      # In E4M3 OCP, largest normal is 448.0 due to reserved values and
-      # max_cutoff = 464.0 which is 1/2 an ULP larger.
-      # Bias = 0.5 - log2(464.0/448.0). C = 2**(bias + 0.5) = 56 / 29.
-      c = 56.0 / 29.0
-    scale_bf16 = (scale * c).astype(jnp.bfloat16)
-    scale = (
-        (scale_bf16.view(jnp.int16) & 0x7F80)
-        .view(jnp.bfloat16)
+      if qtype == 'mxfp4':
+        # Bias = 0.5 - log2(7/6). C = 2**(bias + 0.5) = 12 / 7.
+        c = 12.0 / 7.0
+      else:
+        # In E4M3 OCP, largest normal is 448.0 due to reserved values and
+        # max_cutoff = 464.0 which is 1/2 an ULP larger.
+        # Bias = 0.5 - log2(464.0/448.0). C = 2**(bias + 0.5) = 56 / 29.
+        c = 56.0 / 29.0
+      scale_bf16 = (scale * c).astype(jnp.bfloat16)
+      scale = (
+          (scale_bf16.view(jnp.int16) & 0x7F80)
+          .view(jnp.bfloat16)
+          .astype(scale.dtype)
+      )
+  elif qtype == 'mxint8':
+    # Efficient bit manipulation for 2 ** ceil(log2(scale)) without
+    # transcendentals:
+    # In IEEE-754 float32, adding the mantissa mask (0x007FFFFF) carries into
+    # the exponent if and only if the mantissa > 0 (scale is not already an
+    # exact power of 2). Masking with 0x7F800000 clears the mantissa, yielding
+    # the exact ceil power-of-2.
+    scale_f32 = scale.astype(jnp.float32)
+    scale_bits = scale_f32.view(jnp.int32)
+    scale_pow2 = (
+        ((scale_bits + 0x007FFFFF) & 0x7F800000)
+        .view(jnp.float32)
         .astype(scale.dtype)
     )
+    scale = jnp.where(scale > 0, scale_pow2, scale)
   elif qtype == 'nvfp4':
     scale = numerics.convert_to(scale, jnp.float8_e4m3fn).astype(scale.dtype)
   return scale, zero_point
