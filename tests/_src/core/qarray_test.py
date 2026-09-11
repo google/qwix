@@ -516,6 +516,20 @@ class QArrayTest(parameterized.TestCase):
           tiled_axes={1: 32},
       )
 
+    with self.assertRaisesRegex(
+        ValueError, 'Format mxint8 requires `tiled_axes` to be specified.'
+    ):
+      qarray.HowToQuantize(qtype='mxint8')
+
+    with self.assertRaisesRegex(
+        ValueError,
+        'Format mxint8 requires a tile size of 32, but axis 1 got 16',
+    ):
+      qarray.HowToQuantize(
+          qtype='mxint8',
+          tiled_axes={1: 16},
+      )
+
   @parameterized.named_parameters(
       dict(
           testcase_name='mxfp4',
@@ -571,6 +585,38 @@ class QArrayTest(parameterized.TestCase):
     self.assertTrue(
         jnp.array_equal(scale, jnp.array(expected_scales, dtype=scale.dtype))
     )
+
+  def test_compute_scale_zero_point_mxint8_power_of_2(self):
+    calibration = {
+        'absmax': jnp.array([63.75, 64.0, 127.5, 127.6, 255.0, 256.0])
+    }
+    scale, zero_point = qarray.compute_scale_zero_point(calibration, 'mxint8')
+    self.assertIsNone(zero_point)
+    expected_scales = jnp.array(
+        [0.5, 1.0, 1.0, 2.0, 2.0, 4.0], dtype=scale.dtype
+    )
+    self.assertTrue(jnp.array_equal(scale, expected_scales))
+
+  def test_mxint8_quantize_dequantize(self):
+    x = jnp.array(
+        [[10.0, -20.0, 30.0, -40.0] * 8, [50.0, -60.0, 70.0, -80.0] * 8],
+        dtype=jnp.float32,
+    )  # shape (2, 32)
+    how = qarray.HowToQuantize(
+        qtype='mxint8', channelwise_axes=[0], tiled_axes={1: 32}
+    )
+    q = qarray.quantize(x, how)
+    self.assertEqual(q.qvalue.dtype, jnp.int8)
+    self.assertEqual(q.scale.shape, (2, 1))
+    self.assertIsNone(q.zero_point)
+    # Scale must be a power of 2
+    log2_scale = jnp.log2(q.scale)
+    self.assertTrue(jnp.all(jnp.equal(log2_scale, jnp.round(log2_scale))))
+    # Check dequantize
+    deq = qarray.dequantize(q)
+    self.assertEqual(deq.shape, x.shape)
+    # Dequantized values should be close to original
+    self.assertTrue(jnp.allclose(deq, x, atol=2.0))
 
 
 if __name__ == '__main__':

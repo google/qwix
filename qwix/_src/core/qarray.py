@@ -309,8 +309,11 @@ class HowToQuantize:
         'mxfp8_16',
         'mxfp4',
         'nvfp4',
+        'mxint8',
     ):
-      resolved_tile_size = 32 if self.qtype in ('mxfp8', 'mxfp4') else 16
+      resolved_tile_size = (
+          32 if self.qtype in ('mxfp8', 'mxfp4', 'mxint8') else 16
+      )
 
       if not self.tiled_axes:
         raise ValueError(
@@ -581,6 +584,21 @@ def compute_scale_zero_point(
         .view(jnp.bfloat16)
         .astype(scale.dtype)
     )
+  elif qtype == 'mxint8':
+    # Efficient bit manipulation for 2 ** ceil(log2(scale)) without
+    # transcendentals:
+    # In IEEE-754 float32, adding the mantissa mask (0x007FFFFF) carries into
+    # the exponent if and only if the mantissa > 0 (scale is not already an
+    # exact power of 2). Masking with 0x7F800000 clears the mantissa, yielding
+    # the exact ceil power-of-2.
+    scale_f32 = scale.astype(jnp.float32)
+    scale_bits = scale_f32.view(jnp.int32)
+    scale_pow2 = (
+        ((scale_bits + 0x007FFFFF) & 0x7F800000)
+        .view(jnp.float32)
+        .astype(scale.dtype)
+    )
+    scale = jnp.where(scale > 0, scale_pow2, scale)
   elif qtype == 'nvfp4':
     scale = numerics.convert_to(scale, jnp.float8_e4m3fn).astype(scale.dtype)
   return scale, zero_point
