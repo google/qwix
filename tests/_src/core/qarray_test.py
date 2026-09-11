@@ -440,7 +440,9 @@ class QArrayTest(parameterized.TestCase):
     # (reproduce NaN by monkeypatching to disable safety check)
     original_compute = qarray.compute_scale_zero_point
 
-    def unsafe_compute_scale_zero_point(calibration, qtype):
+    def unsafe_compute_scale_zero_point(
+        calibration, qtype, *unused_args, **unused_kwargs
+    ):
       if 'min' in calibration and 'max' in calibration:
         qmin, qmax = numerics.get_asymmetric_bound(qtype)
         scale = (calibration['max'] - calibration['min']) / (qmax - qmin)
@@ -516,6 +518,34 @@ class QArrayTest(parameterized.TestCase):
           tiled_axes={1: 32},
       )
 
+    with self.assertRaisesRegex(
+        ValueError, 'Format mxint8 requires `tiled_axes` to be specified.'
+    ):
+      qarray.HowToQuantize(qtype='mxint8')
+
+    with self.assertRaisesRegex(
+        ValueError,
+        'Format mxint8 requires a tile size of 32, but axis 1 got 16',
+    ):
+      qarray.HowToQuantize(
+          qtype='mxint8',
+          tiled_axes={1: 16},
+      )
+
+    with self.assertRaisesRegex(
+        ValueError, 'Format mxint4 requires `tiled_axes` to be specified.'
+    ):
+      qarray.HowToQuantize(qtype='mxint4')
+
+    with self.assertRaisesRegex(
+        ValueError,
+        'Format mxint4 requires a tile size of 32, but axis 1 got 16',
+    ):
+      qarray.HowToQuantize(
+          qtype='mxint4',
+          tiled_axes={1: 16},
+      )
+
   @parameterized.named_parameters(
       dict(
           testcase_name='mxfp4',
@@ -562,6 +592,18 @@ class QArrayTest(parameterized.TestCase):
           test_values=[458.0, 460.0, 462.0, 462.5, 464.0, 466.0, 468.0, 470.0],
           expected_scales=[1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0],
       ),
+      dict(
+          testcase_name='mxint4',
+          qtype='mxint4',
+          test_values=[7.4, 7.5, 14.9, 15.0],
+          expected_scales=[1.0, 2.0, 2.0, 4.0],
+      ),
+      dict(
+          testcase_name='mxint4_boundary',
+          qtype='mxint4',
+          test_values=[3.7, 3.75, 7.4, 7.5, 14.9, 15.0],
+          expected_scales=[0.5, 1.0, 1.0, 2.0, 2.0, 4.0],
+      ),
   )
   def test_compute_scale_zero_point_mxfp_oas_bias(
       self, qtype, test_values, expected_scales
@@ -571,6 +613,316 @@ class QArrayTest(parameterized.TestCase):
     self.assertTrue(
         jnp.array_equal(scale, jnp.array(expected_scales, dtype=scale.dtype))
     )
+
+  def test_compute_scale_zero_point_mxint8_power_of_2(self):
+    calibration = {
+        'absmax': jnp.array([63.75, 64.0, 127.5, 127.6, 255.0, 256.0])
+    }
+    scale, zero_point = qarray.compute_scale_zero_point(calibration, 'mxint8')
+    self.assertIsNone(zero_point)
+    expected_scales = jnp.array(
+        [0.5, 1.0, 1.0, 2.0, 2.0, 4.0], dtype=scale.dtype
+    )
+    self.assertTrue(jnp.array_equal(scale, expected_scales))
+
+  def test_mxint8_quantize_dequantize(self):
+    x = jnp.array(
+        [[10.0, -20.0, 30.0, -40.0] * 8, [50.0, -60.0, 70.0, -80.0] * 8],
+        dtype=jnp.float32,
+    )  # shape (2, 32)
+    how = qarray.HowToQuantize(
+        qtype='mxint8', channelwise_axes=[0], tiled_axes={1: 32}
+    )
+    q = qarray.quantize(x, how)
+    self.assertEqual(q.qvalue.dtype, jnp.int8)
+    self.assertEqual(q.scale.shape, (2, 1))
+    self.assertIsNone(q.zero_point)
+    # Scale must be a power of 2
+    log2_scale = jnp.log2(q.scale)
+    self.assertTrue(jnp.all(jnp.equal(log2_scale, jnp.round(log2_scale))))
+    # Check dequantize
+    deq = qarray.dequantize(q)
+    self.assertEqual(deq.shape, x.shape)
+    # Dequantized values should be close to original
+    self.assertTrue(jnp.allclose(deq, x, atol=2.0))
+
+  def test_mxint4_quantize_dequantize(self):
+    x = jnp.array(
+        [[1.0, -2.0, 3.0, -4.0] * 8, [5.0, -6.0, 7.0, -7.0] * 8],
+        dtype=jnp.float32,
+    )  # shape (2, 32)
+    how = qarray.HowToQuantize(
+        qtype='mxint4', channelwise_axes=[0], tiled_axes={1: 32}
+    )
+    q = qarray.quantize(x, how)
+    self.assertEqual(q.qvalue.dtype, jnp.int4)
+    self.assertEqual(q.scale.shape, (2, 1))
+    self.assertIsNone(q.zero_point)
+    # Scale must be a power of 2
+    log2_scale = jnp.log2(q.scale)
+    self.assertTrue(jnp.all(jnp.equal(log2_scale, jnp.round(log2_scale))))
+    # Check dequantize
+    deq = qarray.dequantize(q)
+    self.assertEqual(deq.shape, x.shape)
+    # Dequantized values should be close to original
+    self.assertTrue(jnp.allclose(deq, x, atol=1.0))
+
+  def test_scale_method_transitions_mxfp4(self):
+    """Tests mxfp4 scale transitions for OAS vs Ceil around boundaries."""
+    # Ceil transitions at powers-of-2 multiples of qmax=6.0 (6.0, 12.0).
+    # OAS transitions at powers-of-2 multiples of cutoff=7.0 (3.5, 7.0, 14.0).
+    test_cases = [
+        # Around 3.0 (Ceil transition: 0.5 -> 1.0; OAS: 0.5)
+        (3.0, 0.5, 0.5),
+        (3.2, 0.5, 1.0),
+        # Around 3.5 (OAS transition: 0.5 -> 1.0; Ceil: 1.0)
+        (3.4, 0.5, 1.0),
+        (3.5, 1.0, 1.0),
+        (3.6, 1.0, 1.0),
+        # Around 6.0 (Ceil transition: 1.0 -> 2.0; OAS: 1.0)
+        (5.8, 1.0, 1.0),
+        (6.0, 1.0, 1.0),
+        (6.2, 1.0, 2.0),
+        # In (6.0, 7.0], Ceil is 2.0, OAS stays at 1.0
+        (6.8, 1.0, 2.0),
+        # At 7.0 (OAS transition: 1.0 -> 2.0; Ceil: 2.0)
+        (7.0, 2.0, 2.0),
+        (7.2, 2.0, 2.0),
+        # Around 12.0 (Ceil transition: 2.0 -> 4.0; OAS: 2.0)
+        (11.8, 2.0, 2.0),
+        (12.0, 2.0, 2.0),
+        (12.2, 2.0, 4.0),
+        # At 14.0 (OAS transition: 2.0 -> 4.0; Ceil: 4.0)
+        (13.8, 2.0, 4.0),
+        (14.0, 4.0, 4.0),
+        (14.2, 4.0, 4.0),
+    ]
+    vals = [t[0] for t in test_cases]
+    expected_oas = [t[1] for t in test_cases]
+    expected_ceil = [t[2] for t in test_cases]
+    calib = {'absmax': jnp.array(vals)}
+
+    scale_oas, _ = qarray.compute_scale_zero_point(
+        calib, 'mxfp4', scale_method='oas'
+    )
+    scale_ceil, _ = qarray.compute_scale_zero_point(
+        calib, 'mxfp4', scale_method='ceil'
+    )
+    scale_default, _ = qarray.compute_scale_zero_point(
+        calib, 'mxfp4', scale_method='default'
+    )
+    self.assertTrue(
+        jnp.array_equal(
+            scale_oas, jnp.array(expected_oas, dtype=scale_oas.dtype)
+        )
+    )
+    self.assertTrue(
+        jnp.array_equal(
+            scale_ceil, jnp.array(expected_ceil, dtype=scale_ceil.dtype)
+        )
+    )
+    # Default for mxfp4 matches OAS
+    self.assertTrue(jnp.array_equal(scale_default, scale_oas))
+
+  def test_scale_method_transitions_mxfp8(self):
+    """Tests mxfp8 scale transitions for OAS vs Ceil around boundaries."""
+    # Ceil transitions at powers-of-2 multiples of qmax=448.0 (224, 448, 896).
+    # OAS transitions at powers-of-2 multiples of cutoff=464.0 (232, 464, 928).
+    test_cases = [
+        # Around 224.0 (Ceil transition: 0.5 -> 1.0; OAS: 0.5)
+        (224.0, 0.5, 0.5),
+        (228.0, 0.5, 1.0),
+        # Around 232.0 (OAS transition: 0.5 -> 1.0; Ceil: 1.0)
+        (230.0, 0.5, 1.0),
+        (232.0, 1.0, 1.0),
+        (235.0, 1.0, 1.0),
+        # Around 448.0 (Ceil transition: 1.0 -> 2.0; OAS: 1.0)
+        (440.0, 1.0, 1.0),
+        (448.0, 1.0, 1.0),
+        (450.0, 1.0, 2.0),
+        # In (448.0, 464.0], Ceil is 2.0, OAS stays at 1.0
+        (460.0, 1.0, 2.0),
+        # At 464.0 (OAS transition: 1.0 -> 2.0; Ceil: 2.0)
+        (464.0, 2.0, 2.0),
+        (470.0, 2.0, 2.0),
+        # Around 896.0 (Ceil transition: 2.0 -> 4.0; OAS: 2.0)
+        (890.0, 2.0, 2.0),
+        (896.0, 2.0, 2.0),
+        (900.0, 2.0, 4.0),
+        # At 928.0 (OAS transition: 2.0 -> 4.0; Ceil: 4.0)
+        (920.0, 2.0, 4.0),
+        (928.0, 4.0, 4.0),
+        (935.0, 4.0, 4.0),
+    ]
+    vals = [t[0] for t in test_cases]
+    expected_oas = [t[1] for t in test_cases]
+    expected_ceil = [t[2] for t in test_cases]
+    calib = {'absmax': jnp.array(vals)}
+
+    for qtype in ('mxfp8', 'mxfp8_16'):
+      scale_oas, _ = qarray.compute_scale_zero_point(
+          calib, qtype, scale_method='oas'
+      )
+      scale_ceil, _ = qarray.compute_scale_zero_point(
+          calib, qtype, scale_method='ceil'
+      )
+      scale_default, _ = qarray.compute_scale_zero_point(
+          calib, qtype, scale_method='default'
+      )
+      self.assertTrue(
+          jnp.array_equal(
+              scale_oas, jnp.array(expected_oas, dtype=scale_oas.dtype)
+          )
+      )
+      self.assertTrue(
+          jnp.array_equal(
+              scale_ceil, jnp.array(expected_ceil, dtype=scale_ceil.dtype)
+          )
+      )
+      # Default for mxfp8/16 matches OAS
+      self.assertTrue(jnp.array_equal(scale_default, scale_oas))
+
+  def test_scale_method_transitions_mxint4(self):
+    """Tests mxint4 scale transitions for OAS vs Ceil around boundaries."""
+    # Ceil transitions when scale = absmax / 7.5 crosses exact powers of 2.
+    # OAS matches ceil for non-powers-of-2, but provides +1 bit of headroom
+    # at exact powers of 2 (3.75, 7.5, 15.0).
+    test_cases = [
+        # Around 3.75 (scale = 0.5)
+        (3.50, 0.5, 0.5),
+        (3.75, 1.0, 0.5),  # OAS rounds up to 1.0; Ceil keeps 0.5
+        (4.00, 1.0, 1.0),
+        # Around 7.5 (scale = 1.0)
+        (7.00, 1.0, 1.0),
+        (7.50, 2.0, 1.0),  # OAS rounds up to 2.0; Ceil keeps 1.0
+        (8.00, 2.0, 2.0),
+        # Around 15.0 (scale = 2.0)
+        (14.00, 2.0, 2.0),
+        (15.00, 4.0, 2.0),  # OAS rounds up to 4.0; Ceil keeps 2.0
+        (16.00, 4.0, 4.0),
+    ]
+    vals = [t[0] for t in test_cases]
+    expected_oas = [t[1] for t in test_cases]
+    expected_ceil = [t[2] for t in test_cases]
+    calib = {'absmax': jnp.array(vals)}
+
+    scale_oas, _ = qarray.compute_scale_zero_point(
+        calib, 'mxint4', scale_method='oas'
+    )
+    scale_ceil, _ = qarray.compute_scale_zero_point(
+        calib, 'mxint4', scale_method='ceil'
+    )
+    scale_default, _ = qarray.compute_scale_zero_point(
+        calib, 'mxint4', scale_method='default'
+    )
+    self.assertTrue(
+        jnp.array_equal(
+            scale_oas, jnp.array(expected_oas, dtype=scale_oas.dtype)
+        )
+    )
+    self.assertTrue(
+        jnp.array_equal(
+            scale_ceil, jnp.array(expected_ceil, dtype=scale_ceil.dtype)
+        )
+    )
+    # Default for mxint4 matches OAS
+    self.assertTrue(jnp.array_equal(scale_default, scale_oas))
+
+  def test_scale_method_transitions_mxint8(self):
+    """Tests mxint8 scale transitions for OAS vs Ceil around boundaries."""
+    # Ceil transitions when scale = absmax / 127.5 crosses exact powers of 2.
+    # OAS matches ceil for non-powers-of-2, but provides +1 bit of headroom
+    # at exact powers of 2 (63.75, 127.5, 255.0).
+    test_cases = [
+        # Around 63.75 (scale = 0.5)
+        (60.00, 0.5, 0.5),
+        (63.75, 1.0, 0.5),  # OAS rounds up to 1.0; Ceil keeps 0.5
+        (68.00, 1.0, 1.0),
+        # Around 127.5 (scale = 1.0)
+        (120.00, 1.0, 1.0),
+        (127.50, 2.0, 1.0),  # OAS rounds up to 2.0; Ceil keeps 1.0
+        (135.00, 2.0, 2.0),
+        # Around 255.0 (scale = 2.0)
+        (240.00, 2.0, 2.0),
+        (255.00, 4.0, 2.0),  # OAS rounds up to 4.0; Ceil keeps 2.0
+        (270.00, 4.0, 4.0),
+    ]
+    vals = [t[0] for t in test_cases]
+    expected_oas = [t[1] for t in test_cases]
+    expected_ceil = [t[2] for t in test_cases]
+    calib = {'absmax': jnp.array(vals)}
+
+    scale_oas, _ = qarray.compute_scale_zero_point(
+        calib, 'mxint8', scale_method='oas'
+    )
+    scale_ceil, _ = qarray.compute_scale_zero_point(
+        calib, 'mxint8', scale_method='ceil'
+    )
+    scale_default, _ = qarray.compute_scale_zero_point(
+        calib, 'mxint8', scale_method='default'
+    )
+    self.assertTrue(
+        jnp.array_equal(
+            scale_oas, jnp.array(expected_oas, dtype=scale_oas.dtype)
+        )
+    )
+    self.assertTrue(
+        jnp.array_equal(
+            scale_ceil, jnp.array(expected_ceil, dtype=scale_ceil.dtype)
+        )
+    )
+    # Default for mxint8 matches Ceil
+    self.assertTrue(jnp.array_equal(scale_default, scale_ceil))
+
+  def test_quantize_scale_method_transition_mxint4(self):
+    """Verifies quantize with scale_method='ceil' vs 'oas' on mxint4."""
+    # At boundary 7.5: Ceil keeps scale=1.0; OAS provides headroom scale=2.0.
+    x_at_boundary = jnp.array([[7.5] * 32], dtype=jnp.float32)
+    how_ceil = qarray.HowToQuantize(
+        qtype='mxint4', tiled_axes={1: 32}, scale_method='ceil'
+    )
+    how_oas = qarray.HowToQuantize(
+        qtype='mxint4', tiled_axes={1: 32}, scale_method='oas'
+    )
+    q_ceil = qarray.quantize(x_at_boundary, how_ceil)
+    q_oas = qarray.quantize(x_at_boundary, how_oas)
+    self.assertEqual(float(q_ceil.scale[0, 0]), 1.0)
+    self.assertEqual(float(q_oas.scale[0, 0]), 2.0)
+
+    # Below boundary (7.0): both yield scale=1.0.
+    x_below = jnp.array([[7.0] * 32], dtype=jnp.float32)
+    self.assertEqual(float(qarray.quantize(x_below, how_ceil).scale[0, 0]), 1.0)
+    self.assertEqual(float(qarray.quantize(x_below, how_oas).scale[0, 0]), 1.0)
+
+    # Above boundary (8.0): both yield scale=2.0.
+    x_above = jnp.array([[8.0] * 32], dtype=jnp.float32)
+    self.assertEqual(float(qarray.quantize(x_above, how_ceil).scale[0, 0]), 2.0)
+    self.assertEqual(float(qarray.quantize(x_above, how_oas).scale[0, 0]), 2.0)
+
+  def test_quantize_scale_method_transition_mxfp4(self):
+    """Verifies quantize with scale_method='ceil' vs 'oas' on mxfp4."""
+    # At 6.5 (between 6.0 and 7.0): Ceil scales up to 2.0; OAS stays at 1.0.
+    x_between = jnp.array([[6.5] * 32], dtype=jnp.float32)
+    how_ceil = qarray.HowToQuantize(
+        qtype='mxfp4', tiled_axes={1: 32}, scale_method='ceil'
+    )
+    how_oas = qarray.HowToQuantize(
+        qtype='mxfp4', tiled_axes={1: 32}, scale_method='oas'
+    )
+    q_ceil = qarray.quantize(x_between, how_ceil)
+    q_oas = qarray.quantize(x_between, how_oas)
+    self.assertEqual(float(q_ceil.scale[0, 0]), 2.0)
+    self.assertEqual(float(q_oas.scale[0, 0]), 1.0)
+
+    # Below 6.0 (5.5): both yield scale=1.0.
+    x_below = jnp.array([[5.5] * 32], dtype=jnp.float32)
+    self.assertEqual(float(qarray.quantize(x_below, how_ceil).scale[0, 0]), 1.0)
+    self.assertEqual(float(qarray.quantize(x_below, how_oas).scale[0, 0]), 1.0)
+
+    # Above 7.0 (7.5): both yield scale=2.0.
+    x_above = jnp.array([[7.5] * 32], dtype=jnp.float32)
+    self.assertEqual(float(qarray.quantize(x_above, how_ceil).scale[0, 0]), 2.0)
+    self.assertEqual(float(qarray.quantize(x_above, how_oas).scale[0, 0]), 2.0)
 
 
 if __name__ == '__main__':
