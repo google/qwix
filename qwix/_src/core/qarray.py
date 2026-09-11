@@ -15,7 +15,7 @@
 
 import dataclasses
 import functools
-from typing import Callable, Collection, Mapping, Sequence, TypeAlias
+from typing import Any, Callable, Collection, Mapping, Sequence, TypeAlias
 from flax import nnx
 import flax.struct
 import jax
@@ -302,15 +302,42 @@ class HowToQuantize:
   calibration_method: str = 'absmax'
   # Noise function to use for stochastic rounding.
   noise_fn: numerics.NoiseFn | None = None
+  # Scale method for power-of-2 formats: 'default', 'oas', or 'ceil'.
+  # Only applicable to microscaled floating-point formats ('mxfp8', 'mxfp4').
+  # Microscaled integer formats ('mxint8', 'mxint4') strictly use 'ceil'.
+  scale_method: str = 'default'
+  # Whether to use hierarchical scaling: per-axis BF16 scale followed by
+  # inner subchannel microscaling. Automatically no-ops if the format does
+  # not use microscaling.
+  hierarchical_scaling: bool = False
 
   def __post_init__(self):
+    if self.scale_method not in ('default', 'oas', 'ceil'):
+      raise ValueError(
+          "scale_method must be one of ('default', 'oas', 'ceil'), got"
+          f' {self.scale_method!r}'
+      )
+    if self.scale_method not in ('default', 'ceil') and self.qtype in (
+        'mxint8',
+        'mxint4',
+    ):
+      raise ValueError(
+          f'scale_method {self.scale_method!r} is not supported for integer'
+          f' format {self.qtype!r}. Microscaled integers strictly use "ceil"'
+          ' scaling.'
+      )
+
     if isinstance(self.qtype, str) and self.qtype in (
         'mxfp8',
         'mxfp8_16',
         'mxfp4',
         'nvfp4',
+        'mxint8',
+        'mxint4',
     ):
-      resolved_tile_size = 32 if self.qtype in ('mxfp8', 'mxfp4') else 16
+      resolved_tile_size = (
+          32 if self.qtype in ('mxfp8', 'mxfp4', 'mxint8', 'mxint4') else 16
+      )
 
       if not self.tiled_axes:
         raise ValueError(
@@ -323,6 +350,28 @@ class HowToQuantize:
               f'Format {self.qtype} requires a tile size of'
               f' {resolved_tile_size}, but axis {axis} got {size}.'
           )
+
+
+def is_microscaling_format(
+    qtype: Any, tiled_axes: Mapping[int, int | float] | None = None
+) -> bool:
+  """Returns True if qtype is a microscaling format with subchannel scaling."""
+  if isinstance(qtype, str) and qtype in (
+      'mxfp8',
+      'mxfp8_16',
+      'mxfp4',
+      'nvfp4',
+      'mxint8',
+      'mxint4',
+  ):
+    return True
+  if (
+      tiled_axes
+      and isinstance(qtype, str)
+      and (qtype.startswith('mx') or qtype.startswith('nv'))
+  ):
+    return True
+  return False
 
 
 ShapeT: TypeAlias = Sequence[int]
@@ -535,18 +584,35 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
 
 
 def compute_scale_zero_point(
-    calibration: Mapping[str, jax.Array], qtype: jax.typing.DTypeLike
+    calibration: Mapping[str, jax.Array],
+    qtype: jax.typing.DTypeLike,
+    scale_method: str = 'default',
 ) -> tuple[jax.Array, jax.Array | None]:
   """Computes the scale and zero_point from the calibration result.
 
   Args:
     calibration: The calibration returned by calibrate().
     qtype: The dtype of the qvalue.
+    scale_method: Scale method for power-of-2 formats: 'default', 'oas', or
+      'ceil'. - 'ceil': Uses exact power-of-2 ceiling (2 ** ceil(log2(scale))),
+      ensuring zero clipping of the maximum value in the block. - 'oas': Uses
+      Outlier-Aware Scaling (OAS) for microscaled floating-point formats (mxfp4,
+      mxfp8), applying theoretical biases optimizing the tradeoff between
+      outlier clipping and subnormal quantization errors. OAS is not supported
+      for microscaled integer formats (mxint8, mxint4), which strictly require
+      exact Ceil power-of-2 scaling. - 'default': Uses OAS for floating-point
+      formats (mxfp8/16, mxfp4); uses ceil for integer formats (mxint8, mxint4).
 
   Returns:
     A tuple of the scale and zero_point. The zero_point is None in symmetric
     quantization.
   """
+  if scale_method not in ('default', 'oas', 'ceil'):
+    raise ValueError(
+        "scale_method must be one of ('default', 'oas', 'ceil'), got"
+        f' {scale_method!r}'
+    )
+
   if 'min' in calibration and 'max' in calibration:
     qmin, qmax = numerics.get_asymmetric_bound(qtype)
     scale = (calibration['max'] - calibration['min']) / (qmax - qmin)
@@ -564,23 +630,54 @@ def compute_scale_zero_point(
   else:
     raise ValueError(f'Unsupported calibration: {calibration}')
   if qtype in ('mxfp8', 'mxfp8_16', 'mxfp4'):
-    # Biases theoretically derived via Outlier Aware Scaling (OAS)
-    # (arxiv 2603.08713) to optimize the tradeoff between outlier clipping
-    # and subnormal quantization errors.
-    if qtype == 'mxfp4':
-      # Bias = 0.5 - log2(7/6). C = 2**(bias + 0.5) = 12 / 7.
-      c = 12.0 / 7.0
+    if scale_method == 'ceil':
+      scale_f32 = scale.astype(jnp.float32)
+      scale_bits = scale_f32.view(jnp.int32)
+      scale_pow2 = (
+          ((scale_bits + 0x007FFFFF) & 0x7F800000)
+          .view(jnp.float32)
+          .astype(scale.dtype)
+      )
+      scale = jnp.where(scale > 0, scale_pow2, scale)
     else:
-      # In E4M3 OCP, largest normal is 448.0 due to reserved values and
-      # max_cutoff = 464.0 which is 1/2 an ULP larger.
-      # Bias = 0.5 - log2(464.0/448.0). C = 2**(bias + 0.5) = 56 / 29.
-      c = 56.0 / 29.0
-    scale_bf16 = (scale * c).astype(jnp.bfloat16)
-    scale = (
-        (scale_bf16.view(jnp.int16) & 0x7F80)
-        .view(jnp.bfloat16)
+      # Biases theoretically derived via Outlier Aware Scaling (OAS)
+      # (arxiv 2603.08713) to optimize the tradeoff between outlier clipping
+      # and subnormal quantization errors.
+      if qtype == 'mxfp4':
+        # Bias = 0.5 - log2(7/6). C = 2**(bias + 0.5) = 12 / 7.
+        c = 12.0 / 7.0
+      else:
+        # In E4M3 OCP, largest normal is 448.0 due to reserved values and
+        # max_cutoff = 464.0 which is 1/2 an ULP larger.
+        # Bias = 0.5 - log2(464.0/448.0). C = 2**(bias + 0.5) = 56 / 29.
+        c = 56.0 / 29.0
+      scale_bf16 = (scale * c).astype(jnp.bfloat16)
+      scale = (
+          (scale_bf16.view(jnp.int16) & 0x7F80)
+          .view(jnp.bfloat16)
+          .astype(scale.dtype)
+      )
+  elif qtype in ('mxint8', 'mxint4'):
+    if scale_method not in ('default', 'ceil'):
+      raise ValueError(
+          f'scale_method {scale_method!r} is not supported for integer'
+          f' format {qtype!r}. Microscaled integers strictly use "ceil"'
+          ' scaling.'
+      )
+    # Efficient bit manipulation for 2 ** ceil(log2(scale)) without
+    # transcendentals:
+    # In IEEE-754 float32, adding the mantissa mask (0x007FFFFF) carries into
+    # the exponent if and only if the mantissa > 0 (scale is not already an
+    # exact power of 2). Masking with 0x7F800000 clears the mantissa, yielding
+    # the exact ceil power-of-2.
+    scale_f32 = scale.astype(jnp.float32)
+    scale_bits = scale_f32.view(jnp.int32)
+    scale_pow2 = (
+        ((scale_bits + 0x007FFFFF) & 0x7F800000)
+        .view(jnp.float32)
         .astype(scale.dtype)
     )
+    scale = jnp.where(scale > 0, scale_pow2, scale)
   elif qtype == 'nvfp4':
     scale = numerics.convert_to(scale, jnp.float8_e4m3fn).astype(scale.dtype)
   return scale, zero_point
@@ -639,8 +736,71 @@ def quantize_with_scale_zero_point(
 
 def quantize(array: jax.Array, how: HowToQuantize) -> QArray:
   """Quantizes an array using a dynamic range."""
+  if how.hierarchical_scaling and is_microscaling_format(
+      how.qtype, how.tiled_axes
+  ):
+    # Level 1: Outer per-axis scale factor in BF16 across channelwise axes.
+    reduce_axes = tuple(
+        axis for axis in range(array.ndim) if axis not in how.channelwise_axes
+    )
+    axis_scale_shape = tuple(
+        dim if axis in how.channelwise_axes else 1
+        for axis, dim in enumerate(array.shape)
+    )
+    axis_absmax = jnp.max(
+        jnp.abs(array), axis=reduce_axes, keepdims=True
+    ).reshape(axis_scale_shape)
+    qmax = numerics.get_symmetric_bound(how.qtype)
+    raw_axis_scale = axis_absmax / qmax
+    axis_scale_bf16 = raw_axis_scale.astype(jnp.bfloat16)
+    # Ensure axis_scale * qmax >= axis_absmax so array_norm max <= qmax,
+    # preventing inner power-of-2 scale from falsely rounding up to 2.0.
+    undershoot = (
+        axis_scale_bf16.astype(raw_axis_scale.dtype) * qmax
+    ) < axis_absmax
+    axis_bits = axis_scale_bf16.view(jnp.int16)
+    axis_scale_bf16 = jnp.where(
+        undershoot,
+        (axis_bits + 1).view(jnp.bfloat16),
+        axis_scale_bf16,
+    )
+    tiny = jnp.sqrt(jnp.finfo(jnp.bfloat16).tiny)
+    axis_scale = jnp.where(
+        axis_scale_bf16 < tiny, jnp.ones_like(axis_scale_bf16), axis_scale_bf16
+    )
+
+    # Normalize array by outer per-axis scale.
+    array_norm = call_with_generic_broadcast(
+        jnp.divide, array, axis_scale.astype(array.dtype)
+    )
+
+    # Level 2: Inner subchannel microscaling on normalized array.
+    inner_how = dataclasses.replace(how, hierarchical_scaling=False)
+    inner_calibration = calibrate(array_norm, inner_how)
+    block_scale, zero_point = compute_scale_zero_point(
+        inner_calibration, how.qtype, scale_method=how.scale_method
+    )
+    inner_quantized = quantize_with_scale_zero_point(
+        array_norm, how.qtype, block_scale, zero_point, how.noise_fn
+    )
+
+    # Combined total scale: block_scale * axis_scale (in BF16 / array.dtype).
+    total_scale = call_with_generic_broadcast(
+        jnp.multiply,
+        inner_quantized.scale.astype(jnp.bfloat16),
+        axis_scale,
+    )
+    return QArray(
+        qvalue=inner_quantized.qvalue,
+        scale=total_scale.astype(array.dtype),
+        zero_point=inner_quantized.zero_point,
+        qtype=how.qtype,
+    )
+
   calibration = calibrate(array, how)
-  scale, zero_point = compute_scale_zero_point(calibration, how.qtype)
+  scale, zero_point = compute_scale_zero_point(
+      calibration, how.qtype, scale_method=how.scale_method
+  )
   return quantize_with_scale_zero_point(
       array, how.qtype, scale, zero_point, how.noise_fn
   )
@@ -654,6 +814,8 @@ def quantize_api(
     tiled_axes: Mapping[int, int | float] | None = None,
     calibration_method: str = 'absmax',
     scale_dtype: jax.typing.DTypeLike | None = None,
+    hierarchical_scaling: bool = False,
+    scale_method: str = 'default',
 ) -> QArray:
   """Quantize a Jax Array into QArray using a dynamic range.
 
@@ -674,6 +836,10 @@ def quantize_api(
     scale_dtype: The dtype of the scale. If not given, the dtype will be the
       same as the array's dtype. Note that the scale's dtype decides the
       dequantized array's dtype.
+    hierarchical_scaling: Whether to use hierarchical scaling: per-axis BF16
+      scale followed by inner power-of-2 subchannel microscaling.
+    scale_method: Scale method for power-of-2 formats: 'default', 'oas', or
+      'ceil'.
 
   Returns:
     The quantized array.
@@ -684,6 +850,8 @@ def quantize_api(
       channelwise_axes=channelwise_axes,
       tiled_axes=tiled_axes or {},
       calibration_method=calibration_method,
+      hierarchical_scaling=hierarchical_scaling,
+      scale_method=scale_method,
   )
   qarray = quantize(array, how)
   if scale_dtype is not None:

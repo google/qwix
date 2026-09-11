@@ -18,6 +18,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 from jax import numpy as jnp
+from qwix._src.core import multipass
 from qwix._src.core import numerics
 from qwix._src.core import qarray
 from qwix._src.core import sparsity
@@ -440,7 +441,9 @@ class QArrayTest(parameterized.TestCase):
     # (reproduce NaN by monkeypatching to disable safety check)
     original_compute = qarray.compute_scale_zero_point
 
-    def unsafe_compute_scale_zero_point(calibration, qtype):
+    def unsafe_compute_scale_zero_point(
+        calibration, qtype, *unused_args, **unused_kwargs
+    ):
       if 'min' in calibration and 'max' in calibration:
         qmin, qmax = numerics.get_asymmetric_bound(qtype)
         scale = (calibration['max'] - calibration['min']) / (qmax - qmin)
@@ -516,6 +519,34 @@ class QArrayTest(parameterized.TestCase):
           tiled_axes={1: 32},
       )
 
+    with self.assertRaisesRegex(
+        ValueError, 'Format mxint8 requires `tiled_axes` to be specified.'
+    ):
+      qarray.HowToQuantize(qtype='mxint8')
+
+    with self.assertRaisesRegex(
+        ValueError,
+        'Format mxint8 requires a tile size of 32, but axis 1 got 16',
+    ):
+      qarray.HowToQuantize(
+          qtype='mxint8',
+          tiled_axes={1: 16},
+      )
+
+    with self.assertRaisesRegex(
+        ValueError, 'Format mxint4 requires `tiled_axes` to be specified.'
+    ):
+      qarray.HowToQuantize(qtype='mxint4')
+
+    with self.assertRaisesRegex(
+        ValueError,
+        'Format mxint4 requires a tile size of 32, but axis 1 got 16',
+    ):
+      qarray.HowToQuantize(
+          qtype='mxint4',
+          tiled_axes={1: 16},
+      )
+
   @parameterized.named_parameters(
       dict(
           testcase_name='mxfp4',
@@ -571,6 +602,507 @@ class QArrayTest(parameterized.TestCase):
     self.assertTrue(
         jnp.array_equal(scale, jnp.array(expected_scales, dtype=scale.dtype))
     )
+
+  def test_compute_scale_zero_point_mxint_power_of_2(self):
+    calibration_i8 = {
+        'absmax': jnp.array([63.75, 64.0, 127.5, 127.6, 255.0, 256.0])
+    }
+    scale, zero_point = qarray.compute_scale_zero_point(
+        calibration_i8, 'mxint8'
+    )
+    self.assertIsNone(zero_point)
+    expected_scales = jnp.array(
+        [0.5, 1.0, 1.0, 2.0, 2.0, 4.0], dtype=scale.dtype
+    )
+    self.assertTrue(jnp.array_equal(scale, expected_scales))
+
+    calibration_i4 = {'absmax': jnp.array([3.75, 3.8, 7.5, 7.6, 15.0, 15.1])}
+    scale_i4, zero_point_i4 = qarray.compute_scale_zero_point(
+        calibration_i4, 'mxint4'
+    )
+    self.assertIsNone(zero_point_i4)
+    expected_scales_i4 = jnp.array(
+        [0.5, 1.0, 1.0, 2.0, 2.0, 4.0], dtype=scale_i4.dtype
+    )
+    self.assertTrue(jnp.array_equal(scale_i4, expected_scales_i4))
+
+  def test_mxint8_quantize_dequantize(self):
+    x = jnp.array(
+        [[10.0, -20.0, 30.0, -40.0] * 8, [50.0, -60.0, 70.0, -80.0] * 8],
+        dtype=jnp.float32,
+    )  # shape (2, 32)
+    how = qarray.HowToQuantize(
+        qtype='mxint8', channelwise_axes=[0], tiled_axes={1: 32}
+    )
+    q = qarray.quantize(x, how)
+    self.assertEqual(q.qvalue.dtype, jnp.int8)
+    self.assertEqual(q.scale.shape, (2, 1))
+    self.assertIsNone(q.zero_point)
+    # Scale must be a power of 2
+    log2_scale = jnp.log2(q.scale)
+    self.assertTrue(jnp.all(jnp.equal(log2_scale, jnp.round(log2_scale))))
+    # Check dequantize
+    deq = qarray.dequantize(q)
+    self.assertEqual(deq.shape, x.shape)
+    # Dequantized values should be close to original
+    self.assertTrue(jnp.allclose(deq, x, atol=2.0))
+
+  def test_mxint4_quantize_dequantize(self):
+    x = jnp.array(
+        [[1.0, -2.0, 3.0, -4.0] * 8, [5.0, -6.0, 7.0, -7.0] * 8],
+        dtype=jnp.float32,
+    )  # shape (2, 32)
+    how = qarray.HowToQuantize(
+        qtype='mxint4', channelwise_axes=[0], tiled_axes={1: 32}
+    )
+    q = qarray.quantize(x, how)
+    self.assertEqual(q.qvalue.dtype, jnp.int4)
+    self.assertEqual(q.scale.shape, (2, 1))
+    self.assertIsNone(q.zero_point)
+    # Scale must be a power of 2
+    log2_scale = jnp.log2(q.scale)
+    self.assertTrue(jnp.all(jnp.equal(log2_scale, jnp.round(log2_scale))))
+    # Check dequantize
+    deq = qarray.dequantize(q)
+    self.assertEqual(deq.shape, x.shape)
+    # Dequantized values should be close to original
+    self.assertTrue(jnp.allclose(deq, x, atol=1.0))
+
+  def test_mxint8_sqnr(self):
+    key = jax.random.PRNGKey(0)
+    x = jax.random.normal(key, (4, 128), dtype=jnp.float32)
+    how = qarray.HowToQuantize(
+        qtype='mxint8', channelwise_axes=[0], tiled_axes={1: 32}
+    )
+    q = qarray.quantize(x, how)
+    deq = qarray.dequantize(q)
+    signal_power = jnp.mean(jnp.square(x))
+    noise_power = jnp.mean(jnp.square(x - deq))
+    sqnr = float(10.0 * jnp.log10(signal_power / noise_power))
+    self.assertGreater(
+        sqnr, 35.0, f'mxint8 SQNR {sqnr:.2f} dB is below expected 35 dB'
+    )
+
+  def test_mxint4_sqnr(self):
+    key = jax.random.PRNGKey(0)
+    x = jax.random.normal(key, (4, 128), dtype=jnp.float32)
+    how = qarray.HowToQuantize(
+        qtype='mxint4', channelwise_axes=[0], tiled_axes={1: 32}
+    )
+    q = qarray.quantize(x, how)
+    deq = qarray.dequantize(q)
+    signal_power = jnp.mean(jnp.square(x))
+    noise_power = jnp.mean(jnp.square(x - deq))
+    sqnr = float(10.0 * jnp.log10(signal_power / noise_power))
+    self.assertGreater(
+        sqnr, 15.0, f'mxint4 SQNR {sqnr:.2f} dB is below expected 15 dB'
+    )
+
+  def test_hierarchical_scaling_mxfp8(self):
+    """Verifies hierarchical scaling on mxfp8_16."""
+    key = jax.random.key(123)
+    x = jax.random.normal(key, (4, 32), dtype=jnp.float32)
+    # Give row 0 a much larger dynamic range than row 1
+    x = x.at[0].multiply(50.0)
+    x = x.at[1].multiply(0.1)
+
+    how_flat = qarray.HowToQuantize(
+        qtype='mxfp8_16',
+        channelwise_axes=[0],
+        tiled_axes={1: 16},
+        hierarchical_scaling=False,
+    )
+    how_hier = qarray.HowToQuantize(
+        qtype='mxfp8_16',
+        channelwise_axes=[0],
+        tiled_axes={1: 16},
+        hierarchical_scaling=True,
+    )
+
+    q_flat = qarray.quantize(x, how_flat)
+    q_hier = qarray.quantize(x, how_hier)
+
+    self.assertEqual(q_hier.scale.shape, (4, 2))
+    self.assertEqual(q_hier.qvalue.shape, (4, 32))
+    self.assertEqual(q_hier.scale.dtype, x.dtype)
+
+    # Dequantization should closely reconstruct the original array
+    deq_hier = qarray.dequantize(q_hier)
+    mae_hier = jnp.mean(jnp.abs(deq_hier - x))
+    mae_flat = jnp.mean(jnp.abs(qarray.dequantize(q_flat) - x))
+    self.assertTrue(jnp.isfinite(mae_hier))
+    self.assertLess(mae_hier, 1.0)
+    # The reconstruction error should be very close to or better than flat
+    self.assertAlmostEqual(float(mae_hier), float(mae_flat), delta=0.5)
+
+  def test_hierarchical_scaling_noop_non_microscaling(self):
+    """Verifies that hierarchical_scaling is a no-op on non-microscaling types."""
+    x = jax.random.normal(jax.random.key(42), (4, 32), dtype=jnp.float32)
+
+    # int8 without tiled_axes
+    how_std = qarray.HowToQuantize(
+        qtype='int8',
+        channelwise_axes=[0],
+        hierarchical_scaling=False,
+    )
+    how_hier = qarray.HowToQuantize(
+        qtype='int8',
+        channelwise_axes=[0],
+        hierarchical_scaling=True,
+    )
+    q_std = qarray.quantize(x, how_std)
+    q_hier = qarray.quantize(x, how_hier)
+    self.assertTrue(jnp.array_equal(q_std.qvalue, q_hier.qvalue))
+    self.assertTrue(jnp.array_equal(q_std.scale, q_hier.scale))
+
+  def test_hierarchical_scaling_formats(self):
+    """Verifies hierarchical scaling on all supported microscaling formats."""
+    key = jax.random.key(42)
+    x = jax.random.normal(key, (2, 32), dtype=jnp.float32)
+
+    for qtype, tile_size in [
+        ('mxfp8', 32),
+        ('mxfp8_16', 16),
+        ('mxfp4', 32),
+        ('mxint8', 32),
+        ('mxint4', 32),
+    ]:
+      how = qarray.HowToQuantize(
+          qtype=qtype,
+          channelwise_axes=[0],
+          tiled_axes={1: tile_size},
+          hierarchical_scaling=True,
+      )
+      q = qarray.quantize(x, how)
+      self.assertEqual(q.scale.shape, (2, 32 // tile_size))
+      self.assertEqual(q.scale.dtype, x.dtype)
+      deq = qarray.dequantize(q)
+      self.assertTrue(jnp.all(jnp.isfinite(deq)))
+
+  def test_hierarchical_scaling_jit(self):
+    """Verifies that quantize with hierarchical_scaling works inside jax.jit."""
+    x = jax.random.normal(jax.random.key(42), (4, 32), dtype=jnp.float32)
+    how = qarray.HowToQuantize(
+        qtype='mxfp8_16',
+        channelwise_axes=[0],
+        tiled_axes={1: 16},
+        hierarchical_scaling=True,
+    )
+
+    @jax.jit
+    def quant_and_dequant(arr):
+      q = qarray.quantize(arr, how)
+      return qarray.dequantize(q)
+
+    out = quant_and_dequant(x)
+    self.assertEqual(out.shape, x.shape)
+    self.assertTrue(jnp.all(jnp.isfinite(out)))
+
+  def test_hierarchical_scaling_zeros_and_underflow(self):
+    """Verifies robustness to zeros and small values."""
+    x_zeros = jnp.zeros((2, 32), dtype=jnp.float32)
+    how = qarray.HowToQuantize(
+        qtype='mxfp8_16',
+        channelwise_axes=[0],
+        tiled_axes={1: 16},
+        hierarchical_scaling=True,
+    )
+    q_zeros = qarray.quantize(x_zeros, how)
+    self.assertTrue(jnp.all(jnp.isfinite(q_zeros.scale)))
+    self.assertTrue(jnp.all(jnp.isfinite(qarray.dequantize(q_zeros))))
+
+    # Very small numbers
+    x_small = jnp.ones((2, 32), dtype=jnp.float32) * 1e-12
+    q_small = qarray.quantize(x_small, how)
+    self.assertTrue(jnp.all(jnp.isfinite(q_small.scale)))
+    self.assertTrue(jnp.all(jnp.isfinite(qarray.dequantize(q_small))))
+
+  @parameterized.parameters(
+      ('mxfp8_16', 16, 27.0, 33.0, 0.045),
+      ('mxfp8', 32, 26.0, 33.0, 0.050),
+      ('mxint8', 32, 36.0, 45.0, 0.015),
+  )
+  def test_quantize_dequantize_sqnr_gaussian(
+      self, qtype, tile_size, min_snr, max_snr, max_rel_err
+  ):
+    """Verifies that quantize/dequantize on N(0, 1) achieves expected SQNR."""
+    key = jax.random.key(1234)
+    x = jax.random.normal(key, (128, 256), dtype=jnp.float32)
+
+    for hier in (False, True):
+      how = qarray.HowToQuantize(
+          qtype=qtype,
+          channelwise_axes=[0],
+          tiled_axes={1: tile_size},
+          hierarchical_scaling=hier,
+      )
+      q = qarray.quantize(x, how)
+      deq = qarray.dequantize(q)
+
+      noise = x - deq
+      sig_power = jnp.mean(jnp.square(x))
+      noise_power = jnp.mean(jnp.square(noise))
+      snr = 10.0 * jnp.log10(sig_power / noise_power)
+      rel_err = jnp.linalg.norm(noise) / jnp.linalg.norm(x)
+
+      self.assertGreater(float(snr), min_snr)
+      self.assertLess(float(snr), max_snr)
+      self.assertLess(float(rel_err), max_rel_err)
+
+  def test_scale_method_transitions_mxfp4(self):
+    """Tests mxfp4 scale transitions for OAS vs Ceil around boundaries."""
+    # Ceil transitions at powers-of-2 multiples of qmax=6.0 (6.0, 12.0).
+    # OAS transitions at powers-of-2 multiples of cutoff=7.0 (3.5, 7.0, 14.0).
+    test_cases = [
+        # Around 3.0 (Ceil transition: 0.5 -> 1.0; OAS: 0.5)
+        (3.0, 0.5, 0.5),
+        (3.2, 0.5, 1.0),
+        # Around 3.5 (OAS transition: 0.5 -> 1.0; Ceil: 1.0)
+        (3.4, 0.5, 1.0),
+        (3.5, 1.0, 1.0),
+        (3.6, 1.0, 1.0),
+        # Around 6.0 (Ceil transition: 1.0 -> 2.0; OAS: 1.0)
+        (5.8, 1.0, 1.0),
+        (6.0, 1.0, 1.0),
+        (6.2, 1.0, 2.0),
+        # In (6.0, 7.0], Ceil is 2.0, OAS stays at 1.0
+        (6.8, 1.0, 2.0),
+        # At 7.0 (OAS transition: 1.0 -> 2.0; Ceil: 2.0)
+        (7.0, 2.0, 2.0),
+        (7.2, 2.0, 2.0),
+        # Around 12.0 (Ceil transition: 2.0 -> 4.0; OAS: 2.0)
+        (11.8, 2.0, 2.0),
+        (12.0, 2.0, 2.0),
+        (12.2, 2.0, 4.0),
+        # At 14.0 (OAS transition: 2.0 -> 4.0; Ceil: 4.0)
+        (13.8, 2.0, 4.0),
+        (14.0, 4.0, 4.0),
+        (14.2, 4.0, 4.0),
+    ]
+    vals = [t[0] for t in test_cases]
+    expected_oas = [t[1] for t in test_cases]
+    expected_ceil = [t[2] for t in test_cases]
+    calib = {'absmax': jnp.array(vals)}
+
+    scale_oas, _ = qarray.compute_scale_zero_point(
+        calib, 'mxfp4', scale_method='oas'
+    )
+    scale_ceil, _ = qarray.compute_scale_zero_point(
+        calib, 'mxfp4', scale_method='ceil'
+    )
+    scale_default, _ = qarray.compute_scale_zero_point(
+        calib, 'mxfp4', scale_method='default'
+    )
+    self.assertTrue(
+        jnp.array_equal(
+            scale_oas, jnp.array(expected_oas, dtype=scale_oas.dtype)
+        )
+    )
+    self.assertTrue(
+        jnp.array_equal(
+            scale_ceil, jnp.array(expected_ceil, dtype=scale_ceil.dtype)
+        )
+    )
+    # Default for mxfp4 matches OAS
+    self.assertTrue(jnp.array_equal(scale_default, scale_oas))
+
+  def test_scale_method_transitions_mxfp8(self):
+    """Tests mxfp8 scale transitions for OAS vs Ceil around boundaries."""
+    # Ceil transitions at powers-of-2 multiples of qmax=448.0 (224, 448, 896).
+    # OAS transitions at powers-of-2 multiples of cutoff=464.0 (232, 464, 928).
+    for qtype in ('mxfp8', 'mxfp8_16'):
+      test_cases = [
+          # Around 224.0 (Ceil transition: 0.5 -> 1.0; OAS: 0.5)
+          (224.0, 0.5, 0.5),
+          (228.0, 0.5, 1.0),
+          # Around 232.0 (OAS transition: 0.5 -> 1.0; Ceil: 1.0)
+          (230.0, 0.5, 1.0),
+          (232.0, 1.0, 1.0),
+          (235.0, 1.0, 1.0),
+          # Around 448.0 (Ceil transition: 1.0 -> 2.0; OAS: 1.0)
+          (440.0, 1.0, 1.0),
+          (448.0, 1.0, 1.0),
+          (450.0, 1.0, 2.0),
+          # In (448.0, 464.0], Ceil is 2.0, OAS stays at 1.0
+          (460.0, 1.0, 2.0),
+          # At 464.0 (OAS transition: 1.0 -> 2.0; Ceil: 2.0)
+          (464.0, 2.0, 2.0),
+          (470.0, 2.0, 2.0),
+          # Around 896.0 (Ceil transition: 2.0 -> 4.0; OAS: 2.0)
+          (890.0, 2.0, 2.0),
+          (896.0, 2.0, 2.0),
+          (900.0, 2.0, 4.0),
+          # At 928.0 (OAS transition: 2.0 -> 4.0; Ceil: 4.0)
+          (920.0, 2.0, 4.0),
+          (928.0, 4.0, 4.0),
+          (935.0, 4.0, 4.0),
+      ]
+      vals = [t[0] for t in test_cases]
+      expected_oas = [t[1] for t in test_cases]
+      expected_ceil = [t[2] for t in test_cases]
+      calib = {'absmax': jnp.array(vals)}
+
+      scale_oas, _ = qarray.compute_scale_zero_point(
+          calib, qtype, scale_method='oas'
+      )
+      scale_ceil, _ = qarray.compute_scale_zero_point(
+          calib, qtype, scale_method='ceil'
+      )
+      scale_default, _ = qarray.compute_scale_zero_point(
+          calib, qtype, scale_method='default'
+      )
+      self.assertTrue(
+          jnp.array_equal(
+              scale_oas, jnp.array(expected_oas, dtype=scale_oas.dtype)
+          )
+      )
+      self.assertTrue(
+          jnp.array_equal(
+              scale_ceil, jnp.array(expected_ceil, dtype=scale_ceil.dtype)
+          )
+      )
+      # Default for mxfp8/16 matches OAS
+      self.assertTrue(jnp.array_equal(scale_default, scale_oas))
+
+  def test_quantize_scale_method_transition_mxfp4(self):
+    """Verifies quantize with scale_method='ceil' vs 'oas' on mxfp4."""
+    # At 6.5 (between 6.0 and 7.0): Ceil scales up to 2.0; OAS stays at 1.0.
+    x_between = jnp.array([[6.5] * 32], dtype=jnp.float32)
+    how_ceil = qarray.HowToQuantize(
+        qtype='mxfp4', tiled_axes={1: 32}, scale_method='ceil'
+    )
+    how_oas = qarray.HowToQuantize(
+        qtype='mxfp4', tiled_axes={1: 32}, scale_method='oas'
+    )
+    q_ceil = qarray.quantize(x_between, how_ceil)
+    q_oas = qarray.quantize(x_between, how_oas)
+    self.assertEqual(float(q_ceil.scale[0, 0]), 2.0)
+    self.assertEqual(float(q_oas.scale[0, 0]), 1.0)
+
+    # Below 6.0 (5.5): both yield scale=1.0.
+    x_below = jnp.array([[5.5] * 32], dtype=jnp.float32)
+    self.assertEqual(float(qarray.quantize(x_below, how_ceil).scale[0, 0]), 1.0)
+    self.assertEqual(float(qarray.quantize(x_below, how_oas).scale[0, 0]), 1.0)
+
+    # Above 7.0 (7.5): both yield scale=2.0.
+    x_above = jnp.array([[7.5] * 32], dtype=jnp.float32)
+    self.assertEqual(float(qarray.quantize(x_above, how_ceil).scale[0, 0]), 2.0)
+    self.assertEqual(float(qarray.quantize(x_above, how_oas).scale[0, 0]), 2.0)
+
+  def test_scale_method_mxint_raises_for_oas(self):
+    """Verifies that scale_method='oas' is disallowed for microscaled integer formats."""
+    calib = {'absmax': jnp.array([7.5])}
+    with self.assertRaisesRegex(
+        ValueError, "not supported for integer format 'mxint4'"
+    ):
+      qarray.compute_scale_zero_point(calib, 'mxint4', scale_method='oas')
+    with self.assertRaisesRegex(
+        ValueError, "not supported for integer format 'mxint8'"
+    ):
+      qarray.compute_scale_zero_point(calib, 'mxint8', scale_method='oas')
+
+    with self.assertRaisesRegex(
+        ValueError, "not supported for integer format 'mxint4'"
+    ):
+      qarray.HowToQuantize(
+          qtype='mxint4', tiled_axes={1: 32}, scale_method='oas'
+      )
+    with self.assertRaisesRegex(
+        ValueError, "not supported for integer format 'mxint8'"
+    ):
+      qarray.HowToQuantize(
+          qtype='mxint8', tiled_axes={1: 32}, scale_method='oas'
+      )
+
+  def test_int8_emulation_using_int4_passes_sqnr(self):
+    """Measures SQNR from QWIX when emulating int8 using int4 residual passes."""
+
+    def compute_snr_db(true_val: jax.Array, approx_val: jax.Array) -> float:
+      true_f = true_val.astype(jnp.float32)
+      approx_f = approx_val.astype(jnp.float32)
+      noise = true_f - approx_f
+      signal_power = jnp.mean(jnp.square(true_f))
+      noise_power = jnp.mean(jnp.square(noise))
+      return float(
+          10.0
+          * jnp.log10(
+              jnp.maximum(signal_power / jnp.maximum(noise_power, 1e-12), 1e-12)
+          )
+      )
+
+    key = jax.random.PRNGKey(42)
+    k1, k2, k3 = jax.random.split(key, 3)
+    x = jax.random.normal(k1, (128, 256), dtype=jnp.float32)
+
+    how_i8 = qarray.HowToQuantize(
+        qtype='mxint8', channelwise_axes=[0], tiled_axes={1: 32}
+    )
+    how_i4 = qarray.HowToQuantize(
+        qtype='mxint4', channelwise_axes=[0], tiled_axes={1: 32}
+    )
+
+    q_i8 = qarray.quantize(x, how_i8)
+    deq_i8 = qarray.dequantize(q_i8)
+    snr_i8 = compute_snr_db(x, deq_i8)
+    self.assertGreater(snr_i8, 40.0)
+
+    # 1-pass int4
+    q_i4_1p = qarray.quantize(x, how_i4)
+    snr_i4_1p = compute_snr_db(x, qarray.dequantize(q_i4_1p))
+    self.assertGreater(snr_i4_1p, 16.0)
+
+    # 2-pass int4 residual decomposition
+    passes_2p = multipass.residual_decompose(x, how_i4, n_passes=2)
+    recon_2p = qarray.dequantize(passes_2p[0]) + qarray.dequantize(passes_2p[1])
+    snr_2p = compute_snr_db(x, recon_2p)
+    self.assertGreater(snr_2p, 34.0)
+
+    # 3-pass int4 residual decomposition
+    passes_3p = multipass.residual_decompose(x, how_i4, n_passes=3)
+    recon_3p = (
+        qarray.dequantize(passes_3p[0])
+        + qarray.dequantize(passes_3p[1])
+        + qarray.dequantize(passes_3p[2])
+    )
+    snr_3p = compute_snr_db(x, recon_3p)
+    self.assertGreater(snr_3p, 50.0)
+
+    # Matrix multiplication: Asymmetric mxint4 x mxint8
+    lhs = jax.random.normal(k2, (64, 128), dtype=jnp.float32)
+    rhs = jax.random.normal(k3, (128, 64), dtype=jnp.float32)
+    true_dot = jax.lax.dot_general(lhs, rhs, (((1,), (0,)), ((), ())))
+
+    # 1-pass asymmetric mxint4 x mxint8
+    asym_dot_1p = multipass.asymmetric_mxint_dot(
+        lhs,
+        rhs,
+        (((1,), (0,)), ((), ())),
+        lhs_qtype='mxint4',
+        rhs_qtype='mxint8',
+    )
+    snr_asym_1p = compute_snr_db(true_dot, asym_dot_1p)
+    self.assertGreater(snr_asym_1p, 16.0)
+
+    # 2-pass asymmetric emulation: (2-pass int4) x mxint8
+    how_lhs_i4 = qarray.HowToQuantize(
+        qtype='mxint4', channelwise_axes=[0], tiled_axes={1: 32}
+    )
+    lhs_passes = multipass.residual_decompose(lhs, how_lhs_i4, n_passes=2)
+    asym_dot_2p = multipass.asymmetric_mxint_dot(
+        lhs_passes[0],
+        rhs,
+        (((1,), (0,)), ((), ())),
+        lhs_qtype='mxint4',
+        rhs_qtype='mxint8',
+    ) + multipass.asymmetric_mxint_dot(
+        lhs_passes[1],
+        rhs,
+        (((1,), (0,)), ((), ())),
+        lhs_qtype='mxint4',
+        rhs_qtype='mxint8',
+    )
+    snr_asym_2p = compute_snr_db(true_dot, asym_dot_2p)
+    self.assertGreater(snr_asym_2p, 33.0)
 
 
 if __name__ == '__main__':
