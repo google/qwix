@@ -673,6 +673,296 @@ class DotGeneralQtTest(parameterized.TestCase):
             ' 25 dB (indicates multi-axis contraction corruption)',
         )
 
+  def test_mxint8_sqnr(self):
+    """Verifies that mxint8 dot_general_qt achieves expected SQNR."""
+    key = jax.random.PRNGKey(42)
+    k1, k2, k3 = jax.random.split(key, 3)
+
+    lhs = jax.random.normal(k1, (2, 32, 64), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (64, 128), dtype=jnp.float32)
+    dout = jax.random.normal(k3, (2, 32, 128), dtype=jnp.float32)
+
+    dnums = (((2,), (0,)), ((), ()))
+    ref_fwd = jax.lax.dot_general(lhs, rhs, dnums)
+
+    def ref_loss(l, r):
+      return jnp.sum(jax.lax.dot_general(l, r, dnums) * dout)
+
+    ref_grad_lhs, ref_grad_rhs = jax.grad(ref_loss, argnums=(0, 1))(lhs, rhs)
+
+    config = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='mxint8',
+        rhs_qtype='mxint8',
+        dlhs_grad_qtype='mxint8',
+        drhs_grad_qtype='mxint8',
+        tile_size=32,
+        dlhs_tile_size=32,
+        drhs_tile_size=32,
+        use_original_residuals=False,
+    )
+    test_fwd = dot_general_qt.dot_general_qt(lhs, rhs, dnums, config=config)
+    fwd_sqnr = float(
+        metrax.SNR.from_model_output(
+            predictions=test_fwd, targets=ref_fwd
+        ).compute()
+    )
+    self.assertGreater(
+        fwd_sqnr,
+        30.0,
+        f'mxint8 forward pass SQNR {fwd_sqnr:.2f} dB is below 30 dB',
+    )
+
+    def quant_loss(l, r):
+      return jnp.sum(
+          dot_general_qt.dot_general_qt(l, r, dnums, config=config) * dout
+      )
+
+    grad_lhs, grad_rhs = jax.grad(quant_loss, argnums=(0, 1))(lhs, rhs)
+
+    dlhs_sqnr = float(
+        metrax.SNR.from_model_output(
+            predictions=grad_lhs, targets=ref_grad_lhs
+        ).compute()
+    )
+    drhs_sqnr = float(
+        metrax.SNR.from_model_output(
+            predictions=grad_rhs, targets=ref_grad_rhs
+        ).compute()
+    )
+
+    self.assertGreater(
+        dlhs_sqnr,
+        30.0,
+        f'mxint8 dlhs gradient SQNR {dlhs_sqnr:.2f} dB is below 30 dB',
+    )
+    self.assertGreater(
+        drhs_sqnr,
+        30.0,
+        f'mxint8 drhs weight gradient SQNR {drhs_sqnr:.2f} dB is below 30 dB',
+    )
+
+  def test_mxint4_sqnr(self):
+    """Verifies that mxint4 dot_general_qt achieves expected SQNR."""
+    key = jax.random.PRNGKey(42)
+    k1, k2, k3 = jax.random.split(key, 3)
+
+    lhs = jax.random.normal(k1, (2, 32, 64), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (64, 128), dtype=jnp.float32)
+    dout = jax.random.normal(k3, (2, 32, 128), dtype=jnp.float32)
+
+    dnums = (((2,), (0,)), ((), ()))
+    ref_fwd = jax.lax.dot_general(lhs, rhs, dnums)
+
+    def ref_loss(l, r):
+      return jnp.sum(jax.lax.dot_general(l, r, dnums) * dout)
+
+    ref_grad_lhs, ref_grad_rhs = jax.grad(ref_loss, argnums=(0, 1))(lhs, rhs)
+
+    config = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='mxint4',
+        rhs_qtype='mxint4',
+        dlhs_grad_qtype='mxint4',
+        drhs_grad_qtype='mxint4',
+        tile_size=32,
+        dlhs_tile_size=32,
+        drhs_tile_size=32,
+        use_original_residuals=False,
+    )
+    test_fwd = dot_general_qt.dot_general_qt(lhs, rhs, dnums, config=config)
+    fwd_sqnr = float(
+        metrax.SNR.from_model_output(
+            predictions=test_fwd, targets=ref_fwd
+        ).compute()
+    )
+    self.assertGreater(
+        fwd_sqnr,
+        12.0,
+        f'mxint4 forward pass SQNR {fwd_sqnr:.2f} dB is below 12 dB',
+    )
+
+    def quant_loss(l, r):
+      return jnp.sum(
+          dot_general_qt.dot_general_qt(l, r, dnums, config=config) * dout
+      )
+
+    grad_lhs, grad_rhs = jax.grad(quant_loss, argnums=(0, 1))(lhs, rhs)
+
+    dlhs_sqnr = float(
+        metrax.SNR.from_model_output(
+            predictions=grad_lhs, targets=ref_grad_lhs
+        ).compute()
+    )
+    drhs_sqnr = float(
+        metrax.SNR.from_model_output(
+            predictions=grad_rhs, targets=ref_grad_rhs
+        ).compute()
+    )
+
+    self.assertGreater(
+        dlhs_sqnr,
+        12.0,
+        f'mxint4 dlhs gradient SQNR {dlhs_sqnr:.2f} dB is below 12 dB',
+    )
+    self.assertGreater(
+        drhs_sqnr,
+        12.0,
+        f'mxint4 drhs weight gradient SQNR {drhs_sqnr:.2f} dB is below 12 dB',
+    )
+
+  def test_dot_general_qt_scale_method(self):
+    """Verifies that lhs/rhs scale_method work in DotGeneralQtConfig for floats."""
+    lhs = jnp.ones((4, 32), dtype=jnp.float32)
+    rhs = jnp.ones((32, 4), dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+
+    config_ceil = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='mxfp4',
+        rhs_qtype='mxfp8',
+        tile_size=32,
+        lhs_scale_method='ceil',
+        rhs_scale_method='ceil',
+    )
+    res_ceil = dot_general_qt.dot_general_qt(lhs, rhs, dnums, config_ceil)
+    self.assertEqual(res_ceil.shape, (4, 4))
+
+    config_oas = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='mxfp4',
+        rhs_qtype='mxfp8',
+        tile_size=32,
+        lhs_scale_method='oas',
+        rhs_scale_method='oas',
+    )
+    res_oas = dot_general_qt.dot_general_qt(lhs, rhs, dnums, config_oas)
+    self.assertEqual(res_oas.shape, (4, 4))
+
+  def test_dot_general_qt_hierarchical_scaling_config(self):
+    """Verifies granular hierarchical scaling configuration cascading and overrides."""
+    config_default = dot_general_qt.DotGeneralQtConfig()
+    self.assertFalse(config_default.get_lhs_hierarchical_scaling())
+    self.assertFalse(config_default.get_rhs_hierarchical_scaling())
+    self.assertFalse(config_default.get_dlhs_grad_hierarchical_scaling())
+    self.assertFalse(config_default.get_dlhs_residual_hierarchical_scaling())
+    self.assertFalse(config_default.get_drhs_grad_hierarchical_scaling())
+    self.assertFalse(config_default.get_drhs_residual_hierarchical_scaling())
+
+    config_all = dot_general_qt.DotGeneralQtConfig(hierarchical_scaling=True)
+    self.assertTrue(config_all.get_lhs_hierarchical_scaling())
+    self.assertTrue(config_all.get_rhs_hierarchical_scaling())
+    self.assertTrue(config_all.get_dlhs_grad_hierarchical_scaling())
+    self.assertTrue(config_all.get_dlhs_residual_hierarchical_scaling())
+    self.assertTrue(config_all.get_drhs_grad_hierarchical_scaling())
+    self.assertTrue(config_all.get_drhs_residual_hierarchical_scaling())
+
+    # Granular overrides
+    config_weight_grad_only = dot_general_qt.DotGeneralQtConfig(
+        hierarchical_scaling=False,
+        drhs_grad_hierarchical_scaling=True,
+    )
+    self.assertFalse(config_weight_grad_only.get_lhs_hierarchical_scaling())
+    self.assertFalse(config_weight_grad_only.get_rhs_hierarchical_scaling())
+    self.assertFalse(
+        config_weight_grad_only.get_dlhs_grad_hierarchical_scaling()
+    )
+    self.assertFalse(
+        config_weight_grad_only.get_dlhs_residual_hierarchical_scaling()
+    )
+    self.assertTrue(
+        config_weight_grad_only.get_drhs_grad_hierarchical_scaling()
+    )
+    self.assertFalse(
+        config_weight_grad_only.get_drhs_residual_hierarchical_scaling()
+    )
+
+  def test_dot_general_qt_hierarchical_scaling_fwd(self):
+    """Verifies forward dot_general_qt with hierarchical scaling on microscaled formats."""
+    lhs = jnp.ones((4, 32), dtype=jnp.float32)
+    rhs = jnp.ones((32, 4), dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+
+    config = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='mxfp8_16',
+        rhs_qtype='mxfp8_16',
+        tile_size=16,
+        hierarchical_scaling=True,
+    )
+    res = dot_general_qt.dot_general_qt(lhs, rhs, dnums, config)
+    self.assertEqual(res.shape, (4, 4))
+    self.assertTrue(jnp.all(jnp.isfinite(res)))
+
+  def test_dot_general_qt_drhs_grad_hierarchical_scaling_bwd(self):
+    """Verifies backward pass specifically for weight gradients with hierarchical scaling."""
+    key = jax.random.key(42)
+    k1, k2 = jax.random.split(key)
+    lhs = jax.random.normal(k1, (16, 32), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (32, 16), dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+
+    config = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='mxfp8_16',
+        rhs_qtype='mxfp8_16',
+        tile_size=16,
+        drhs_grad_qtype='mxfp8_16',
+        drhs_tile_size=16,
+        drhs_grad_hierarchical_scaling=True,
+    )
+
+    def loss_fn(w):
+      out = dot_general_qt.dot_general_qt(lhs, w, dnums, config)
+      return jnp.sum(out**2)
+
+    grad_w = jax.grad(loss_fn)(rhs)
+    self.assertEqual(grad_w.shape, rhs.shape)
+    self.assertTrue(jnp.all(jnp.isfinite(grad_w)))
+    self.assertGreater(float(jnp.linalg.norm(grad_w)), 0.0)
+
+  def test_dot_general_qt_hierarchical_scaling_noop_non_microscaled(self):
+    """Verifies that hierarchical scaling is a no-op for standard non-microscaled types."""
+    lhs = jnp.ones((4, 8), dtype=jnp.float32)
+    rhs = jnp.ones((8, 4), dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+
+    config_std = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='int8',
+        rhs_qtype='int8',
+        hierarchical_scaling=False,
+    )
+    config_hier = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='int8',
+        rhs_qtype='int8',
+        hierarchical_scaling=True,
+    )
+
+    res_std = dot_general_qt.dot_general_qt(lhs, rhs, dnums, config_std)
+    res_hier = dot_general_qt.dot_general_qt(lhs, rhs, dnums, config_hier)
+    self.assertTrue(jnp.array_equal(res_std, res_hier))
+
+  def test_dot_general_qt_hierarchical_scaling_jit(self):
+    """Verifies JIT and grad compatibility with hierarchical scaling."""
+    lhs = jnp.ones((16, 32), dtype=jnp.float32)
+    rhs = jnp.ones((32, 16), dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+
+    config = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='mxfp8_16',
+        rhs_qtype='mxfp8_16',
+        tile_size=16,
+        drhs_grad_qtype='mxfp8_16',
+        drhs_tile_size=16,
+        drhs_grad_hierarchical_scaling=True,
+    )
+
+    @jax.jit
+    def jitted_loss(x, w):
+      out = dot_general_qt.dot_general_qt(x, w, dnums, config)
+      return jnp.sum(out)
+
+    grad_fn = jax.jit(jax.grad(jitted_loss, argnums=(0, 1)))
+    gx, gw = grad_fn(lhs, rhs)
+    self.assertEqual(gx.shape, lhs.shape)
+    self.assertEqual(gw.shape, rhs.shape)
+    self.assertTrue(jnp.all(jnp.isfinite(gx)))
+    self.assertTrue(jnp.all(jnp.isfinite(gw)))
+
 
 if __name__ == '__main__':
   absltest.main()
