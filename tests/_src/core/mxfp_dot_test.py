@@ -334,6 +334,45 @@ class MxfpDotTest(absltest.TestCase):
     )
     self.assertIsNotNone(res)
 
+  def test_mxfp_dot_general_emits_scaled_dot_composite(self):
+    lhs = qarray.QArray(
+        qvalue=jnp.ones((2, 32), jnp.float8_e4m3fn),
+        scale=jnp.ones((2, 1)),
+        qtype="mxfp8",
+    )
+    rhs = qarray.QArray(
+        qvalue=jnp.ones((2, 32), jnp.float8_e4m3fn),
+        scale=jnp.ones((2, 1)),
+        qtype="mxfp8",
+    )
+
+    lowered = jax.jit(
+        functools.partial(
+            mxfp_dot.mxfp_dot_general,
+            dimension_numbers=(((1,), (1,)), ((), ())),
+        )
+    ).lower(lhs, rhs)
+    self.assertIn("xla.scaled_dot", lowered.as_text())
+
+  def test_unsupported_subchannel_ratio_fallback(self):
+    # jax.lax.scaled_dot requires the contracting dim to be at least twice the
+    # scale's contracting dim, which a per-element scale doesn't satisfy.
+    lhs = qarray.QArray(
+        qvalue=jnp.ones((2, 32), jnp.float8_e4m3fn),
+        scale=jnp.ones((2, 32)),
+        qtype="mxfp8",
+    )
+    rhs = qarray.QArray(
+        qvalue=jnp.ones((2, 32), jnp.float8_e4m3fn),
+        scale=jnp.ones((2, 32)),
+        qtype="mxfp8",
+    )
+
+    res = mxfp_dot.mxfp_dot_general(
+        lhs, rhs, dimension_numbers=(((1,), (1,)), ((), ()))
+    )
+    self.assertIsNone(res)
+
   def test_one_side_mxfp_fallback(self):
     lhs = qarray.QArray(
         qvalue=jnp.ones((2, 32), jnp.float8_e4m3fn),

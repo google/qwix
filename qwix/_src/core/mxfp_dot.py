@@ -21,19 +21,26 @@ from jax import numpy as jnp
 from qwix._src.core import qarray
 
 
+# Dimension numbers of the 3D form produced by _flatten_to_3d, i.e.
+# (B, M, K) x (B, N, K) -> (B, M, N).
+_DIMENSION_NUMBERS_3D = (((2,), (2,)), ((0,), (0,)))
+
+
 def mxfp_dot_general(
     lhs: qarray.MaybeQArray,
     rhs: qarray.MaybeQArray,
     dimension_numbers: jax.lax.DotDimensionNumbers,
     preferred_element_type: jax.typing.DTypeLike | None = None,
 ) -> jax.Array | None:
-  """Handles MXFP dot_general using `jax.nn.scaled_matmul`.
+  """Handles MXFP dot_general using `jax.lax.scaled_dot`.
 
   This dispatcher attempts to accelerate or decompose OCP/NVIDIA microscaled
-  matmuls using `jax.nn.scaled_matmul` (hardware Tensor Cores on Blackwell, or
-  JAX emulation/decomposition on TPUs, CPUs, and legacy GPUs).
+  matmuls using `jax.lax.scaled_dot`, which emits an `xla.scaled_dot` composite.
+  Today only the XLA GPU backend rewrites that composite into a native
+  block-scaled dot; every other backend decomposes it into a regular
+  dot_general.
 
-  Note that `scaled_matmul` is supported when BOTH operands are microscaled
+  Note that `scaled_dot` is supported when BOTH operands are microscaled
   formats (MXFP8, MXFP4, or NVFP4) with matching batch and contracting scale
   dimensions. One-sided microscaled operations or mismatched scale dimensions
   will cleanly return `None` to fall back to standard float emulation.
@@ -61,16 +68,16 @@ def mxfp_dot_general(
       lhs, rhs, preferred_element_type=preferred_element_type
   )
 
-  # TODO(b/538686860): Migrate to new API once it's available.
-  # jax.nn.scaled_matmul is natively accelerated on Blackwell GPUs (via cuDNN
-  # scaled matmul kernels) and emulated/decomposed on TPUs, CPUs, and legacy
-  # GPUs (like H100).
+  # TODO(b/538686860): Only the XLA GPU backend rewrites the `xla.scaled_dot`
+  # composite into a native block-scaled dot. Revisit once TPUs with native
+  # MXFP MXUs lower it natively too.
   try:
-    out_3d = jax.nn.scaled_matmul(
+    out_3d = jax.lax.scaled_dot(
         lhs_val_3d,
         rhs_val_3d,
-        lhs_scale_3d,
-        rhs_scale_3d,
+        lhs_scale=lhs_scale_3d,
+        rhs_scale=rhs_scale_3d,
+        dimension_numbers=_DIMENSION_NUMBERS_3D,
         preferred_element_type=result_type,
     )
   except Exception:  # pylint: disable=broad-except
@@ -95,13 +102,36 @@ def _inputs_compatible(
     lhs_scale_3d: jax.Array,
     rhs_scale_3d: jax.Array,
 ) -> bool:
-  """Checks 3D value and scale tensors are compatible for scaled_matmul."""
+  """Checks 3D value and scale tensors are compatible for scaled_dot."""
   return (
       lhs_val_3d.shape[0] == rhs_val_3d.shape[0]
       and lhs_val_3d.shape[2] == rhs_val_3d.shape[2]
       and lhs_scale_3d.shape[0] == rhs_scale_3d.shape[0]
       and lhs_scale_3d.shape[2] == rhs_scale_3d.shape[2]
+      and _subchannel_supported(lhs_val_3d, lhs_scale_3d)
+      and _subchannel_supported(rhs_val_3d, rhs_scale_3d)
   )
+
+
+def _subchannel_supported(val_3d: jax.Array, scale_3d: jax.Array) -> bool:
+  """Checks scaled_dot's subchannel constraints on the contracting dim.
+
+  `jax.lax.scaled_dot` requires the contracting dim to be a multiple of, and at
+  least twice as large as, the scale's contracting dim. Degenerate contractions
+  (e.g. outer products, which flatten to a contracting size of 1) don't qualify.
+
+  Args:
+    val_3d: The 3D value tensor.
+    scale_3d: The 3D scale tensor.
+
+  Returns:
+    Whether the contracting dim satisfies scaled_dot's subchannel constraints.
+  """
+  contracting_size = val_3d.shape[2]
+  scale_size = scale_3d.shape[2]
+  if contracting_size % scale_size != 0:
+    return False
+  return contracting_size // scale_size >= 2
 
 
 def _flatten_to_3d(
@@ -109,7 +139,7 @@ def _flatten_to_3d(
     ca: Sequence[int],
     ba: Sequence[int],
 ) -> tuple[jax.Array, jax.Array]:
-  """Flattens a QArray operand and its scale to 3D for scaled_matmul."""
+  """Flattens a QArray operand and its scale to 3D for scaled_dot."""
   val = operand.qvalue
   scale = operand.scale
   ndim = operand.ndim
@@ -145,7 +175,7 @@ def _unflatten_from_3d(
     rhs: qarray.QArray,
     dimension_numbers: jax.lax.DotDimensionNumbers,
 ) -> jax.Array:
-  """Reshapes the 3D scaled_matmul output back to the expected target shape."""
+  """Reshapes the 3D scaled_dot output back to the expected target shape."""
   (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dimension_numbers
   batch_shape = [lhs.shape[i] for i in lhs_ba]
   lhs_free_shape = [
