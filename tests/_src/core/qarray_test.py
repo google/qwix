@@ -695,6 +695,26 @@ class QArrayTest(parameterized.TestCase):
         sqnr, 15.0, f'mxint4 SQNR {sqnr:.2f} dB is below expected 15 dB'
     )
 
+  def test_quantize_with_compute_dtype(self):
+    array = jax.random.normal(jax.random.key(0), (4, 16), jnp.float32)
+    how = qarray.HowToQuantize(
+        qtype=jnp.int4,
+        compute_dtype=jnp.float8_e4m3fn,
+    )
+    qa = qarray.quantize(array, how)
+    self.assertEqual(qa.qtype, jnp.int4)
+    self.assertEqual(qa.qvalue.dtype, jnp.float8_e4m3fn)
+    dequant = qarray.dequantize(qa)
+    self.assertEqual(dequant.dtype, jnp.float32)
+
+    qa_api = qarray.quantize_api(
+        array,
+        qtype=jnp.int4,
+        compute_dtype=jnp.float8_e4m3fn,
+    )
+    self.assertEqual(qa_api.qtype, jnp.int4)
+    self.assertEqual(qa_api.qvalue.dtype, jnp.float8_e4m3fn)
+
 
 if __name__ == '__main__':
   absltest.main()
