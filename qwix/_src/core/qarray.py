@@ -285,6 +285,10 @@ class HowToQuantize:
   # E.g. jnp.int8, jnp.int4, jnp.float8_*, nf4, etc.
   # Actual qvalue dtype is determined by the quantization method.
   qtype: jax.typing.DTypeLike
+  # The physical compute/storage dtype for the qvalue.
+  # When specified, the quantized qvalue is cast to this dtype
+  # (e.g. jnp.float8_e4m3fn).
+  compute_dtype: jax.typing.DTypeLike | None = None
   # Channelwise axes will have individual scales, which has the same effect
   # as setting their tile sizes to 1 in tiled_axes.
   channelwise_axes: Collection[int] = ()
@@ -619,6 +623,7 @@ def quantize_with_scale_zero_point(
     scale: jax.Array,
     zero_point: jax.Array | None,
     noise_fn: numerics.NoiseFn | None = None,
+    compute_dtype: jax.typing.DTypeLike | None = None,
 ) -> QArray:
   """Quantizes an array with the given scale and zero_point.
 
@@ -629,6 +634,7 @@ def quantize_with_scale_zero_point(
     zero_point: The zero_point to use.
     noise_fn: The noise function to add to the quantized array for stochastic
       rounding.
+    compute_dtype: The physical compute/storage dtype for the qvalue.
 
   Returns:
     The quantized array.
@@ -654,6 +660,10 @@ def quantize_with_scale_zero_point(
         jnp.add, qvalue, zero_point.astype(qvalue.dtype)
     )
   qvalue = numerics.convert_to(qvalue, qtype, noise_fn)
+  if compute_dtype is not None:
+    qvalue = qvalue.astype(compute_dtype)
+    if zero_point is not None:
+      zero_point = zero_point.astype(compute_dtype)
   return QArray(qvalue, scale, zero_point, qtype)
 
 
@@ -662,7 +672,12 @@ def quantize(array: jax.Array, how: HowToQuantize) -> QArray:
   calibration = calibrate(array, how)
   scale, zero_point = compute_scale_zero_point(calibration, how.qtype)
   return quantize_with_scale_zero_point(
-      array, how.qtype, scale, zero_point, how.noise_fn
+      array,
+      how.qtype,
+      scale,
+      zero_point,
+      how.noise_fn,
+      compute_dtype=how.compute_dtype,
   )
 
 
@@ -670,6 +685,7 @@ def quantize_api(
     array: jax.Array,
     qtype: jax.typing.DTypeLike,
     *,
+    compute_dtype: jax.typing.DTypeLike | None = None,
     channelwise_axes: Collection[int] = (),
     tiled_axes: Mapping[int, int | float] | None = None,
     calibration_method: str = 'absmax',
@@ -683,6 +699,7 @@ def quantize_api(
     array: The array to quantize.
     qtype: The logical type of the quantized value, e.g. jnp.int8, jnp.int4,
       jnp.float8_e4m3fn, "nf4", etc.
+    compute_dtype: The physical compute/storage dtype for the qvalue.
     channelwise_axes: Channelwise axes have individual scales. This has the same
       effect as setting their tile sizes to 1 in tiled_axes.
     tiled_axes: Tiled axes have blockwise scales, aka subchannel quantization.
@@ -701,6 +718,7 @@ def quantize_api(
   # A stable API for qarray.quantize()
   how = HowToQuantize(
       qtype=qtype,
+      compute_dtype=compute_dtype,
       channelwise_axes=channelwise_axes,
       tiled_axes=tiled_axes or {},
       calibration_method=calibration_method,
