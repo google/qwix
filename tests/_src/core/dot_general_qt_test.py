@@ -16,6 +16,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 from jax import numpy as jnp
+import metrax
 from qwix._src.core import dot_general
 from qwix._src.core import dot_general_qt
 from qwix._src.core import qarray
@@ -605,12 +606,6 @@ class DotGeneralQtTest(parameterized.TestCase):
     lhs = jax.random.normal(k1, (2, 32, 64), dtype=jnp.float32)
     rhs = jax.random.normal(k2, (64, 128), dtype=jnp.float32)
     dout = jax.random.normal(k3, (2, 32, 128), dtype=jnp.float32)
-
-    def sqnr(ref, test):
-      signal_power = jnp.mean(jnp.square(ref))
-      noise_power = jnp.mean(jnp.square(ref - test))
-      return float(10.0 * jnp.log10(signal_power / noise_power))
-
     dnums = (((2,), (0,)), ((), ()))
     ref_fwd = jax.lax.dot_general(lhs, rhs, dnums)
 
@@ -632,7 +627,11 @@ class DotGeneralQtTest(parameterized.TestCase):
             use_original_residuals=False,
         )
         test_fwd = dot_general_qt.dot_general_qt(lhs, rhs, dnums, config=config)
-        fwd_sqnr = sqnr(ref_fwd, test_fwd)
+        fwd_sqnr = float(
+            metrax.SNR.from_model_output(
+                predictions=test_fwd, targets=ref_fwd
+            ).compute()
+        )
         self.assertGreater(
             fwd_sqnr,
             25.0,
@@ -651,8 +650,16 @@ class DotGeneralQtTest(parameterized.TestCase):
             lhs, rhs
         )
 
-        dlhs_sqnr = sqnr(ref_grad_lhs, grad_lhs)
-        drhs_sqnr = sqnr(ref_grad_rhs, grad_rhs)
+        dlhs_sqnr = float(
+            metrax.SNR.from_model_output(
+                predictions=grad_lhs, targets=ref_grad_lhs
+            ).compute()
+        )
+        drhs_sqnr = float(
+            metrax.SNR.from_model_output(
+                predictions=grad_rhs, targets=ref_grad_rhs
+            ).compute()
+        )
 
         self.assertGreater(
             dlhs_sqnr,
