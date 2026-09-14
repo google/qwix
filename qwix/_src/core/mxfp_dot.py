@@ -38,6 +38,10 @@ def mxfp_dot_general(
   dimensions. One-sided microscaled operations or mismatched scale dimensions
   will cleanly return `None` to fall back to standard float emulation.
 
+  Note: scaled_matmul hardware acceleration is currently restricted to
+  single-axis contraction (len(ca) == 1). For multi-axis contractions use
+  reference emulation for numerical precision.
+
   Args:
     lhs: Left hand side operand.
     rhs: Right hand side operand.
@@ -51,6 +55,24 @@ def mxfp_dot_general(
     return None
 
   (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dimension_numbers
+
+  # jax.nn.scaled_matmul (and underlying hardware like NVIDIA Blackwell Tensor
+  # Cores) natively operates on a single contiguous 1D reduction axis (K).
+  # Attempting to flatten multiple contracting dimensions (such as batch and
+  # sequence axes in backward pass weight gradient computations g^T y) into 1D
+  # causes tile-scale boundary misalignment:
+  # 1) If the inner contracting axis is not a multiple of the tile size, 1D
+  #    blocks straddle across outer dimension boundaries, grouping elements
+  #    from different slices under a single scale factor.
+  # 2) If scale factors are shared/broadcast along an outer contracting axis
+  #    (e.g., the batch axis in Qwix's backward pass), 1D flattening distorts
+  #    the inferred block size (to B * T) and stride-shifts scales across
+  #    slices, corrupting gradients (e.g., ~13 dB SQNR vs > 25 dB).
+  # We therefore fall back to Qwix's reference microscaled dot_general
+  # emulation for multi-axis contractions, preserving exact numerical accuracy.
+  if len(lhs_ca) > 1 or len(rhs_ca) > 1:
+    return None
+
   lhs_val_3d, lhs_scale_3d = _flatten_to_3d(lhs, lhs_ca, lhs_ba)
   rhs_val_3d, rhs_scale_3d = _flatten_to_3d(rhs, rhs_ca, rhs_ba)
 
@@ -96,12 +118,31 @@ def _inputs_compatible(
     rhs_scale_3d: jax.Array,
 ) -> bool:
   """Checks 3D value and scale tensors are compatible for scaled_matmul."""
-  return (
+  # Batch dimensions (dim 0), contracting dimensions (dim 2), and scale block
+  # counts along the contracting dimension must align between LHS and RHS.
+  # Note that free/output dimensions (dim 1) do not need to match.
+  if not (
       lhs_val_3d.shape[0] == rhs_val_3d.shape[0]
       and lhs_val_3d.shape[2] == rhs_val_3d.shape[2]
       and lhs_scale_3d.shape[0] == rhs_scale_3d.shape[0]
       and lhs_scale_3d.shape[2] == rhs_scale_3d.shape[2]
-  )
+  ):
+    return False
+
+  # Contracting dimension K must be an exact multiple of scale count K_scale so
+  # elements are partitioned into uniform, integer-sized blocks.
+  k = lhs_val_3d.shape[2]
+  k_scale = lhs_scale_3d.shape[2]
+  if k_scale <= 0 or k % k_scale != 0:
+    return False
+
+  # Hardware Tensor Cores (e.g. NVIDIA Blackwell via cuDNN) and microscaling
+  # standards (OCP MXFP8, MXFP4, MXINT8, NVFP4) strictly require block sizes
+  # of 32 or 16 along the reduction dimension. Outer products (k == 1) trivially
+  # form blocks of size 1. Incompatible tile sizes (e.g. 8, 24, 64) fall back
+  # to Qwix's reference software emulation.
+  block_size = k // k_scale
+  return block_size in (16, 32) or (k == 1 and block_size == 1)
 
 
 def _flatten_to_3d(

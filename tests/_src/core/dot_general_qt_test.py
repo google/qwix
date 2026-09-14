@@ -589,6 +589,83 @@ class DotGeneralQtTest(parameterized.TestCase):
     self.assertIsNotNone(res[0])
     self.assertIsNotNone(res[1])
 
+  def test_mxfp8_sqnr(self):
+    """Verifies that mxfp8 and mxfp8_16 dot_general_qt achieve expected SQNR.
+
+    Tests both forward pass matmul (1 contracting dimension) and backward pass
+    weight gradient computation (multi-axis contraction over batch and
+    sequence).
+    Before fixing the multi-axis contraction fallback in mxfp_dot_general,
+    flattening batch and sequence axes resulted in corrupted weight gradients
+    (~13 dB SQNR). With proper fallback, SQNR exceeds 25 dB.
+    """
+    key = jax.random.PRNGKey(42)
+    k1, k2, k3 = jax.random.split(key, 3)
+
+    lhs = jax.random.normal(k1, (2, 32, 64), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (64, 128), dtype=jnp.float32)
+    dout = jax.random.normal(k3, (2, 32, 128), dtype=jnp.float32)
+
+    def sqnr(ref, test):
+      signal_power = jnp.mean(jnp.square(ref))
+      noise_power = jnp.mean(jnp.square(ref - test))
+      return float(10.0 * jnp.log10(signal_power / noise_power))
+
+    dnums = (((2,), (0,)), ((), ()))
+    ref_fwd = jax.lax.dot_general(lhs, rhs, dnums)
+
+    def ref_loss(l, r):
+      return jnp.sum(jax.lax.dot_general(l, r, dnums) * dout)
+
+    ref_grad_lhs, ref_grad_rhs = jax.grad(ref_loss, argnums=(0, 1))(lhs, rhs)
+
+    for qtype, tile_size in [('mxfp8', 32), ('mxfp8_16', 16)]:
+      with self.subTest(qtype=qtype):
+        config = dot_general_qt.DotGeneralQtConfig(
+            lhs_qtype=qtype,
+            rhs_qtype=qtype,
+            dlhs_grad_qtype=qtype,
+            drhs_grad_qtype=qtype,
+            tile_size=tile_size,
+            dlhs_tile_size=tile_size,
+            drhs_tile_size=tile_size,
+            use_original_residuals=False,
+        )
+        test_fwd = dot_general_qt.dot_general_qt(lhs, rhs, dnums, config=config)
+        fwd_sqnr = sqnr(ref_fwd, test_fwd)
+        self.assertGreater(
+            fwd_sqnr,
+            25.0,
+            f'{qtype} forward pass SQNR {fwd_sqnr:.2f} dB is below 25 dB',
+        )
+
+        def make_quant_loss(cfg):
+          def quant_loss(l, r):
+            return jnp.sum(
+                dot_general_qt.dot_general_qt(l, r, dnums, config=cfg) * dout
+            )
+
+          return quant_loss
+
+        grad_lhs, grad_rhs = jax.grad(make_quant_loss(config), argnums=(0, 1))(
+            lhs, rhs
+        )
+
+        dlhs_sqnr = sqnr(ref_grad_lhs, grad_lhs)
+        drhs_sqnr = sqnr(ref_grad_rhs, grad_rhs)
+
+        self.assertGreater(
+            dlhs_sqnr,
+            25.0,
+            f'{qtype} dlhs gradient SQNR {dlhs_sqnr:.2f} dB is below 25 dB',
+        )
+        self.assertGreater(
+            drhs_sqnr,
+            25.0,
+            f'{qtype} drhs weight gradient SQNR {drhs_sqnr:.2f} dB is below'
+            ' 25 dB (indicates multi-axis contraction corruption)',
+        )
+
 
 if __name__ == '__main__':
   absltest.main()

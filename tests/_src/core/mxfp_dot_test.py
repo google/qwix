@@ -347,6 +347,40 @@ class MxfpDotTest(absltest.TestCase):
     )
     self.assertIsNone(res)
 
+  def test_multi_contracting_axes_fallback(self):
+    lhs = qarray.QArray(
+        qvalue=jnp.ones((2, 4, 32), jnp.float8_e4m3fn),
+        scale=jnp.ones((2, 4, 1)),
+        qtype="mxfp8",
+    )
+    rhs = qarray.QArray(
+        qvalue=jnp.ones((2, 4, 32), jnp.float8_e4m3fn),
+        scale=jnp.ones((2, 4, 1)),
+        qtype="mxfp8",
+    )
+    # Multi-axis contraction (e.g. (0, 1) contracting axes in backward pass)
+    res = mxfp_dot.mxfp_dot_general(
+        lhs, rhs, dimension_numbers=(((0, 1), (0, 1)), ((), ()))
+    )
+    self.assertIsNone(res)
+
+  def test_incompatible_tile_size_fallback(self):
+    # Tile size 8 (not 16 or 32)
+    lhs = qarray.QArray(
+        qvalue=jnp.ones((2, 32), jnp.float8_e4m3fn),
+        scale=jnp.ones((2, 4)),
+        qtype="mxfp8",
+    )
+    rhs = qarray.QArray(
+        qvalue=jnp.ones((2, 32), jnp.float8_e4m3fn),
+        scale=jnp.ones((2, 4)),
+        qtype="mxfp8",
+    )
+    res = mxfp_dot.mxfp_dot_general(
+        lhs, rhs, dimension_numbers=(((1,), (1,)), ((), ()))
+    )
+    self.assertIsNone(res)
+
 
 if __name__ == "__main__":
   absltest.main()
