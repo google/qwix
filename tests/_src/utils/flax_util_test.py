@@ -20,7 +20,7 @@ import jax
 from jax import numpy as jnp
 from jax.nn import initializers
 import numpy as np
-from qwix._src.providers import ptq
+from qwix._src.providers import boxed_param
 from qwix._src.utils import flax_util
 
 
@@ -298,7 +298,7 @@ class FlaxUtilTest(parameterized.TestCase):
         t.assertEqual(flax_util.find_param(w), "w")
         t.assertEqual(flax_util.find_param(w.astype(jnp.bfloat16)), "w")
         t.assertEqual(flax_util.find_param(w.reshape((2, 2, 5))), "w")
-        t.assertEqual(flax_util.find_param(ptq.WithAux(w, None)), "w")
+        t.assertEqual(flax_util.find_param(boxed_param.WithAux(w, None)), "w")
 
     model = MyModule()
     variables = jax.jit(model.init)(jax.random.key(0))
@@ -320,7 +320,7 @@ class FlaxUtilTest(parameterized.TestCase):
         t.assertEqual(flax_util.find_param(self.w.astype(jnp.bfloat16)), "w")
         t.assertEqual(flax_util.find_param(self.w.reshape((2, 2, 5))), "w")
         t.assertEqual(
-            flax_util.find_param(ptq.WithAux(self.w.value, None)), "w"
+            flax_util.find_param(boxed_param.WithAux(self.w.value, None)), "w"
         )
 
     nnx.jit(MyModule())()

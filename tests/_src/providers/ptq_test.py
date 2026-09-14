@@ -24,6 +24,7 @@ from jax import numpy as jnp
 from jax.experimental import pallas as pl
 from qwix._src import model as qwix_model
 from qwix._src import qconfig
+from qwix._src.providers import boxed_param
 from qwix._src.providers import ptq
 from qwix._src.providers import qt
 from qwix._src.utils import flax_util
@@ -55,7 +56,7 @@ class PtqTest(parameterized.TestCase):
     qw = ptq_abs_params["kernel"]
 
     # Test PTQ param structure.
-    self.assertIsInstance(qw, ptq.WithAux)
+    self.assertIsInstance(qw, boxed_param.WithAux)
     qw = qw.array
     self.assertIsInstance(qw.qvalue, nn.Partitioned)
     self.assertIsInstance(qw.scale, nn.Partitioned)
@@ -124,7 +125,9 @@ class PtqTest(parameterized.TestCase):
         ptq_dense.init, jax.random.key(0), model_input
     )["params"]
     self.assertIn("dot_general0_lhs_scale", ptq_abs_params)
-    self.assertIsInstance(ptq_abs_params["dot_general0_lhs_scale"], ptq.WithAux)
+    self.assertIsInstance(
+        ptq_abs_params["dot_general0_lhs_scale"], boxed_param.WithAux
+    )
     self.assertEqual(
         ptq_abs_params["dot_general0_lhs_scale"].array.shape, (1, 1)
     )
@@ -174,7 +177,7 @@ class PtqTest(parameterized.TestCase):
       )
     # Test PTQ param structure.
     qw = ptq_linear.kernel
-    self.assertIsInstance(qw, ptq.WithAux)
+    self.assertIsInstance(qw, boxed_param.WithAux)
     qw = qw.array
     self.assertEqual(qw.qvalue.dtype, jnp.int8)
     self.assertEqual(qw.qvalue.shape, (12, 6))
@@ -265,7 +268,7 @@ class PtqTest(parameterized.TestCase):
 
     # Test PTQ param structure.
     qw = ptq_einsum.kernel
-    self.assertIsInstance(qw, ptq.WithAux)
+    self.assertIsInstance(qw, boxed_param.WithAux)
     qw = qw.array
     self.assertEqual(qw.qvalue.dtype, jnp.int8)
     self.assertEqual(qw.qvalue.shape, (16, 8, 10))
@@ -343,7 +346,9 @@ class PtqTest(parameterized.TestCase):
     ptq_linear = qwix_model.quantize_model(
         qt_linear, ptq.PtqProvider(q_rules), model_input
     )
-    self.assertIsInstance(ptq_linear.dot_general0_lhs_scale, ptq.WithAux)
+    self.assertIsInstance(
+        ptq_linear.dot_general0_lhs_scale, boxed_param.WithAux
+    )
     self.assertEqual(ptq_linear.dot_general0_lhs_scale.array.shape, (1, 1))
     if act_calibration_method == "minmax":
       self.assertEqual(ptq_linear.dot_general0_lhs_zero_point.shape, (1, 1))
@@ -401,7 +406,7 @@ class PtqTest(parameterized.TestCase):
     ]
     ptq_model = qwix_model.quantize_model(model, ptq.PtqProvider(q_rules))
     variables = ptq_model.init(jax.random.key(0), jnp.ones((16, 32)))
-    self.assertIsInstance(variables["params"]["w1"], ptq.WithAux)
+    self.assertIsInstance(variables["params"]["w1"], boxed_param.WithAux)
     self.assertIsInstance(variables["params"]["w2"], jax.Array)
     ptq_model.apply(variables, jnp.ones((16, 32)))
 
@@ -452,7 +457,7 @@ class PtqTest(parameterized.TestCase):
     ptq_model = qwix_model.quantize_model(
         model, ptq.PtqProvider(q_rules), model_input
     )
-    self.assertIsInstance(ptq_model.layers.kernel, ptq.WithAux)
+    self.assertIsInstance(ptq_model.layers.kernel, boxed_param.WithAux)
     self.assertIsInstance(ptq_model.layers.kernel.array, ptq.qarray.QArray)
     self.assertEqual(ptq_model.layers.kernel.array.shape, (2, 12, 12))
     self.assertEqual(ptq_model.layers.kernel.array.qtype, jnp.int8)
@@ -489,7 +494,7 @@ class PtqTest(parameterized.TestCase):
     )
     variables["params"] = ptq_params
 
-    self.assertIsInstance(variables["params"]["w"], ptq.WithAux)
+    self.assertIsInstance(variables["params"]["w"], boxed_param.WithAux)
     self.assertEqual(variables["params"]["w"].array.shape, (4, 5))
 
     # Test can apply.
@@ -561,7 +566,7 @@ class PtqTest(parameterized.TestCase):
     model = self._get_quantized_asarray_model()
 
     # Case 1: WithAux
-    wa = ptq.WithAux(
+    wa = boxed_param.WithAux(
         jnp.ones((2, 2)),
         qconfig.QuantizationRule(weight_qtype=jnp.int8).weight_qtype,
     )
@@ -569,18 +574,18 @@ class PtqTest(parameterized.TestCase):
     self.assertEqual(jax.tree.map(id, res_wa), jax.tree.map(id, wa))
 
     # Case 1.1: WithAux with non-array content
-    wa_list = ptq.WithAux(
+    wa_list = boxed_param.WithAux(
         [1.0, 2.0],
         qconfig.QuantizationRule(weight_qtype=jnp.int8).weight_qtype,
     )
     res_wa_list = model(wa_list)
     self.assertIsInstance(res_wa_list.array, jax.Array)
-    self.assertIsInstance(res_wa_list, ptq.WithAux)
+    self.assertIsInstance(res_wa_list, boxed_param.WithAux)
 
     # Case 1.2: WithAux with explicit dtype
     res_wa_f16 = model(wa, dtype=jnp.float16)
     self.assertEqual(res_wa_f16.dtype, jnp.float16)
-    self.assertIsInstance(res_wa_f16, ptq.WithAux)
+    self.assertIsInstance(res_wa_f16, boxed_param.WithAux)
 
     # Case 1.3: Grouped properties (shape, ndim, dtype)
     self.assertEqual(wa.shape, (2, 2))
@@ -588,7 +593,7 @@ class PtqTest(parameterized.TestCase):
     self.assertEqual(wa.dtype, jnp.float32)
 
     # Case 1.4: Metadata preservation in astype
-    wa_partitioned = ptq.WithAux(
+    wa_partitioned = boxed_param.WithAux(
         nn.Partitioned(jnp.ones((2, 2)), names=("a", "b")),
         qconfig.QuantizationRule(weight_qtype=jnp.int8).weight_qtype,
     )
@@ -654,23 +659,23 @@ class PtqTest(parameterized.TestCase):
     """asarray should handle WithAux wrapping a QArray."""
     model = self._get_quantized_asarray_model()
     qa = ptq.qarray.QArray(jnp.ones((2, 2), jnp.int8), jnp.ones((1, 1)))
-    wa = ptq.WithAux(
+    wa = boxed_param.WithAux(
         qa, qconfig.QuantizationRule(weight_qtype=jnp.int8).weight_qtype
     )
     res = model(wa)
-    self.assertIsInstance(res, ptq.WithAux)
+    self.assertIsInstance(res, boxed_param.WithAux)
     self.assertIsInstance(res.array, ptq.qarray.QArray)
 
   def test_asarray_nnx_param_with_aux(self):
     """asarray should handle nnx.Param wrapping a WithAux."""
     model = self._get_quantized_asarray_model()
-    wa = ptq.WithAux(
+    wa = boxed_param.WithAux(
         jnp.ones((2, 2)),
         qconfig.QuantizationRule(weight_qtype=jnp.int8).weight_qtype,
     )
     param = nnx.Param(wa)
     res = model(param)
-    self.assertIsInstance(res, ptq.WithAux)
+    self.assertIsInstance(res, boxed_param.WithAux)
 
   def test_nnx_multi_head_attention(self):
     q_rules = [

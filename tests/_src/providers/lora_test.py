@@ -21,8 +21,8 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 from jax import sharding as shd
+from qwix._src.providers import boxed_param
 from qwix._src.providers import lora
-from qwix._src.providers import ptq
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 
@@ -342,7 +342,7 @@ class LoraTest(parameterized.TestCase):
       self.assertEqual(kernel.unbox().shape, (16, 32))
       self.assertEqual(kernel.names, ("a", "b"))
     else:
-      self.assertIsInstance(kernel, ptq.WithAux)
+      self.assertIsInstance(kernel, boxed_param.WithAux)
       self.assertIsInstance(kernel.array.qvalue, nn.Partitioned)
       self.assertEqual(kernel.array.qvalue.unbox().shape, (16, 32))
       self.assertEqual(kernel.array.qvalue.names, ("a", "b"))

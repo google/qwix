@@ -206,12 +206,12 @@ def find_param(x: Any, ptq_array_type=None) -> str | None:
   equally.
 
   Args:
-    x: jax.Array or array-like object (such as ptq.WithAux) that has the "shape"
-      attribute.
+    x: jax.Array or array-like object (such as boxed_param.WithAux) that has the
+      "shape" attribute.
     ptq_array_type: when looking for a param in the current module, also
       consider this type in addition to jax.Array. This is only used in QLoRA
-      mode and should be set to ptq.WithAux. We don't import ptq here to avoid a
-      circular dependency.
+      mode and should be set to boxed_param.WithAux. We don't import ptq here to
+      avoid a circular dependency.
 
   Returns:
     The name of the param that contains the given array, or None if not found.
@@ -347,7 +347,7 @@ def update_sharding(
     spec = sum(spec, ())  # flatten the list of tuples.
   elif merge:
     for i in merge:
-      spec = spec[: i + 1] + spec[i + 2 :]  # pytype: disable=unsupported-operands # pyrefly: ignore
+      spec = spec[: i + 1] + spec[i + 2 :]  # pyrefly: ignore[unsupported-operation]
   elif transpose:
     spec = tuple(spec[i] if i is not None else None for i in transpose)
 

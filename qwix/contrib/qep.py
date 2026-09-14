@@ -37,6 +37,7 @@ from qwix._src import averaging
 from qwix._src import model as qwix_model
 from qwix._src import qconfig
 from qwix._src.core import qarray
+from qwix._src.providers import boxed_param
 from qwix._src.providers import ptq
 from qwix.contrib import calibration
 from qwix.contrib import gptq
@@ -633,7 +634,7 @@ def _quantize_weight(
     rule: QepRule,
     gptq_block_size: int,
     gptq_damping_factor: float,
-) -> ptq.WithAux:
+) -> boxed_param.WithAux:
   """Generates a compressed discrete weight, adapting the QEP formula.
 
   Extracts the raw floating weight, adjusts it using the QEP compensation metric
