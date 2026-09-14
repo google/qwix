@@ -429,7 +429,24 @@ def dot_general(
   Returns:
     a floating-point jax.Array.
   """
-  # Try hardware-accelerated MXFP dot first
+  if kwargs.get('multipass_mode') is not None:
+    if isinstance(lhs, qarray.QArray) or isinstance(rhs, qarray.QArray):
+      raise ValueError(
+          'Inputs to multipass dot_general must strictly be unquantized'
+          f' jax.Array, but got lhs={type(lhs)}, rhs={type(rhs)}.'
+      )
+    from qwix._src.core import multipass_dot  # pylint: disable=g-import-not-at-top
+
+    return multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dimension_numbers=dimension_numbers,
+        precision=precision,
+        preferred_element_type=preferred_element_type,
+        **kwargs,
+    )
+
+  # Try hardware-accelerated MXFP dot.
   mxfp_result = mxfp_dot.mxfp_dot_general(
       lhs, rhs, dimension_numbers, preferred_element_type
   )
