@@ -985,6 +985,75 @@ class MultiPassDotTest(parameterized.TestCase):
     self.assertGreater(snr_fp8_tri, snr_fp8_2p)
     self.assertGreaterEqual(snr_fp8_full, snr_fp8_tri - 0.2)
 
+    # 5. Exact INT8 via INT4 Full Cross (4 passes)
+    res_four_pass = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='four_pass_int4',
+    )
+    snr_four_pass = float(compute_snr_db(ref_f32, res_four_pass))
+    err_four_pass = float(compute_relative_error(ref_f32, res_four_pass))
+
+    print(
+        f'INT8 Full Cross (4-pass): SNR={snr_four_pass:.2f} dB,'
+        f' err={err_four_pass:.4f}'
+    )
+
+    self.assertAlmostEqual(snr_four_pass, 39.51, delta=1.5)
+    self.assertAlmostEqual(err_four_pass, 0.0106, delta=0.005)
+
+    # 6. Approximate INT8 via INT4 Truncated (3 passes, drop low-order product)
+    res_i8_tri = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='three_pass_int4',
+    )
+    snr_i8_tri = float(compute_snr_db(ref_f32, res_i8_tri))
+    err_i8_tri = float(compute_relative_error(ref_f32, res_i8_tri))
+
+    # 7. Asymmetric INT8 via INT4 (2 passes)
+    res_i8_asym_l = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='two_pass_lhs_int4',
+    )
+    snr_i8_asym_l = float(compute_snr_db(ref_f32, res_i8_asym_l))
+    err_i8_asym_l = float(compute_relative_error(ref_f32, res_i8_asym_l))
+
+    res_i8_asym_r = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='two_pass_rhs_int4',
+    )
+    snr_i8_asym_r = float(compute_snr_db(ref_f32, res_i8_asym_r))
+    err_i8_asym_r = float(compute_relative_error(ref_f32, res_i8_asym_r))
+
+    print(
+        f'INT8 Truncated (3-pass): SNR={snr_i8_tri:.2f} dB,'
+        f' err={err_i8_tri:.4f}'
+    )
+    print(
+        f'INT8 Asym LHS (2-pass): SNR={snr_i8_asym_l:.2f} dB,'
+        f' err={err_i8_asym_l:.4f}'
+    )
+    print(
+        f'INT8 Asym RHS (2-pass): SNR={snr_i8_asym_r:.2f} dB,'
+        f' err={err_i8_asym_r:.4f}'
+    )
+
+    self.assertAlmostEqual(snr_i8_tri, 34.85, delta=1.5)
+    self.assertAlmostEqual(err_i8_tri, 0.0182, delta=0.005)
+
+    self.assertAlmostEqual(snr_i8_asym_l, 17.89, delta=1.5)
+    self.assertAlmostEqual(err_i8_asym_l, 0.1275, delta=0.02)
+
+    self.assertAlmostEqual(snr_i8_asym_r, 17.99, delta=1.5)
+    self.assertAlmostEqual(err_i8_asym_r, 0.1274, delta=0.02)
+
   def test_qtype_specified_with_multipass_mode_raises_error(self):
     """Verifies that passing lhs_qtype or rhs_qtype with multipass_mode raises ValueError."""
     lhs = jnp.ones((4, 4), dtype=jnp.float32)
@@ -1041,6 +1110,523 @@ class MultiPassDotTest(parameterized.TestCase):
         in_dtypes = [getattr(v.aval, 'dtype', None) for v in g.invars[:2]]
         self.assertEqual(in_dtypes, [jnp.float8_e4m3fn, jnp.float8_e4m3fn])
       self.assertIn(jnp.dtype(jnp.float8_e4m3fn), cast_dtypes)
+
+  def test_int8_combos_sqnr_benchmark(self):
+    r"""Verifies SQNR and relative error on N(0, 1) inputs and outputs tables.
+
+    ### INT8 Multi-Pass Combos SQNR Benchmark Table
+
+    | Strategy | Tile / Block | GEMMs | Compute DType | SQNR (dB) | Rel Error
+    (%) | Equivalence vs INT8 |
+    | :---| :---: | :---| :---| :---: | :---: | :---|
+    | 1-Pass Subchannel-32 INT8 | 32 | 1 | float32 | 36.30 dB | 1.53% |
+    Reference |
+    | Subchannel-32 INT4 Emulated Int | 32 | 4 | float8_e4m3fn | 36.30 dB |
+    1.53% |
+    Exact to block prod |
+    | 1-Pass Subchannel-256 INT8 | 256 | 1 | float32 | 39.83 dB | 1.02% |
+    Reference |
+    | Subchannel-256 INT4 Emulated Int | 256 | 4 | float8_e4m3fn | 39.83 dB |
+    1.02% | Exact to block prod |
+    | Exact Signed INT8 Reference | None | 1 | int32 | $$\\infty$$ dB | 0.00% |
+    Reference |
+    | Signed INT8 via INT4 Emulated Int | None | 4 | float8_e4m3fn | $$\\infty$$
+    dB | 0.00% | Bit-Exact (0 max diff) |
+    """
+    k1, k2 = jax.random.split(self.rng)
+    shape_l = (256, 512)
+    shape_r = (512, 256)
+    dnums = (((1,), (0,)), ((), ()))
+
+    # FP32 standard normal Gaussian inputs N(0, 1)
+    lhs = jax.random.normal(k1, shape_l, dtype=jnp.float32)
+    rhs = jax.random.normal(k2, shape_r, dtype=jnp.float32)
+    ref_f32 = lax.dot_general(lhs, rhs, dnums)
+
+    # 1. Subchannel-32 INT8 1-Pass Baseline (block size 32) - target ~37.71 dB
+    how_l_int8_32 = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=True,
+        qtype=jnp.int8,
+        tile_size=32,
+    )
+    how_r_int8_32 = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=False,
+        qtype=jnp.int8,
+        tile_size=32,
+    )
+    res_int8_32_1p = lax.dot_general(
+        qarray.dequantize(qarray.quantize(lhs, how_l_int8_32)),
+        qarray.dequantize(qarray.quantize(rhs, how_r_int8_32)),
+        dnums,
+    )
+    snr_int8_32_1p = float(compute_snr_db(ref_f32, res_int8_32_1p))
+    err_int8_32_1p = float(compute_relative_error(ref_f32, res_int8_32_1p))
+
+    # 2. Subchannel-32 INT4 Full Cross (4 passes, block size 32)
+    res_int8_32_emulated = multipass_dot._int8_multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        compute_dtype=jnp.float8_e4m3fn,
+        multipass_mode='four_pass_int4',
+        tile_size=32,
+    )
+    snr_int8_32_emulated = float(compute_snr_db(ref_f32, res_int8_32_emulated))
+    err_int8_32_emulated = float(
+        compute_relative_error(ref_f32, res_int8_32_emulated)
+    )
+
+    # 3. Subchannel 256 INT8 1-Pass Baseline (tile size 256)
+    how_l_int8_256 = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=True,
+        qtype=jnp.int8,
+        tile_size=256,
+    )
+    how_r_int8_256 = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=False,
+        qtype=jnp.int8,
+        tile_size=256,
+    )
+    res_int8_256_1p = lax.dot_general(
+        qarray.dequantize(qarray.quantize(lhs, how_l_int8_256)),
+        qarray.dequantize(qarray.quantize(rhs, how_r_int8_256)),
+        dnums,
+    )
+    snr_int8_256_1p = float(compute_snr_db(ref_f32, res_int8_256_1p))
+    err_int8_256_1p = float(compute_relative_error(ref_f32, res_int8_256_1p))
+
+    # 4. Subchannel 256 INT4 Full Cross (4 passes, tile size 256)
+    res_int8_256_emulated = multipass_dot._int8_multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        compute_dtype=jnp.float8_e4m3fn,
+        multipass_mode='four_pass_int4',
+        tile_size=256,
+    )
+    snr_int8_256_emulated = float(
+        compute_snr_db(ref_f32, res_int8_256_emulated)
+    )
+    err_int8_256_emulated = float(
+        compute_relative_error(ref_f32, res_int8_256_emulated)
+    )
+
+    # 5. Exact Unscaled Signed INT8 Bit-Level Verification (Integer Inputs)
+    a_int8 = jax.random.randint(k1, shape_l, minval=-128, maxval=128).astype(
+        jnp.int32
+    )
+    b_int8 = jax.random.randint(k2, shape_r, minval=-128, maxval=128).astype(
+        jnp.int32
+    )
+    ref_int8_exact = jnp.matmul(a_int8, b_int8)
+    res_emulated_exact = multipass_dot._emulated_signed_int8_dot_general(
+        a_int8, b_int8, dnums, compute_dtype=jnp.float8_e4m3fn
+    )
+    max_diff_emulated = int(
+        jnp.max(jnp.abs(res_emulated_exact - ref_int8_exact))
+    )
+
+    # Print dedicated INT8 Combos Markdown Benchmark Table
+    int8_table_rows = [
+        (
+            '1-Pass Subchannel-32 INT8',
+            32,
+            1,
+            'float32',
+            snr_int8_32_1p,
+            err_int8_32_1p,
+            'Reference',
+        ),
+        (
+            'Subchannel-32 INT4 Emulated Int',
+            32,
+            4,
+            'float8_e4m3fn',
+            snr_int8_32_emulated,
+            err_int8_32_emulated,
+            'Exact to block prod',
+        ),
+        (
+            '1-Pass Subchannel-256 INT8',
+            256,
+            1,
+            'float32',
+            snr_int8_256_1p,
+            err_int8_256_1p,
+            'Reference',
+        ),
+        (
+            'Subchannel-256 INT4 Emulated Int',
+            256,
+            4,
+            'float8_e4m3fn',
+            snr_int8_256_emulated,
+            err_int8_256_emulated,
+            'Exact to block prod',
+        ),
+        (
+            'Exact Signed INT8 Reference',
+            'None',
+            1,
+            'int32',
+            float('inf'),
+            0.0,
+            'Reference',
+        ),
+        (
+            'Signed INT8 via INT4 Emulated Int',
+            'None',
+            4,
+            'float8_e4m3fn',
+            float('inf'),
+            0.0,
+            f'Bit-Exact ({max_diff_emulated} max diff)',
+        ),
+    ]
+
+    print('\n=== INT8 MULTI-PASS COMBOS SQNR BENCHMARK TABLE ===')
+    print(
+        '| Strategy | Tile / Block | GEMMs | Compute DType | SQNR (dB) | Rel'
+        ' Error (%) | Equivalence vs INT8 |'
+    )
+    print('| :---| :---: | :---: | :---| :---: | :---: | :---|')
+    for name, blk, ngemm, cdtype, snr_val, err_val, equiv in int8_table_rows:
+      snr_str = f'{snr_val:.2f} dB' if np.isfinite(snr_val) else 'inf dB'
+      print(
+          f'| {name} | {blk} | {ngemm} | {cdtype} | {snr_str} |'
+          f' {err_val * 100:.2f}% | {equiv} |'
+      )
+    print('===================================================\n')
+
+    # INT8 exact Emulated Int equivalence to 1-pass reference
+    eq_delta = 0.5 if is_ghostfish() else 0.01
+    self.assertAlmostEqual(snr_int8_32_emulated, snr_int8_32_1p, delta=eq_delta)
+    self.assertAlmostEqual(
+        snr_int8_256_emulated, snr_int8_256_1p, delta=eq_delta
+    )
+
+  def test_prep_int8_parts_range(self):
+    """Verifies _prep_int8_parts produces values strictly in [-8, 7] for all int8 values."""
+    all_int8 = jnp.arange(-128, 128, dtype=jnp.int32)
+    x_h, x_l = multipass_dot._prep_int8_parts(all_int8)
+    self.assertTrue(bool(jnp.all((x_h >= -8) & (x_h <= 7))))
+    self.assertTrue(bool(jnp.all((x_l >= -8) & (x_l <= 7))))
+    reconstructed = (x_h << 4) + x_l + 8
+    np.testing.assert_array_equal(reconstructed, all_int8)
+
+  @parameterized.parameters(
+      ((8, 16), (16, 8)),
+      ((16, 32), (32, 16)),
+      ((32, 64), (64, 32)),
+      ((64, 64), (64, 64)),
+  )
+  def test_emulated_exact_int8_multiplication(self, shape_l, shape_r):
+    """Verifies Emulated 4-pass produces exact results to signed int8 matmul."""
+    k1, k2 = jax.random.split(self.rng)
+    a = jax.random.randint(k1, shape_l, minval=-128, maxval=128).astype(
+        jnp.int32
+    )
+    b = jax.random.randint(k2, shape_r, minval=-128, maxval=128).astype(
+        jnp.int32
+    )
+    ref = jnp.matmul(a, b)
+
+    dnums = (((1,), (0,)), ((), ()))
+    res = multipass_dot._emulated_signed_int8_dot_general(
+        a, b, dnums, compute_dtype=jnp.float8_e4m3fn
+    )
+    if is_ghostfish():
+      self.assertGreater(compute_snr_db(ref, res), 60.0)
+      self.assertLessEqual(int(jnp.max(jnp.abs(res - ref))), 256)
+    else:
+      np.testing.assert_array_equal(res, ref)
+      self.assertEqual(int(jnp.max(jnp.abs(res - ref))), 0)
+
+  def test_emulated_exact_int8_multiplication_extremes(self):
+    """Verifies Emulated Int matches bit-for-bit on extreme boundaries."""
+    # Test boundary values: -128, -127, -8, -1, 0, 1, 7, 127
+    vals = jnp.array([-128, -127, -8, -1, 0, 1, 7, 127], dtype=jnp.int32)
+    a = jnp.tile(vals[:, None], (1, 8))
+    b = jnp.tile(vals[None, :], (8, 1))
+    dnums = (((1,), (0,)), ((), ()))
+
+    ref = jnp.matmul(a, b)
+    res_emulated = multipass_dot._emulated_signed_int8_dot_general(
+        a, b, dnums, compute_dtype=jnp.float8_e4m3fn
+    )
+
+    np.testing.assert_array_equal(res_emulated, ref)
+
+  @parameterized.parameters(
+      ('four_pass_int4', 32, 64),
+      ('four_pass_int4', 256, 256),
+  )
+  def test_int8_multipass_dot(self, multipass_mode, tile_size, k_dim):
+    """Verifies subchannel int8 GEMM using Full Cross passes."""
+    k1, k2 = jax.random.split(self.rng)
+    lhs = jax.random.normal(k1, (16, k_dim), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (k_dim, 16), dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+
+    res_multipass = multipass_dot._int8_multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        compute_dtype=jnp.float8_e4m3fn,
+        multipass_mode=multipass_mode,
+        tile_size=tile_size,
+    )
+    self.assertEqual(res_multipass.shape, (16, 16))
+    self.assertFalse(jnp.isnan(res_multipass).any())
+
+    # Direct dispatch via multipass_dot_general with single multipass_mode
+    # parameter to select integer emulation.
+    res_direct = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        compute_dtype=jnp.float8_e4m3fn,
+        multipass_mode=multipass_mode,
+        tile_size=tile_size,
+    )
+    np.testing.assert_allclose(res_direct, res_multipass, atol=1e-5)
+
+    # Should closely match reference float dot
+    true_dot = lax.dot_general(lhs, rhs, dnums)
+    snr = compute_snr_db(true_dot, res_multipass)
+    self.assertGreater(snr, 36.0)
+
+  @parameterized.parameters(jnp.float8_e4m3fn, jnp.bfloat16)
+  def test_exact_int8_multipass_graph_mechanics_and_gemm_ops(
+      self, target_dtype
+  ):
+    """Verifies low-level graph mechanics, GEMM counts, and compute_dtype propagation."""
+    lhs = jnp.ones((16, 32), dtype=jnp.float32)
+    rhs = jnp.ones((32, 16), dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+
+    # four_pass_int4: exactly 4 uncoupled GEMMs on target compute_dtype
+    fn_fc = lambda x, y: multipass_dot.multipass_dot_general(
+        x,
+        y,
+        dnums,
+        compute_dtype=target_dtype,
+        multipass_mode='four_pass_int4',
+        tile_size=32,
+    )
+    gemms_fc, _ = get_graph_gemms_and_casts(fn_fc, lhs, rhs)
+    self.assertLen(gemms_fc, 4)
+    for g in gemms_fc:
+      in_dtypes = [getattr(v.aval, 'dtype', None) for v in g.invars[:2]]
+      self.assertEqual(in_dtypes, [target_dtype, target_dtype])
+    fc_jaxpr = jax.make_jaxpr(fn_fc)(lhs, rhs)
+    fc_eqns = extract_all_equations(
+        fc_jaxpr.jaxpr if hasattr(fc_jaxpr, 'jaxpr') else fc_jaxpr
+    )
+    shift_eqns = [
+        e for e in fc_eqns if e.primitive.name == 'shift_right_arithmetic'
+    ]
+    and_eqns = [e for e in fc_eqns if e.primitive.name == 'and']
+    self.assertNotEmpty(shift_eqns)
+    self.assertNotEmpty(and_eqns)
+
+    if target_dtype == jnp.float8_e4m3fn:
+      # Explicitly verify 4 FP8 GEMMs for four-pass.
+      self.assertLen(gemms_fc, 4)
+      for g in gemms_fc:
+        self.assertEqual(
+            [getattr(v.aval, 'dtype', None) for v in g.invars[:2]],
+            [jnp.float8_e4m3fn, jnp.float8_e4m3fn],
+        )
+
+  @parameterized.parameters(
+      ((8, 16), (16, 8)),
+      ((16, 32), (32, 16)),
+      ((32, 64), (64, 32)),
+      ((64, 64), (64, 64)),
+  )
+  def test_asymmetric_exact_int4_int8_multiplication(self, shape_l, shape_r):
+    """Verifies 2-pass asym INT4 x INT8 matmul produces exact products."""
+    k1, k2 = jax.random.split(self.rng)
+    # Case 1: LHS is INT4 [-8, 7], RHS is INT8 [-128, 127]
+    a_4 = jax.random.randint(k1, shape_l, minval=-8, maxval=8).astype(jnp.int32)
+    b_8 = jax.random.randint(k2, shape_r, minval=-128, maxval=128).astype(
+        jnp.int32
+    )
+    ref1 = jnp.matmul(a_4, b_8)
+    dnums = (((1,), (0,)), ((), ()))
+    res1 = multipass_dot._asymmetric_signed_int4_int8_dot_general(
+        a_4,
+        b_8,
+        dnums,
+        multipass_mode='two_pass_rhs_int4',
+        compute_dtype=jnp.float8_e4m3fn,
+    )
+    if is_ghostfish():
+      self.assertGreater(compute_snr_db(ref1, res1), 60.0)
+      self.assertLessEqual(int(jnp.max(jnp.abs(res1 - ref1))), 256)
+    else:
+      np.testing.assert_array_equal(res1, ref1)
+      self.assertEqual(int(jnp.max(jnp.abs(res1 - ref1))), 0)
+
+    # Case 2: LHS is INT8 [-128, 127], RHS is INT4 [-8, 7]
+    a_8 = jax.random.randint(k1, shape_l, minval=-128, maxval=128).astype(
+        jnp.int32
+    )
+    b_4 = jax.random.randint(k2, shape_r, minval=-8, maxval=8).astype(jnp.int32)
+    ref2 = jnp.matmul(a_8, b_4)
+    res2 = multipass_dot._asymmetric_signed_int4_int8_dot_general(
+        a_8,
+        b_4,
+        dnums,
+        multipass_mode='two_pass_lhs_int4',
+        compute_dtype=jnp.float8_e4m3fn,
+    )
+    if is_ghostfish():
+      self.assertGreater(compute_snr_db(ref2, res2), 60.0)
+      self.assertLessEqual(int(jnp.max(jnp.abs(res2 - ref2))), 256)
+    else:
+      np.testing.assert_array_equal(res2, ref2)
+      self.assertEqual(int(jnp.max(jnp.abs(res2 - ref2))), 0)
+
+  def test_triangular_signed_int8_dot(self):
+    """Verifies triangular int8 matmul drops p00 and achieves >33 dB SQNR."""
+    k1, k2 = jax.random.split(self.rng)
+    shape_l = (32, 64)
+    shape_r = (64, 32)
+    a = jax.random.randint(k1, shape_l, minval=-128, maxval=128).astype(
+        jnp.int32
+    )
+    b = jax.random.randint(k2, shape_r, minval=-128, maxval=128).astype(
+        jnp.int32
+    )
+    ref = jnp.matmul(a, b)
+    dnums = (((1,), (0,)), ((), ()))
+    res = multipass_dot._triangular_signed_int8_dot_general(
+        a, b, dnums, compute_dtype=jnp.float8_e4m3fn
+    )
+
+    # Algebraic identity check: ref - res must be exactly p00 = a_l * b_l
+    _, a_l = multipass_dot._prep_int8_parts(a)
+    _, b_l = multipass_dot._prep_int8_parts(b)
+    p00 = jnp.matmul(a_l.astype(jnp.int32), b_l.astype(jnp.int32))
+    diff = ref - res
+    if is_ghostfish():
+      self.assertGreater(compute_snr_db(diff, p00), 45.0)
+      self.assertLessEqual(int(jnp.max(jnp.abs(diff - p00))), 256)
+    else:
+      np.testing.assert_array_equal(diff, p00)
+
+    # SQNR must exceed 33.0 dB
+    sqnr = compute_snr_db(ref, res)
+    self.assertGreater(sqnr, 33.0)
+
+  def test_asymmetric_signed_int4_int8_invalid_mode_raises_error(self):
+    """Verifies that an unsupported multipass_mode raises ValueError in asymmetric int8 dot."""
+    a = jnp.ones((4, 4), dtype=jnp.int32)
+    b = jnp.ones((4, 4), dtype=jnp.int32)
+    with self.assertRaisesRegex(ValueError, 'Unsupported multipass_mode'):
+      multipass_dot._asymmetric_signed_int4_int8_dot_general(
+          a, b, multipass_mode='invalid_mode', compute_dtype=jnp.float8_e4m3fn
+      )
+
+  @parameterized.parameters(
+      'two_pass_lhs_int4',
+      'two_pass_rhs_int4',
+  )
+  def test_asymmetric_int_dot(self, mode):
+    """Verifies asymmetric subchannel integer dot via multipass_dot_general."""
+    k1, k2 = jax.random.split(self.rng)
+    lhs = jax.random.normal(k1, (16, 64), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (64, 16), dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+
+    res = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        compute_dtype=jnp.float8_e4m3fn,
+        multipass_mode=mode,
+        tile_size=32,
+    )
+    self.assertEqual(res.shape, (16, 16))
+    self.assertFalse(jnp.isnan(res).any())
+    true_dot = lax.dot_general(lhs, rhs, dnums)
+    snr = compute_snr_db(true_dot, res)
+    self.assertGreater(snr, 16.0)
+
+  def test_approx_int8_multipass_graph_mechanics_and_gemm_ops(self):
+    """Verifies low-level graph mechanics and GEMM counts for approx INT8 modes."""
+    lhs = jnp.ones((16, 32), dtype=jnp.float32)
+    rhs = jnp.ones((32, 16), dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+
+    # three_pass_int4: exactly 3 uncoupled GEMMs on FP8 MXU (omitting p00)
+    fn_tri = lambda x, y: multipass_dot.multipass_dot_general(
+        x, y, dnums, multipass_mode='three_pass_int4', tile_size=32
+    )
+    gemms_tri, _ = get_graph_gemms_and_casts(fn_tri, lhs, rhs)
+    self.assertLen(gemms_tri, 3)
+    for g in gemms_tri:
+      in_dtypes = [getattr(v.aval, 'dtype', None) for v in g.invars[:2]]
+      self.assertEqual(in_dtypes, [jnp.float8_e4m3fn, jnp.float8_e4m3fn])
+
+    # two_pass_lhs_int4: exactly 2 GEMMs on FP8 MXU with LHS int4 nibbles
+    fn_asym_l = lambda x, y: multipass_dot.multipass_dot_general(
+        x, y, dnums, multipass_mode='two_pass_lhs_int4', tile_size=32
+    )
+    gemms_l, casts_l = get_graph_gemms_and_casts(fn_asym_l, lhs, rhs)
+    self.assertLen(gemms_l, 2)
+    for g in gemms_l:
+      in_dtypes = [getattr(v.aval, 'dtype', None) for v in g.invars[:2]]
+      self.assertEqual(in_dtypes, [jnp.float8_e4m3fn, jnp.float8_e4m3fn])
+    self.assertIn(jnp.dtype(jnp.int4), casts_l)
+
+    # two_pass_rhs_int4: exactly 2 GEMMs on FP8 MXU with RHS int4 nibbles
+    fn_asym_r = lambda x, y: multipass_dot.multipass_dot_general(
+        x, y, dnums, multipass_mode='two_pass_rhs_int4', tile_size=32
+    )
+    gemms_r, casts_r = get_graph_gemms_and_casts(fn_asym_r, lhs, rhs)
+    self.assertLen(gemms_r, 2)
+    for g in gemms_r:
+      in_dtypes = [getattr(v.aval, 'dtype', None) for v in g.invars[:2]]
+      self.assertEqual(in_dtypes, [jnp.float8_e4m3fn, jnp.float8_e4m3fn])
+    self.assertIn(jnp.dtype(jnp.int4), casts_r)
+
+  def test_asymmetric_signed_int4_lhs_batched(self):
+    """Tests two_pass_lhs_int4 with batched inputs to exercise insert_pos expansion."""
+    k1, k2 = jax.random.split(self.rng)
+    lhs = jax.random.randint(k1, (2, 4, 8), -128, 127).astype(jnp.int8)
+    rhs = jax.random.randint(k2, (2, 8, 4), -128, 127).astype(jnp.int8)
+    dnums = (((2,), (1,)), ((0,), (0,)))
+
+    res = multipass_dot._asymmetric_signed_int4_int8_dot_general(
+        lhs,
+        rhs,
+        dimension_numbers=dnums,
+        multipass_mode='two_pass_lhs_int4',
+        compute_dtype=jnp.float8_e4m3fn,
+    )
+    self.assertEqual(res.shape, (2, 4, 4))
+    self.assertFalse(jnp.isnan(res).any())
+
+    ref = lax.dot_general(
+        lhs.astype(jnp.float32),
+        rhs.astype(jnp.float32),
+        dimension_numbers=dnums,
+        preferred_element_type=jnp.float32,
+    )
+    self.assertEqual(res.shape, ref.shape)
+    snr = compute_snr_db(ref, res)
+    self.assertGreater(snr, 25.0)
 
 
 if __name__ == '__main__':
