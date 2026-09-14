@@ -145,10 +145,12 @@ class DotGeneralTest(parameterized.TestCase):
         self.assertEqual(einsum_output.dtype, expected_output_dtype)
         self.assertEqual(dot_general_output.dtype, expected_output_dtype)
 
-  @mock.patch.object(jax.nn, 'scaled_matmul')
-  def test_outer_product(self, mock_scaled_matmul):
-    mock_scaled_matmul.return_value = jnp.ones((1, 10, 10), jnp.float32)
-
+  @mock.patch.object(jax.lax, 'scaled_dot')
+  def test_outer_product(self, mock_scaled_dot):
+    # An outer product has no contracting dims, so the flattened contracting
+    # size is 1, which doesn't satisfy jax.lax.scaled_dot's requirement that the
+    # contracting dim be at least twice the scale's. The mxfp fast path must
+    # decline and let the regular emulation handle it.
     lhs = qarray.QArray(
         jnp.ones((10, 1), jnp.float8_e4m3fn),
         jnp.ones((10, 1), jnp.bfloat16),
@@ -162,15 +164,9 @@ class DotGeneralTest(parameterized.TestCase):
     dnums = (((), ()), ((), ()))
     res = dot_general.dot_general(lhs, rhs, dnums)
     self.assertEqual(res.shape, (10, 1, 1, 10))
+    self.assertTrue(jnp.array_equal(res, jnp.ones(res.shape, res.dtype)))
 
-    mock_scaled_matmul.assert_called_once()
-
-    args, _ = mock_scaled_matmul.call_args
-    lhs_3d, rhs_3d, lhs_scale_3d, rhs_scale_3d = args
-    self.assertEqual(lhs_3d.shape, (1, 10, 1))
-    self.assertEqual(rhs_3d.shape, (1, 10, 1))
-    self.assertEqual(lhs_scale_3d.shape, (1, 10, 1))
-    self.assertEqual(rhs_scale_3d.shape, (1, 10, 1))
+    mock_scaled_dot.assert_not_called()
 
   def test_innermost_tiling_heuristic(self):
     """Verifies that multi-dimensional dot_general picks the innermost contracting reduction axis."""
