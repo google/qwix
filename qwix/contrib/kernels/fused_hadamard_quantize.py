@@ -156,7 +156,7 @@ def fused_hadamard_quantize(
       None,
       row_sign_flip=False,
       col_sign_flip=False,
-      dtype=jnp.int8,
+      dtype=jnp.int8,  # pyrefly: ignore[bad-argument-type]
   )[
       0
   ]
