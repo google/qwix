@@ -168,6 +168,51 @@ def _apply_rhs_scale_to_lhs(lhs, rhs_scale, dnums):
   return qarray.call_with_generic_broadcast(jnp.multiply, lhs, lhs_scale)
 
 
+_MICROSCALED_QTYPES = frozenset({
+    'mxfp8',
+    'mxfp8_16',
+    'mxfp4',
+    'nvfp4',
+    'mxint8',
+})
+
+
+def _is_block_scaled(operand: qarray.MaybeQArray) -> bool:
+  """Returns True if the operand uses block-scaled or tiled quantization.
+
+  Args:
+    operand: The potentially quantized operand.
+
+  Returns:
+    True if the operand uses block-scaled or tiled quantization.
+  """
+  if not isinstance(operand, qarray.QArray):
+    return False
+  return (
+      bool(qarray.get_tiled_axes(operand))
+      or operand.qtype in _MICROSCALED_QTYPES
+  )
+
+
+def _requires_unquantized_residual(
+    config: DotGeneralQtConfig, operand_qt: qarray.MaybeQArray
+) -> bool:
+  """Returns True if the backward contraction cannot reuse the forward operand.
+
+  Block-scaled residuals cannot be reused because quantization scales defined
+  for the forward contraction axis do not align with the new contraction axis
+  in the backward pass.
+
+  Args:
+    config: The quantization configuration.
+    operand_qt: The potentially quantized operand.
+
+  Returns:
+    True if the backward contraction cannot reuse the forward operand.
+  """
+  return config.use_original_residuals or _is_block_scaled(operand_qt)
+
+
 def _get_residual_for_backward(
     config: DotGeneralQtConfig,
     operand_in: jax.Array | None,
@@ -184,15 +229,11 @@ def _get_residual_for_backward(
     config: The quantization configuration.
     operand_in: The original, unquantized operand, or None if not retained.
     operand_qt: The potentially quantized operand.
+
+  Returns:
+    The residual to be used in the backward pass.
   """
-  if config.use_original_residuals or (
-      isinstance(operand_qt, qarray.QArray)
-      and (
-          qarray.get_tiled_axes(operand_qt)
-          or isinstance(operand_qt.qtype, str)
-          and operand_qt.qtype in ('mxfp8', 'mxfp8_16', 'mxfp4', 'nvfp4')
-      )
-  ):
+  if _requires_unquantized_residual(config, operand_qt):
     assert operand_in is not None
     return operand_in
   return operand_qt
@@ -204,7 +245,17 @@ def _needs_original_residual(
     calibration: dict[str, jax.Array] | None,
     calibration_method: str,
 ) -> bool:
-  """Returns True if the unquantized operand must be retained in residuals."""
+  """Returns True if the unquantized operand must be retained in residuals.
+
+  Args:
+    config: The quantization configuration.
+    operand_qt: The potentially quantized operand.
+    calibration: The calibration dictionary or None.
+    calibration_method: The calibration method string.
+
+  Returns:
+    True if the unquantized operand must be retained in residuals.
+  """
   # 1. Contraction residual:
   # The unquantized operand must be retained if:
   #   a) The user explicitly opted into original residuals
@@ -213,16 +264,7 @@ def _needs_original_residual(
   #      tiled scales).
   #   c) The operand is an MXFP/microscaling type (block-level scales also
   #      require original operands).
-  if config.use_original_residuals or (
-      isinstance(operand_qt, qarray.QArray)
-      and (
-          qarray.get_tiled_axes(operand_qt)
-          or (
-              isinstance(operand_qt.qtype, str)
-              and operand_qt.qtype in ('mxfp8', 'mxfp8_16', 'mxfp4', 'nvfp4')
-          )
-      )
-  ):
+  if _requires_unquantized_residual(config, operand_qt):
     return True
 
   # 2. Gradient clipping:

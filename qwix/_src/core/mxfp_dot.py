@@ -38,6 +38,11 @@ def mxfp_dot_general(
   dimensions. One-sided microscaled operations or mismatched scale dimensions
   will cleanly return `None` to fall back to standard float emulation.
 
+  Note: `jax.nn.scaled_matmul` only supports floating-point microscaled formats
+  and does not support integer microscaled formats (e.g. mxint8). Integer
+  microscaled formats bypass this dispatcher and fall back to Qwix's reference
+  dot_general path.
+
   Note: scaled_matmul hardware acceleration is currently restricted to
   single-axis contraction (len(ca) == 1). For multi-axis contractions use
   reference emulation for numerical precision.
@@ -102,7 +107,17 @@ def mxfp_dot_general(
 
 
 def _is_mxfp(operand: Any) -> TypeGuard[qarray.QArray]:
-  """Verifies whether the operand is an OCP/NVIDIA microscaled format."""
+  """Verifies whether the operand is an OCP/NVIDIA microscaled format.
+
+  Note that `jax.nn.scaled_matmul` only supports floating-point microscaled
+  types, so integer microscaled formats like mxint8 are excluded.
+
+  Args:
+    operand: The operand to check.
+
+  Returns:
+    True if the operand is an OCP/NVIDIA microscaled format.
+  """
   return isinstance(operand, qarray.QArray) and operand.qtype in (
       "mxfp8",
       "mxfp8_16",
