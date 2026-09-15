@@ -440,7 +440,9 @@ class QArrayTest(parameterized.TestCase):
     # (reproduce NaN by monkeypatching to disable safety check)
     original_compute = qarray.compute_scale_zero_point
 
-    def unsafe_compute_scale_zero_point(calibration, qtype):
+    def unsafe_compute_scale_zero_point(
+        calibration, qtype, *unused_args, **unused_kwargs
+    ):
       if 'min' in calibration and 'max' in calibration:
         qmin, qmax = numerics.get_asymmetric_bound(qtype)
         scale = (calibration['max'] - calibration['min']) / (qmax - qmin)
@@ -516,6 +518,34 @@ class QArrayTest(parameterized.TestCase):
           tiled_axes={1: 32},
       )
 
+    with self.assertRaisesRegex(
+        ValueError, 'Format mxint8 requires `tiled_axes` to be specified.'
+    ):
+      qarray.HowToQuantize(qtype='mxint8')
+
+    with self.assertRaisesRegex(
+        ValueError,
+        'Format mxint8 requires a tile size of 32, but axis 1 got 16',
+    ):
+      qarray.HowToQuantize(
+          qtype='mxint8',
+          tiled_axes={1: 16},
+      )
+
+    with self.assertRaisesRegex(
+        ValueError, 'Format mxint4 requires `tiled_axes` to be specified.'
+    ):
+      qarray.HowToQuantize(qtype='mxint4')
+
+    with self.assertRaisesRegex(
+        ValueError,
+        'Format mxint4 requires a tile size of 32, but axis 1 got 16',
+    ):
+      qarray.HowToQuantize(
+          qtype='mxint4',
+          tiled_axes={1: 16},
+      )
+
   @parameterized.named_parameters(
       dict(
           testcase_name='mxfp4',
@@ -571,6 +601,252 @@ class QArrayTest(parameterized.TestCase):
     self.assertTrue(
         jnp.array_equal(scale, jnp.array(expected_scales, dtype=scale.dtype))
     )
+
+  def test_compute_scale_zero_point_mxint_power_of_2(self):
+    calibration_i8 = {
+        'absmax': jnp.array([63.75, 64.0, 127.5, 127.6, 255.0, 256.0])
+    }
+    scale, zero_point = qarray.compute_scale_zero_point(
+        calibration_i8, 'mxint8'
+    )
+    self.assertIsNone(zero_point)
+    expected_scales = jnp.array(
+        [0.5, 1.0, 1.0, 2.0, 2.0, 4.0], dtype=scale.dtype
+    )
+    self.assertTrue(jnp.array_equal(scale, expected_scales))
+
+    calibration_i4 = {'absmax': jnp.array([3.75, 3.8, 7.5, 7.6, 15.0, 15.1])}
+    scale_i4, zero_point_i4 = qarray.compute_scale_zero_point(
+        calibration_i4, 'mxint4'
+    )
+    self.assertIsNone(zero_point_i4)
+    expected_scales_i4 = jnp.array(
+        [0.5, 1.0, 1.0, 2.0, 2.0, 4.0], dtype=scale_i4.dtype
+    )
+    self.assertTrue(jnp.array_equal(scale_i4, expected_scales_i4))
+
+  def test_mxint8_quantize_dequantize(self):
+    x = jnp.array(
+        [[10.0, -20.0, 30.0, -40.0] * 8, [50.0, -60.0, 70.0, -80.0] * 8],
+        dtype=jnp.float32,
+    )  # shape (2, 32)
+    how = qarray.HowToQuantize(
+        qtype='mxint8', channelwise_axes=[0], tiled_axes={1: 32}
+    )
+    q = qarray.quantize(x, how)
+    self.assertEqual(q.qvalue.dtype, jnp.int8)
+    self.assertEqual(q.scale.shape, (2, 1))
+    self.assertIsNone(q.zero_point)
+    # Scale must be a power of 2
+    log2_scale = jnp.log2(q.scale)
+    self.assertTrue(jnp.all(jnp.equal(log2_scale, jnp.round(log2_scale))))
+    # Check dequantize
+    deq = qarray.dequantize(q)
+    self.assertEqual(deq.shape, x.shape)
+    # Dequantized values should be close to original
+    self.assertTrue(jnp.allclose(deq, x, atol=2.0))
+
+  def test_mxint4_quantize_dequantize(self):
+    x = jnp.array(
+        [[1.0, -2.0, 3.0, -4.0] * 8, [5.0, -6.0, 7.0, -7.0] * 8],
+        dtype=jnp.float32,
+    )  # shape (2, 32)
+    how = qarray.HowToQuantize(
+        qtype='mxint4', channelwise_axes=[0], tiled_axes={1: 32}
+    )
+    q = qarray.quantize(x, how)
+    self.assertEqual(q.qvalue.dtype, jnp.int4)
+    self.assertEqual(q.scale.shape, (2, 1))
+    self.assertIsNone(q.zero_point)
+    # Scale must be a power of 2
+    log2_scale = jnp.log2(q.scale)
+    self.assertTrue(jnp.all(jnp.equal(log2_scale, jnp.round(log2_scale))))
+    # Check dequantize
+    deq = qarray.dequantize(q)
+    self.assertEqual(deq.shape, x.shape)
+    # Dequantized values should be close to original
+    self.assertTrue(jnp.allclose(deq, x, atol=1.0))
+
+  def test_mxint8_sqnr(self):
+    key = jax.random.PRNGKey(0)
+    x = jax.random.normal(key, (4, 128), dtype=jnp.float32)
+    how = qarray.HowToQuantize(
+        qtype='mxint8', channelwise_axes=[0], tiled_axes={1: 32}
+    )
+    q = qarray.quantize(x, how)
+    deq = qarray.dequantize(q)
+    signal_power = jnp.mean(jnp.square(x))
+    noise_power = jnp.mean(jnp.square(x - deq))
+    sqnr = float(10.0 * jnp.log10(signal_power / noise_power))
+    self.assertGreater(
+        sqnr, 35.0, f'mxint8 SQNR {sqnr:.2f} dB is below expected 35 dB'
+    )
+
+  def test_mxint4_sqnr(self):
+    key = jax.random.PRNGKey(0)
+    x = jax.random.normal(key, (4, 128), dtype=jnp.float32)
+    how = qarray.HowToQuantize(
+        qtype='mxint4', channelwise_axes=[0], tiled_axes={1: 32}
+    )
+    q = qarray.quantize(x, how)
+    deq = qarray.dequantize(q)
+    signal_power = jnp.mean(jnp.square(x))
+    noise_power = jnp.mean(jnp.square(x - deq))
+    sqnr = float(10.0 * jnp.log10(signal_power / noise_power))
+    self.assertGreater(
+        sqnr, 15.0, f'mxint4 SQNR {sqnr:.2f} dB is below expected 15 dB'
+    )
+
+  def test_hierarchical_scaling_mxfp8(self):
+    """Verifies hierarchical scaling on mxfp8_16."""
+    key = jax.random.key(123)
+    x = jax.random.normal(key, (4, 32), dtype=jnp.float32)
+    # Give row 0 a much larger dynamic range than row 1
+    x = x.at[0].multiply(50.0)
+    x = x.at[1].multiply(0.1)
+
+    how_flat = qarray.HowToQuantize(
+        qtype='mxfp8_16',
+        channelwise_axes=[0],
+        tiled_axes={1: 16},
+        hierarchical_scaling=False,
+    )
+    how_hier = qarray.HowToQuantize(
+        qtype='mxfp8_16',
+        channelwise_axes=[0],
+        tiled_axes={1: 16},
+        hierarchical_scaling=True,
+    )
+
+    q_flat = qarray.quantize(x, how_flat)
+    q_hier = qarray.quantize(x, how_hier)
+
+    self.assertEqual(q_hier.scale.shape, (4, 2))
+    self.assertEqual(q_hier.qvalue.shape, (4, 32))
+    self.assertEqual(q_hier.scale.dtype, x.dtype)
+
+    # Dequantization should closely reconstruct the original array
+    deq_hier = qarray.dequantize(q_hier)
+    mae_hier = jnp.mean(jnp.abs(deq_hier - x))
+    mae_flat = jnp.mean(jnp.abs(qarray.dequantize(q_flat) - x))
+    self.assertTrue(jnp.isfinite(mae_hier))
+    self.assertLess(mae_hier, 1.0)
+    # The reconstruction error should be very close to or better than flat
+    self.assertAlmostEqual(float(mae_hier), float(mae_flat), delta=0.5)
+
+  def test_hierarchical_scaling_noop_non_microscaling(self):
+    """Verifies that hierarchical_scaling is a no-op on non-microscaling types."""
+    x = jax.random.normal(jax.random.key(42), (4, 32), dtype=jnp.float32)
+
+    # int8 without tiled_axes
+    how_std = qarray.HowToQuantize(
+        qtype='int8',
+        channelwise_axes=[0],
+        hierarchical_scaling=False,
+    )
+    how_hier = qarray.HowToQuantize(
+        qtype='int8',
+        channelwise_axes=[0],
+        hierarchical_scaling=True,
+    )
+    q_std = qarray.quantize(x, how_std)
+    q_hier = qarray.quantize(x, how_hier)
+    self.assertTrue(jnp.array_equal(q_std.qvalue, q_hier.qvalue))
+    self.assertTrue(jnp.array_equal(q_std.scale, q_hier.scale))
+
+  def test_hierarchical_scaling_formats(self):
+    """Verifies hierarchical scaling on all supported microscaling formats."""
+    key = jax.random.key(42)
+    x = jax.random.normal(key, (2, 32), dtype=jnp.float32)
+
+    for qtype, tile_size in [
+        ('mxfp8', 32),
+        ('mxfp8_16', 16),
+        ('mxfp4', 32),
+        ('mxint8', 32),
+        ('mxint4', 32),
+    ]:
+      how = qarray.HowToQuantize(
+          qtype=qtype,
+          channelwise_axes=[0],
+          tiled_axes={1: tile_size},
+          hierarchical_scaling=True,
+      )
+      q = qarray.quantize(x, how)
+      self.assertEqual(q.scale.shape, (2, 32 // tile_size))
+      self.assertEqual(q.scale.dtype, x.dtype)
+      deq = qarray.dequantize(q)
+      self.assertTrue(jnp.all(jnp.isfinite(deq)))
+
+  def test_hierarchical_scaling_jit(self):
+    """Verifies that quantize with hierarchical_scaling works inside jax.jit."""
+    x = jax.random.normal(jax.random.key(42), (4, 32), dtype=jnp.float32)
+    how = qarray.HowToQuantize(
+        qtype='mxfp8_16',
+        channelwise_axes=[0],
+        tiled_axes={1: 16},
+        hierarchical_scaling=True,
+    )
+
+    @jax.jit
+    def quant_and_dequant(arr):
+      q = qarray.quantize(arr, how)
+      return qarray.dequantize(q)
+
+    out = quant_and_dequant(x)
+    self.assertEqual(out.shape, x.shape)
+    self.assertTrue(jnp.all(jnp.isfinite(out)))
+
+  def test_hierarchical_scaling_zeros_and_underflow(self):
+    """Verifies robustness to zeros and small values."""
+    x_zeros = jnp.zeros((2, 32), dtype=jnp.float32)
+    how = qarray.HowToQuantize(
+        qtype='mxfp8_16',
+        channelwise_axes=[0],
+        tiled_axes={1: 16},
+        hierarchical_scaling=True,
+    )
+    q_zeros = qarray.quantize(x_zeros, how)
+    self.assertTrue(jnp.all(jnp.isfinite(q_zeros.scale)))
+    self.assertTrue(jnp.all(jnp.isfinite(qarray.dequantize(q_zeros))))
+
+    # Very small numbers
+    x_small = jnp.ones((2, 32), dtype=jnp.float32) * 1e-12
+    q_small = qarray.quantize(x_small, how)
+    self.assertTrue(jnp.all(jnp.isfinite(q_small.scale)))
+    self.assertTrue(jnp.all(jnp.isfinite(qarray.dequantize(q_small))))
+
+  @parameterized.parameters(
+      ('mxfp8_16', 16, 27.0, 33.0, 0.045),
+      ('mxfp8', 32, 26.0, 33.0, 0.050),
+      ('mxint8', 32, 36.0, 45.0, 0.015),
+  )
+  def test_quantize_dequantize_sqnr_gaussian(
+      self, qtype, tile_size, min_snr, max_snr, max_rel_err
+  ):
+    """Verifies that quantize/dequantize on N(0, 1) achieves expected SQNR."""
+    key = jax.random.key(1234)
+    x = jax.random.normal(key, (128, 256), dtype=jnp.float32)
+
+    for hier in (False, True):
+      how = qarray.HowToQuantize(
+          qtype=qtype,
+          channelwise_axes=[0],
+          tiled_axes={1: tile_size},
+          hierarchical_scaling=hier,
+      )
+      q = qarray.quantize(x, how)
+      deq = qarray.dequantize(q)
+
+      noise = x - deq
+      sig_power = jnp.mean(jnp.square(x))
+      noise_power = jnp.mean(jnp.square(noise))
+      snr = 10.0 * jnp.log10(sig_power / noise_power)
+      rel_err = jnp.linalg.norm(noise) / jnp.linalg.norm(x)
+
+      self.assertGreater(float(snr), min_snr)
+      self.assertLess(float(snr), max_snr)
+      self.assertLess(float(rel_err), max_rel_err)
 
 
 if __name__ == '__main__':
