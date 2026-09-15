@@ -117,6 +117,10 @@ def get_symmetric_bound(qtype: jax.typing.DTypeLike) -> float:
       qtype = jnp.float8_e4m3fn
     case 'mxfp4' | 'nvfp4':
       qtype = jnp.float4_e2m1fn
+    case 'mxint8':
+      qtype = jnp.int8
+    case 'mxint4':
+      qtype = jnp.int4
 
   # Prevent common misconfigurations, e.g., use bf16 as qtype.
   if jnp.dtype(qtype).itemsize > 1 and jnp.dtype(qtype) != jnp.int16:
@@ -174,6 +178,10 @@ def convert_to(
       qtype = jnp.float8_e4m3fn
     case 'mxfp4' | 'nvfp4':
       qtype = jnp.float4_e2m1fn
+    case 'mxint8':
+      qtype = jnp.int8
+    case 'mxint4':
+      qtype = jnp.int4
 
   # Handles builtin qtypes.
   try:
