@@ -219,6 +219,22 @@ class NumericsTest(absltest.TestCase):
       out_mxint8 = numerics.convert_from(in_mxint8, "mxint8")
       self.assertIs(in_mxint8, out_mxint8)
 
+    with self.subTest("mxint4_bound"):
+      bound = numerics.get_symmetric_bound("mxint4")
+      self.assertEqual(bound, 7.5)
+
+    with self.subTest("mxint4_conversion"):
+      in_array = jnp.array([3.0, 15.0, -20.0], dtype=jnp.float32)
+      converted = numerics.convert_to(in_array, "mxint4")
+      self.assertEqual(converted.dtype, jnp.int4)
+      expected = jnp.array([3, 7, -8], dtype=jnp.int4)
+      self._assert_equal(converted, expected)
+
+    with self.subTest("mxint4_convert_from"):
+      in_mxint4 = jnp.array([1, -2], dtype=jnp.int4)
+      out_mxint4 = numerics.convert_from(in_mxint4, "mxint4")
+      self.assertIs(in_mxint4, out_mxint4)
+
 
 if __name__ == "__main__":
   absltest.main()

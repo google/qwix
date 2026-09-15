@@ -743,6 +743,76 @@ class DotGeneralQtTest(parameterized.TestCase):
         f'mxint8 drhs weight gradient SQNR {drhs_sqnr:.2f} dB is below 30 dB',
     )
 
+  def test_mxint4_sqnr(self):
+    """Verifies that mxint4 dot_general_qt achieves expected SQNR."""
+    key = jax.random.PRNGKey(42)
+    k1, k2, k3 = jax.random.split(key, 3)
+
+    lhs = jax.random.normal(k1, (2, 32, 64), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (64, 128), dtype=jnp.float32)
+    dout = jax.random.normal(k3, (2, 32, 128), dtype=jnp.float32)
+
+    dnums = (((2,), (0,)), ((), ()))
+    ref_fwd = jax.lax.dot_general(lhs, rhs, dnums)
+
+    def ref_loss(l, r):
+      return jnp.sum(jax.lax.dot_general(l, r, dnums) * dout)
+
+    ref_grad_lhs, ref_grad_rhs = jax.grad(ref_loss, argnums=(0, 1))(lhs, rhs)
+
+    config = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='mxint4',
+        rhs_qtype='mxint4',
+        dlhs_grad_qtype='mxint4',
+        drhs_grad_qtype='mxint4',
+        dlhs_residual_qtype='mxint4',
+        drhs_residual_qtype='mxint4',
+        tile_size=32,
+        dlhs_tile_size=32,
+        drhs_tile_size=32,
+        use_original_residuals=False,
+    )
+    test_fwd = dot_general_qt.dot_general_qt(lhs, rhs, dnums, config=config)
+    fwd_sqnr = float(
+        metrax.SNR.from_model_output(
+            predictions=test_fwd, targets=ref_fwd
+        ).compute()
+    )
+    self.assertGreater(
+        fwd_sqnr,
+        12.0,
+        f'mxint4 forward pass SQNR {fwd_sqnr:.2f} dB is below 12 dB',
+    )
+
+    def quant_loss(l, r):
+      return jnp.sum(
+          dot_general_qt.dot_general_qt(l, r, dnums, config=config) * dout
+      )
+
+    grad_lhs, grad_rhs = jax.grad(quant_loss, argnums=(0, 1))(lhs, rhs)
+
+    dlhs_sqnr = float(
+        metrax.SNR.from_model_output(
+            predictions=grad_lhs, targets=ref_grad_lhs
+        ).compute()
+    )
+    drhs_sqnr = float(
+        metrax.SNR.from_model_output(
+            predictions=grad_rhs, targets=ref_grad_rhs
+        ).compute()
+    )
+
+    self.assertGreater(
+        dlhs_sqnr,
+        12.0,
+        f'mxint4 dlhs gradient SQNR {dlhs_sqnr:.2f} dB is below 12 dB',
+    )
+    self.assertGreater(
+        drhs_sqnr,
+        12.0,
+        f'mxint4 drhs weight gradient SQNR {drhs_sqnr:.2f} dB is below 12 dB',
+    )
+
 
 if __name__ == '__main__':
   absltest.main()

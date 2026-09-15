@@ -310,9 +310,10 @@ class HowToQuantize:
         'mxfp4',
         'nvfp4',
         'mxint8',
+        'mxint4',
     ):
       resolved_tile_size = (
-          32 if self.qtype in ('mxfp8', 'mxfp4', 'mxint8') else 16
+          32 if self.qtype in ('mxfp8', 'mxfp4', 'mxint8', 'mxint4') else 16
       )
 
       if not self.tiled_axes:
@@ -584,7 +585,8 @@ def compute_scale_zero_point(
         .view(jnp.bfloat16)
         .astype(scale.dtype)
     )
-  elif qtype == 'mxint8':
+  elif qtype in ('mxint8', 'mxint4'):
+    # TODO(b/562134061): Research optimal scaling factor choice for mxint4.
     # Efficient bit manipulation for 2 ** ceil(log2(scale)) without
     # transcendentals:
     # In IEEE-754 float32, adding the mantissa mask (0x007FFFFF) carries into

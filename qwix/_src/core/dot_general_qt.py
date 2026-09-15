@@ -174,6 +174,7 @@ _MICROSCALED_QTYPES = frozenset({
     'mxfp4',
     'nvfp4',
     'mxint8',
+    'mxint4',
 })
 
 
