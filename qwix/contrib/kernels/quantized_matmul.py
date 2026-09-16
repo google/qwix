@@ -52,7 +52,7 @@ class QuantizedMatmulConfig:
   bm: int = 256
   bk: int = 512
   bn: int = 1024
-  dtype: jnp.dtype = jnp.float32
+  dtype: jnp.dtype = jnp.float32  # pyrefly: ignore[bad-assignment]
 
 
 def can_use_qmm(x, sx, y, sy, *, bm, bk, bn):

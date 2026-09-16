@@ -48,7 +48,7 @@ def _create_hadamard_matrix(
     *,
     row_sign_flip: bool,
     col_sign_flip: bool,
-    dtype: jnp.dtype = jnp.bfloat16,
+    dtype: jnp.dtype = jnp.bfloat16,  # pyrefly: ignore[bad-function-definition]
 ) -> tuple[jax.Array, jax.Array | None]:
   """Returns a Hadamard matrix of size 2^power x 2^power with random sign flips.
 
