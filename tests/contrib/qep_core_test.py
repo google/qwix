@@ -127,27 +127,21 @@ class QepCoreTest(parameterized.TestCase):
     h_qep = stats['hessian']
     h_delta = stats['hessian_delta']
 
+    quantize_fn = jax.jit(
+        functools.partial(
+            gptq_core.quantize_weight, how=how, blocksize=blocksize
+        )
+    )
+
     # Standard GPTQ: quantize with Hessian from float inputs.
     h_float = gptq_core.compute_hessian(x_float)
-    w_gptq = qarray.dequantize(
-        jax.jit(
-            functools.partial(
-                gptq_core.quantize_weight, how=how, blocksize=blocksize
-            )
-        )(w, h_float)[0]
-    )
+    w_gptq = qarray.dequantize(quantize_fn(w, h_float)[0])
 
     # QEP: weight_correct then quantize with Hessian from quantized inputs.
     w_corrected = qep_core.weight_correct(
         w, h_qep, h_delta, correction_factor=0.5, damping_factor=0.01
     )
-    w_qep = qarray.dequantize(
-        jax.jit(
-            functools.partial(
-                gptq_core.quantize_weight, how=how, blocksize=blocksize
-            )
-        )(w_corrected, h_qep)[0]
-    )
+    w_qep = qarray.dequantize(quantize_fn(w_corrected, h_qep)[0])
 
     # RTN baseline (no Hessian optimization at all).
     w_rtn = qarray.dequantize(qarray.quantize(w, how))
