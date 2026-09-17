@@ -298,9 +298,17 @@ def _is_same_quantization_schema(
   if jnp.dtype(ckpt_qtype) != jnp.dtype(template_qtype):
     return False
 
+  # Check if the checkpoint scale can be broadcast up onto the template scale.
   template_scale = flax_util.unbox(_get_template_field(template_param, 'scale'))
-  if tuple(checkpoint_param['scale'].shape) != tuple(template_scale.shape):
+  template_scale_shape = template_scale.shape
+  ckpt_scale_shape = checkpoint_param['scale'].shape
+  if len(ckpt_scale_shape) != len(template_scale_shape):
     return False
+  for src, dst in zip(
+      reversed(ckpt_scale_shape), reversed(template_scale_shape)
+  ):
+    if src == 0 or dst % src != 0:
+      return False
 
   ckpt_has_zero_point = checkpoint_param.get('zero_point') is not None
   template_has_zero_point = (
