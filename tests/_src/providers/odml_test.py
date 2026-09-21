@@ -272,6 +272,249 @@ class OdmlTest(parameterized.TestCase):
         },
     )
 
+  def test_linen_module_applied_twice_shares_quant_stats(self):
+    """A module applied twice in one call reuses one set of statistics."""
+
+    # Deliberately not @nn.compact: flax rewinds a compact module's scope after
+    # each call, which already restarts the op ids. Praxis-style layers declare
+    # their parameters in setup() and keep one scope, so they are the case that
+    # actually needs the op ids to be reset on entry.
+    class SetupDense(nn.Module):
+      features: int
+
+      def setup(self):
+        self.w = self.param('w', nn.initializers.normal(), (16, self.features))
+
+      def __call__(self, x):
+        return jnp.dot(x, self.w)
+
+    class AppliesTwice(nn.Module):
+
+      def setup(self):
+        self.inner = SetupDense(features=8)
+
+      def __call__(self, x):
+        # Classifier-free guidance applies one backbone to two different
+        # inputs. Both passes have to land on the same op ids, otherwise the
+        # second pass is uncalibrated at conversion time.
+        return self.inner(x) + self.inner(2 * x)
+
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*', weight_qtype=jnp.int8, act_qtype=jnp.int8
+        )
+    ]
+    qat_model = qwix_model.quantize_model(
+        AppliesTwice(), odml.OdmlQatProvider(rules)
+    )
+    qat_vars = qat_model.init(jax.random.key(0), jnp.ones((1, 16)))
+
+    stat_paths = {
+        '/'.join(k[:-1])
+        for k in flax.traverse_util.flatten_dict(qat_vars['quant_stats'])
+    }
+    self.assertIn('inner/dot0_lhs', stat_paths)
+    self.assertNotIn('inner/dot1_lhs', stat_paths)
+
+  def test_conversion_finds_weight_read_by_a_child_module(self):
+    """A weight is located by its owner, not by whoever consumes it."""
+
+    # Praxis routes every matmul through a child `EinsumOp` module, so the op
+    # that reads a weight commonly executes one level below the module that
+    # declares it. Locating the weight by the *current* module path then looks
+    # for `owner/op/w`, which does not exist.
+    class MatmulOp(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, w):
+        return jnp.dot(x, w)
+
+    class Owner(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        w = self.param('w', nn.initializers.normal(), (16, 8))
+        return MatmulOp()(x, w)
+
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*', weight_qtype=jnp.int8, act_qtype=jnp.int8
+        )
+    ]
+    model = Owner()
+    model_input = jnp.linspace(-1.0, 1.0, 16).reshape(1, 16)
+
+    qat_model = qwix_model.quantize_model(model, odml.OdmlQatProvider(rules))
+    qat_vars = qat_model.init(jax.random.key(0), model_input)
+    qat_res, new_vars = qat_model.apply(qat_vars, model_input, mutable=True)
+    qat_vars.update(new_vars)
+
+    conversion_provider = odml.OdmlConversionProvider(
+        rules, qat_vars['params'], qat_vars['quant_stats']
+    )
+    conversion_model = qwix_model.quantize_model(model, conversion_provider)
+
+    # Assert on the resolved path rather than only on the numerics: the
+    # fallback path happens to produce the same output here, so an end-to-end
+    # comparison would pass even when the lookup is wrong.
+    resolved = []
+    original = type(conversion_provider)._static_weight_path  # pylint: disable=protected-access
+
+    def _record(self, array, weight_name):
+      path = original(self, array, weight_name)
+      resolved.append(path)
+      return path
+
+    with mock.patch.object(
+        odml.OdmlConversionProvider, '_static_weight_path', _record
+    ):
+      conversion_res = conversion_model.apply(qat_vars, model_input)
+
+    # `w` belongs to the root module, even though `op` is what reads it.
+    self.assertIn(('w',), resolved)
+    self.assertNotIn(('MatmulOp_0', 'w'), resolved)
+    self.assertTrue(jnp.allclose(qat_res, conversion_res))
+
+  def test_min_and_max_inputs_are_not_independently_quantized(self):
+    """LiteRT requires both operands of min/max to share one scale."""
+
+    class ClampLike(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        w = self.param('w', nn.initializers.normal(), (16, 8))
+        y = jnp.dot(x, w)
+        # Calibrating the two operands separately gives them different scales,
+        # which the converter rejects with "violate the same scale
+        # constraint". The result is always one of the inputs, so taking the
+        # scale from the output instead is lossless.
+        return jnp.minimum(jnp.maximum(y, -1.0), 1.0)
+
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*', weight_qtype=jnp.int8, act_qtype=jnp.int8
+        )
+    ]
+    qat_model = qwix_model.quantize_model(
+        ClampLike(), odml.OdmlQatProvider(rules)
+    )
+    qat_vars = qat_model.init(
+        jax.random.key(0), jnp.linspace(-1.0, 1.0, 16).reshape(1, 16)
+    )
+
+    stat_names = {
+        k[-2] for k in flax.traverse_util.flatten_dict(qat_vars['quant_stats'])
+    }
+    self.assertContainsSubset({'dot0_lhs'}, stat_names)
+    for name in stat_names:
+      self.assertFalse(
+          name.startswith(('minimum', 'maximum')),
+          f'{name} should not have been calibrated as a min/max input.',
+      )
+
+  def test_per_tensor_activation_scale_applies_at_any_rank(self):
+    """Static activation scales are per-tensor, so their rank is incidental."""
+
+    # A model is calibrated on training batches but converted against whatever
+    # shapes the serving signature declares, and the two need not have the same
+    # rank. The stored statistic is a single element either way, so re-ranking
+    # it is numerically a no-op -- but the divide in
+    # `quantize_with_scale_zero_point` asserts equal ranks rather than relying
+    # on broadcasting.
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*', weight_qtype=jnp.int8, act_qtype=jnp.int8
+        )
+    ]
+    model = nn.Dense(8, use_bias=False)
+
+    rank3_input = jnp.linspace(-1.0, 1.0, 2 * 3 * 16).reshape(2, 3, 16)
+    qat_model = qwix_model.quantize_model(model, odml.OdmlQatProvider(rules))
+    qat_vars = qat_model.init(jax.random.key(0), rank3_input)
+    _, new_vars = qat_model.apply(qat_vars, rank3_input, mutable=True)
+    qat_vars.update(new_vars)
+
+    conversion_model = qwix_model.quantize_model(
+        model,
+        odml.OdmlConversionProvider(
+            rules, qat_vars['params'], qat_vars['quant_stats']
+        ),
+    )
+    rank2_input = jnp.linspace(-1.0, 1.0, 16).reshape(1, 16)
+    conversion_res = conversion_model.apply(qat_vars, rank2_input)
+
+    self.assertEqual(conversion_res.shape, (1, 8))
+    self.assertTrue(jnp.all(jnp.isfinite(conversion_res)))
+
+  def test_uncalibrated_op_falls_back_to_float(self):
+    """An op QAT never saw stays in float instead of aborting the conversion."""
+
+    class MaybeScaled(nn.Module):
+      # Inference-only code is the common case: an exported signature can
+      # reach arithmetic the training graph never executes, so no statistic
+      # was ever collected for it.
+      add_uncalibrated_op: bool = False
+
+      @nn.compact
+      def __call__(self, x):
+        w = self.param('w', nn.initializers.normal(), (16, 8))
+        y = jnp.dot(x, w)
+        if self.add_uncalibrated_op:
+          # Deliberately an identity. The model's *output* is itself a
+          # static-range quantization point, calibrated during QAT, so an op
+          # that changed the output range would be clamped to that range and
+          # the comparison below would measure saturation rather than this
+          # fix.
+          y = y * jnp.asarray(1.0)
+        return y
+
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*', weight_qtype=jnp.int8, act_qtype=jnp.int8
+        )
+    ]
+    model_input = jnp.linspace(-1.0, 1.0, 16).reshape(1, 16)
+
+    qat_model = qwix_model.quantize_model(
+        MaybeScaled(), odml.OdmlQatProvider(rules)
+    )
+    qat_vars = qat_model.init(jax.random.key(0), model_input)
+    _, new_vars = qat_model.apply(qat_vars, model_input, mutable=True)
+    qat_vars.update(new_vars)
+
+    def _convert(add_uncalibrated_op):
+      # A fresh provider per conversion: providers carry per-run state.
+      conversion_model = qwix_model.quantize_model(
+          MaybeScaled(add_uncalibrated_op=add_uncalibrated_op),
+          odml.OdmlConversionProvider(
+              rules, qat_vars['params'], qat_vars['quant_stats']
+          ),
+      )
+      return conversion_model.apply(qat_vars, model_input)
+
+    baseline = _convert(add_uncalibrated_op=False)
+
+    # Convert the variant with the extra op, reusing statistics that never
+    # covered it. The QAT model did not simulate quantization there either, so
+    # leaving it in float is what reproduces the trained network.
+    with self.assertLogs(level='WARNING') as logs:
+      with_extra_op = _convert(add_uncalibrated_op=True)
+
+    self.assertTrue(
+        any('No quant_stats for' in line for line in logs.output), logs.output
+    )
+    # Compare the two conversions rather than comparing against the QAT run:
+    # QAT derives its scales in-graph from the running statistics while
+    # conversion bakes in the final ones, so the two drift for reasons that
+    # have nothing to do with this fix. Between the two conversions the only
+    # difference is the identity op, and leaving it in float means it cannot
+    # perturb the result at all.
+    self.assertTrue(
+        jnp.array_equal(with_extra_op, baseline),
+        f'the uncalibrated op perturbed the result: {with_extra_op} vs'
+        f' {baseline}',
+    )
+
   @parameterized.parameters(False, True)
   def test_linen_original_weight_marker_is_initialized(self, use_axis_metadata):
     """Tests Linen tags one direct logical array for boxed and raw params."""
