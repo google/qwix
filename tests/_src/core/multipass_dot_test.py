@@ -1110,6 +1110,61 @@ class MultiPassDotTest(parameterized.TestCase):
     self.assertAlmostEqual(snr_fp8_mixed4, fp8_mixed4_target, delta=1.5)
     self.assertAlmostEqual(err_fp8_mixed4, err_fp8_mixed4_target, delta=0.002)
 
+    # 10. Microscaled Hybrid Strategies with Native Hardware FP8 Accumulation
+    res_mx_fp4 = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='three_pass_mxfp8_mxfp4',
+    )
+    snr_mx_fp4 = float(compute_snr_db(ref_f32, res_mx_fp4))
+    err_mx_fp4 = float(compute_relative_error(ref_f32, res_mx_fp4))
+
+    res_mx_int4 = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='three_pass_mxfp8_mxint4',
+    )
+    snr_mx_int4 = float(compute_snr_db(ref_f32, res_mx_int4))
+    err_mx_int4 = float(compute_relative_error(ref_f32, res_mx_int4))
+
+    res_mx_mixed4 = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='three_pass_mxfp8_mxmixed4',
+    )
+    snr_mx_mixed4 = float(compute_snr_db(ref_f32, res_mx_mixed4))
+    err_mx_mixed4 = float(compute_relative_error(ref_f32, res_mx_mixed4))
+
+    print(
+        f'Microscale MXFP8+MXFP4: SNR={snr_mx_fp4:.2f} dB, err={err_mx_fp4:.4f}'
+    )
+    print(
+        f'Microscale MXFP8+MXINT4: SNR={snr_mx_int4:.2f} dB,'
+        f' err={err_mx_int4:.4f}'
+    )
+    print(
+        f'Microscale MXFP8+MXMixed4: SNR={snr_mx_mixed4:.2f} dB,'
+        f' err={err_mx_mixed4:.4f}'
+    )
+
+    mx_fp4_target = 43.48 if is_ghostfish() else 44.09
+    err_mx_fp4_target = 0.0067 if is_ghostfish() else 0.0063
+    self.assertAlmostEqual(snr_mx_fp4, mx_fp4_target, delta=1.5)
+    self.assertAlmostEqual(err_mx_fp4, err_mx_fp4_target, delta=0.002)
+
+    mx_int4_target = 41.96 if is_ghostfish() else 42.29
+    err_mx_int4_target = 0.0080 if is_ghostfish() else 0.0077
+    self.assertAlmostEqual(snr_mx_int4, mx_int4_target, delta=1.5)
+    self.assertAlmostEqual(err_mx_int4, err_mx_int4_target, delta=0.002)
+
+    mx_mixed4_target = 43.24 if is_ghostfish() else 43.82
+    err_mx_mixed4_target = 0.0069 if is_ghostfish() else 0.0064
+    self.assertAlmostEqual(snr_mx_mixed4, mx_mixed4_target, delta=1.5)
+    self.assertAlmostEqual(err_mx_mixed4, err_mx_mixed4_target, delta=0.002)
+
   def test_qtype_specified_with_multipass_mode_raises_error(self):
     """Verifies that passing lhs_qtype or rhs_qtype with multipass_mode raises ValueError."""
     lhs = jnp.ones((4, 4), dtype=jnp.float32)
@@ -1814,6 +1869,78 @@ class MultiPassDotTest(parameterized.TestCase):
         down_fp_dtype.qvalue,
         jnp.array([-6.0, -6.0, 0.0, 6.0, 6.0], dtype=jnp.float4_e2m1fn),
     )
+
+  @parameterized.parameters(
+      ('mxint4', jnp.float8_e4m3fn, 14),
+      ('mxint4', jnp.float8_e5m2, 28),
+      ('mxfp4', jnp.float8_e4m3fn, 14),
+      ('mxfp4', jnp.float8_e5m2, 28),
+      ('mxfp8', jnp.float8_e4m3fn, 0),
+  )
+  def test_pure_4bit_uniform_sampling(
+      self, input_type, target_dtype, max_range, seed=42
+  ):
+    """Verifies that 4-bit to FP8 conversion introduces zero noise across lossless dynamic range."""
+    block_size = 1024
+    sub_block_size = 32
+    num_sub_blocks = block_size // sub_block_size
+
+    if input_type in ('fp4', 'mxfp4'):
+      magnitudes = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+      valid_set = np.array(magnitudes + [-x for x in magnitudes if x != 0])
+      actual_qtype = jnp.float4_e2m1fn
+    elif input_type in ('int4', 'mxint4'):
+      valid_set = np.arange(-8, 8, dtype=np.float32)
+      actual_qtype = jnp.int4
+    elif input_type in ('fp8', 'mxfp8'):
+      valid_bytes = np.array(
+          [i for i in range(256) if i not in (0x7F, 0xFF)], dtype=np.uint8
+      )
+      valid_set = jax.lax.bitcast_convert_type(
+          jnp.array(valid_bytes), jnp.float8_e4m3fn
+      ).astype(np.float32)
+      actual_qtype = jnp.float8_e4m3fn
+    else:
+      raise ValueError(f'Unsupported input_type: {input_type}')
+
+    np.random.seed(seed)
+    elements = np.random.choice(valid_set, size=block_size).astype(np.float32)
+
+    # Sample scaling factors: 2^alpha for alpha in [1, max_range + 1]
+    # E5M2 supports up to 28 octaves; E4M3 supports up to 14 octaves.
+    alphas = np.random.randint(1, max_range + 2, size=num_sub_blocks)
+    microscales = np.power(2.0, alphas, dtype=np.float32)
+
+    # Construct QArray with sub-blocks along axis 1 (contracting dimension)
+    qval = elements.reshape((1, block_size)).astype(actual_qtype)
+    scale = microscales.reshape((1, num_sub_blocks))
+    q_tensor = qarray.QArray(qvalue=qval, scale=scale, qtype=actual_qtype)
+
+    dnums = (((1,), (0,)), ((), ()))
+    fp8_array, fp8_block_scale = multipass_dot._block_shift_to_fp8(
+        q_tensor, target_dtype, dimension_numbers=dnums, for_lhs=True
+    )
+
+    reconstructed = fp8_array.astype(np.float32) * fp8_block_scale
+    expected_values = qarray.dequantize(q_tensor)
+
+    max_diff = float(np.max(np.abs(expected_values - reconstructed)))
+    if max_diff > 0:
+      diff = np.abs(expected_values - reconstructed)
+      idx = np.unravel_index(np.argmax(diff), diff.shape)
+      print(
+          f'FAIL input_type={input_type} target_dtype={target_dtype}'
+          f' max_range={max_range}'
+      )
+      print(
+          f'idx={idx} expected={expected_values[idx]}'
+          f' reconstructed={reconstructed[idx]} diff={max_diff}'
+      )
+      print(
+          f'qval={qval[idx]} fp8_array={fp8_array[idx]}'
+          f' fp8_block_scale={fp8_block_scale} scale={scale}'
+      )
+    self.assertEqual(max_diff, 0.0)
 
 
 if __name__ == '__main__':
