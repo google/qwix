@@ -15,6 +15,7 @@
 
 import dataclasses
 import functools
+import math
 from typing import Callable, Collection, Mapping, Sequence, TypeAlias
 from flax import nnx
 import flax.struct
@@ -281,7 +282,7 @@ def sparsify(array: jax.Array, how: sparsity.SparsityRule) -> jax.Array:
 class HowToQuantize:
   """Determines how to quantize an array."""
 
-  # The the logical type of the qvalue.
+  # The logical type of the qvalue.
   # E.g. jnp.int8, jnp.int4, jnp.float8_*, nf4, etc.
   # Actual qvalue dtype is determined by the quantization method.
   qtype: jax.typing.DTypeLike
@@ -538,6 +539,25 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
     raise ValueError(f'Unsupported calibration: {how.calibration_method}')
 
 
+def _tiny_sqrt(dtype: jax.typing.DTypeLike) -> float:
+  """Returns sqrt of the smallest normal value of the given dtype.
+
+  This is used as the threshold below which a scale is considered degenerate
+  (i.e. the calibration range collapsed to a point) and is replaced by 1.
+
+  The sqrt is deliberately computed on the host rather than with `jnp.sqrt`.
+  With x64 disabled, JAX evaluates `jnp.sqrt` in float32, and `finfo(float64)
+  .tiny` (2.2e-308) is far below the smallest float32 subnormal, so the result
+  flushes to exactly 0.0 and the guard becomes a no-op. float64 calibration
+  arrays do occur in practice, e.g. when a float32 sum is divided by an int32
+  count, which numpy promotes to float64.
+
+  Args:
+    dtype: The dtype whose smallest normal value is used.
+  """
+  return math.sqrt(float(jnp.finfo(dtype).tiny))
+
+
 def compute_scale_zero_point(
     calibration: Mapping[str, jax.Array], qtype: jax.typing.DTypeLike
 ) -> tuple[jax.Array, jax.Array | None]:
@@ -554,16 +574,18 @@ def compute_scale_zero_point(
   if 'min' in calibration and 'max' in calibration:
     qmin, qmax = numerics.get_asymmetric_bound(qtype)
     scale = (calibration['max'] - calibration['min']) / (qmax - qmin)
-    tiny_sqrt = jnp.sqrt(jnp.finfo(scale.dtype).tiny)
-    scale = jnp.where(scale < tiny_sqrt, jnp.ones_like(scale), scale)
+    scale = jnp.where(
+        scale < _tiny_sqrt(scale.dtype), jnp.ones_like(scale), scale
+    )
     zero_point = qmin - calibration['min'] / scale
     zero_point = numerics.convert_to(zero_point, qtype)
   elif 'absmax' in calibration:
     qmax = numerics.get_symmetric_bound(qtype)
     scale = calibration['absmax'] / qmax
     # Maybe adding an epsilon (1e-7) is faster?
-    tiny_sqrt = jnp.sqrt(jnp.finfo(scale.dtype).tiny)
-    scale = jnp.where(scale < tiny_sqrt, jnp.ones_like(scale), scale)
+    scale = jnp.where(
+        scale < _tiny_sqrt(scale.dtype), jnp.ones_like(scale), scale
+    )
     zero_point = None
   else:
     raise ValueError(f'Unsupported calibration: {calibration}')
