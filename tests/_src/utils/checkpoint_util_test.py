@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import math
 import os
 from typing import Any
 from unittest import mock
@@ -85,6 +86,42 @@ def _build_linear_reference(
   return abs_quantized_linear, orig_params, reference_params
 
 
+def _build_sharded_einsum_reference(
+    q_rules: list[qconfig.QuantizationRule],
+    model_input: jax.Array,
+    mesh: jax.sharding.Mesh,
+) -> tuple[nnx.Module, dict[str, Any], dict[str, Any]]:
+  with jax.set_mesh(mesh):
+    fp_einsum = nnx.Einsum(
+        "btd,dnh->btnh",
+        (16, 8, 10),
+        (8, 10),
+        rngs=nnx.Rngs(0),
+        kernel_init=nnx.with_partitioning(
+            nnx.initializers.lecun_normal(), ("fsdp", "tp", None)
+        ),
+        bias_init=nnx.with_partitioning(nnx.initializers.zeros, ("tp", None)),
+    )
+
+  unsharded_state = nnx.state(fp_einsum)
+  sharding = nnx.get_named_sharding(unsharded_state, mesh)
+  sharded_state = jax.device_put(unsharded_state, sharding)
+  nnx.update(fp_einsum, sharded_state)
+
+  with jax.set_mesh(mesh):
+    abs_ptq_einsum = nnx.eval_shape(
+        lambda: qwix_model.quantize_model(
+            fp_einsum,
+            ptq.PtqProvider(q_rules),
+            model_input,
+        ),
+    )
+
+  orig_params = nnx.to_pure_dict(nnx.state(fp_einsum, nnx.Param))
+  reference_params = ptq.quantize_params(orig_params, abs_ptq_einsum)
+  return abs_ptq_einsum, orig_params, reference_params
+
+
 class PrequantizedPtqTest(parameterized.TestCase):
 
   def test_process_prequantized_params_nnx(self):
@@ -142,34 +179,9 @@ class PrequantizedPtqTest(parameterized.TestCase):
         ),
     ]
     model_input = jnp.ones((10, 1, 16))
-    with jax.set_mesh(mesh):
-      fp_einsum = nnx.Einsum(
-          "btd,dnh->btnh",
-          (16, 8, 10),
-          (8, 10),
-          rngs=nnx.Rngs(0),
-          kernel_init=nnx.with_partitioning(
-              nnx.initializers.lecun_normal(), ("fsdp", "tp", None)
-          ),
-          bias_init=nnx.with_partitioning(nnx.initializers.zeros, ("tp", None)),
-      )
-
-    unsharded_state = nnx.state(fp_einsum)
-    sharding = nnx.get_named_sharding(unsharded_state, mesh)
-    sharded_state = jax.device_put(unsharded_state, sharding)
-    nnx.update(fp_einsum, sharded_state)
-
-    with jax.set_mesh(mesh):
-      abs_ptq_einsum = nnx.eval_shape(
-          lambda: qwix_model.quantize_model(
-              fp_einsum,
-              ptq.PtqProvider(q_rules),
-              model_input,
-          ),
-      )
-
-    orig_params = nnx.to_pure_dict(nnx.state(fp_einsum, nnx.Param))
-    reference_params = ptq.quantize_params(orig_params, abs_ptq_einsum)
+    abs_ptq_einsum, _, reference_params = _build_sharded_einsum_reference(
+        q_rules, model_input, mesh
+    )
     orbax_payload = _to_orbax_payload(reference_params)
 
     with jax.set_mesh(mesh):
@@ -211,6 +223,153 @@ class PrequantizedPtqTest(parameterized.TestCase):
     )
 
     _assert_trees_allclose(self, processed_params, reference_params)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="scalar", ckpt_scale_shape=()),
+      dict(testcase_name="per_channel_rank_deficient", ckpt_scale_shape=(6,)),
+      dict(testcase_name="per_channel", ckpt_scale_shape=(1, 6)),
+  )
+  def test_process_prequantized_params_coerced_not_requantized(
+      self, ckpt_scale_shape
+  ):
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*", weight_qtype=jnp.int8, tile_size=4
+        ),
+    ]
+    model_input = jnp.ones((10, 12))
+    abs_ptq_linear, _, reference_params = _build_linear_reference(
+        q_rules, model_input
+    )
+
+    kernel_template = reference_params["kernel"]["array"]
+    qvalue = kernel_template["qvalue"]
+    self.assertEqual(kernel_template["scale"].shape, (3, 6))
+    # Use distinct values per element to easily detect misaligned broadcasts.
+    size = math.prod(ckpt_scale_shape)
+    ckpt_scale = jnp.arange(1, size + 1, dtype=jnp.bfloat16).reshape(
+        ckpt_scale_shape
+    )
+    orbax_payload = _to_orbax_payload({
+        "kernel": {"array": {"qvalue": qvalue, "scale": ckpt_scale}},
+        "bias": reference_params["bias"],
+    })
+
+    processed = checkpoint_util.process_prequantized_params(
+        orbax_payload, abs_ptq_linear
+    )
+    processed_kernel = processed["kernel"]["array"]
+
+    # The checkpoint scale is broadcastable up to the template scale, so it is
+    # coerced not requantized.
+    expected_scale = np.broadcast_to(
+        np.reshape(
+            jax.device_get(ckpt_scale),
+            (1,) * (2 - len(ckpt_scale_shape)) + ckpt_scale_shape,
+        ),
+        kernel_template["scale"].shape,
+    )
+    np.testing.assert_array_equal(
+        jax.device_get(processed_kernel["qvalue"]), jax.device_get(qvalue)
+    )
+    np.testing.assert_array_equal(
+        jax.device_get(processed_kernel["scale"]), expected_scale
+    )
+
+  @parameterized.named_parameters(
+      dict(testcase_name="scalar_scale", ckpt_scale_shape=()),
+      dict(testcase_name="full_rank_scale", ckpt_scale_shape=(1, 1, 1)),
+  )
+  def test_process_prequantized_params_sharded_coerced_not_requantized(
+      self, ckpt_scale_shape
+  ):
+    mesh = jax.make_mesh(
+        (2, 2),
+        ("fsdp", "tp"),
+        axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
+    )
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*", weight_qtype=jnp.int8, tile_size=4
+        ),
+    ]
+    model_input = jnp.ones((10, 1, 16))
+    abs_ptq_einsum, _, reference_params = _build_sharded_einsum_reference(
+        q_rules, model_input, mesh
+    )
+
+    kernel_template = reference_params["kernel"]["array"]
+    qvalue = kernel_template["qvalue"]
+    # The checkpoint scale is broadcastable up to the template scale, so it is
+    # coerced not requantized.
+    per_tensor_scale = jnp.full(ckpt_scale_shape, 0.5, dtype=jnp.bfloat16)
+    orbax_payload = _to_orbax_payload({
+        "kernel": {"array": {"qvalue": qvalue, "scale": per_tensor_scale}},
+        "bias": reference_params["bias"],
+    })
+
+    with jax.set_mesh(mesh):
+      processed_params = checkpoint_util.process_prequantized_params(
+          orbax_payload, abs_ptq_einsum
+      )
+    processed_kernel = processed_params["kernel"]["array"]
+
+    np.testing.assert_array_equal(
+        jax.device_get(processed_kernel["qvalue"]), jax.device_get(qvalue)
+    )
+    np.testing.assert_array_equal(
+        jax.device_get(processed_kernel["scale"]),
+        np.full(kernel_template["scale"].shape, 0.5, dtype=jnp.bfloat16),
+    )
+    self.assertEqual(
+        _get_canonical_named_sharding(processed_kernel["scale"]),
+        _get_canonical_named_sharding(kernel_template["scale"]),
+    )
+
+    with jax.set_mesh(mesh):
+      nnx.update(abs_ptq_einsum, processed_params)
+      abs_ptq_einsum(model_input)
+
+  def test_process_prequantized_params_finer_scale_is_requantized(self):
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*", weight_qtype=jnp.int8, tile_size=4
+        ),
+    ]
+    model_input = jnp.ones((10, 12))
+    abs_ptq_linear, orig_params, reference_params = _build_linear_reference(
+        q_rules, model_input
+    )
+
+    kernel_template = reference_params["kernel"]["array"]
+    qvalue = kernel_template["qvalue"]
+    # A per-channel checkpoint scale is finer-grained than the tiled template
+    # scale, so it cannot be broadcast up and must be requantized instead.
+    per_channel_scale = jnp.full(qvalue.shape, 2, dtype=jnp.bfloat16)
+    self.assertNotEqual(per_channel_scale.shape, kernel_template["scale"].shape)
+    orbax_payload = _to_orbax_payload({
+        "kernel": {"array": {"qvalue": qvalue, "scale": per_channel_scale}},
+        "bias": reference_params["bias"],
+    })
+
+    processed_params = checkpoint_util.process_prequantized_params(
+        orbax_payload, abs_ptq_linear
+    )
+
+    source_qarray = qarray.QArray(qvalue=qvalue, scale=per_channel_scale)
+    dequantized_kernel = qarray.dequantize(source_qarray)
+    expected_params = ptq.quantize_params(
+        {"kernel": dequantized_kernel, "bias": orig_params["bias"]},
+        abs_ptq_linear,
+    )
+
+    self.assertEqual(
+        processed_params["kernel"]["array"]["scale"].shape,
+        kernel_template["scale"].shape,
+    )
+    _assert_trees_allclose(self, processed_params, expected_params)
+    nnx.update(abs_ptq_linear, processed_params)
+    abs_ptq_linear(model_input)
 
   @parameterized.named_parameters(
       dict(

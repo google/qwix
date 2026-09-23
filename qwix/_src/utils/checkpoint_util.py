@@ -170,6 +170,27 @@ def _apply_sharding_and_dtype(
 
   target_dtype = template_value.dtype
   template_shape = template_value.shape
+
+  # Handle shape promotion. This must happen before device placement because
+  # the template sharding is only valid for values that already have the
+  # template shape.
+  checkpoint_shape = jnp.shape(checkpoint_value)
+  if checkpoint_shape != template_shape:
+    # For scales and zero_point(allow_broadcast), broadcast 2d blocksize
+    # scales/zero_points into 1d.
+    if allow_broadcast:
+      try:
+        checkpoint_value = qarray.broadcast_to(checkpoint_value, template_shape)
+      except Exception as e:
+        raise ValueError(
+            f'{path} has shape {checkpoint_shape}, expected {template_shape}.'
+        ) from e
+    # For qvalue (not allow_broadcast), it should match the template shape.
+    else:
+      raise ValueError(
+          f'{path} has shape {checkpoint_shape}, expected {template_shape}.'
+      )
+
   if use_checkpoint_sharding:
     sharding = _get_sharding(getattr(checkpoint_value, 'sharding', None), path)
   else:
@@ -186,25 +207,6 @@ def _apply_sharding_and_dtype(
   # Handle dtype promotion to match template dtype.
   if checkpoint_value.dtype != target_dtype:
     checkpoint_value = checkpoint_value.astype(target_dtype)
-
-  # Handle shape promotion.
-  if checkpoint_value.shape != template_shape:
-    # For scales and zero_point(allow_broadcast), broadcast 2d blocksize
-    # scales/zero_points into 1d.
-    if allow_broadcast:
-      try:
-        checkpoint_value = qarray.broadcast_to(checkpoint_value, template_shape)
-      except Exception as e:
-        raise ValueError(
-            f'{path} has shape {checkpoint_value.shape}, expected'
-            f' {template_shape}.'
-        ) from e
-    # For qvalue (not allow_broadcast), it should match the template shape.
-    else:
-      raise ValueError(
-          f'{path} has shape {checkpoint_value.shape}, expected'
-          f' {template_shape}.'
-      )
 
   return checkpoint_value
 
@@ -269,7 +271,7 @@ def _process_quantized_param(
 def _is_same_quantization_schema(
     checkpoint_param: Mapping[str, Any], template_param: Any
 ) -> bool:
-  """Checks if the checkpoint and template have the same quantization schema.
+  """Checks if the checkpoint and template have or can be coerced to the same quantization schema.
 
   Args:
     checkpoint_param: A dictionary containing quantized leaves (`qvalue`,
@@ -278,8 +280,8 @@ def _is_same_quantization_schema(
       and types for coercion.
 
   Returns:
-    True if the checkpoint and template have the same quantization schema, False
-    otherwise.
+    True if the checkpoint and template have or can be coerced to the same
+    quantization schema, False otherwise.
   """
   if 'qvalue' not in checkpoint_param or 'scale' not in checkpoint_param:
     return False
@@ -298,9 +300,20 @@ def _is_same_quantization_schema(
   if jnp.dtype(ckpt_qtype) != jnp.dtype(template_qtype):
     return False
 
+  # Check if the checkpoint scale can be broadcast up onto the template scale.
+  # qarray.broadcast_to left-pads a lower-rank scale with 1s so ranks need not
+  # match exactly but a higher-rank checkpoint scale cannot be reduced. Compare
+  # dimensions from the right to match that padding.
   template_scale = flax_util.unbox(_get_template_field(template_param, 'scale'))
-  if tuple(checkpoint_param['scale'].shape) != tuple(template_scale.shape):
+  template_scale_shape = template_scale.shape
+  ckpt_scale_shape = checkpoint_param['scale'].shape
+  if len(ckpt_scale_shape) > len(template_scale_shape):
     return False
+  for src, dst in zip(
+      reversed(ckpt_scale_shape), reversed(template_scale_shape)
+  ):
+    if src == 0 or dst % src != 0:
+      return False
 
   ckpt_has_zero_point = checkpoint_param.get('zero_point') is not None
   template_has_zero_point = (
