@@ -43,6 +43,7 @@ class DotGeneralQtConfig:
   rhs_collect_quant_stat: Callable[[Any], Any] | None = None
   lhs_disable_channelwise_axes: bool = False
   rhs_disable_channelwise_axes: bool = False
+  multipass_mode: str | None = None
 
   # Backward pass (dlhs).
   dlhs_grad_qtype: jax.typing.DTypeLike | None = None  # incoming gradient
@@ -50,6 +51,7 @@ class DotGeneralQtConfig:
   dlhs_tile_size: int | float | None = None
   dlhs_stochastic_rounding_noise_fn: stochastic_rounding.NoiseFn | None = None
   dlhs_grad_disable_channelwise_axes: bool = False
+  dlhs_multipass_mode: str | None = None
 
   # Backward pass (drhs).
   drhs_grad_qtype: jax.typing.DTypeLike | None = None  # incoming gradient
@@ -57,6 +59,7 @@ class DotGeneralQtConfig:
   drhs_tile_size: int | float | None = None
   drhs_stochastic_rounding_noise_fn: stochastic_rounding.NoiseFn | None = None
   drhs_grad_disable_channelwise_axes: bool = False
+  drhs_multipass_mode: str | None = None
 
   # Whether not to clip the gradients to the calibration ranges of the quantized
   # inputs. Enabling this improves the performance but may decrease the
@@ -202,7 +205,7 @@ def _requires_unquantized_residual(
 
   Block-scaled residuals cannot be reused because quantization scales defined
   for the forward contraction axis do not align with the new contraction axis
-  in the backward pass.
+  in the backward pass. Multi-pass modes also require original residuals.
 
   Args:
     config: The quantization configuration.
@@ -211,7 +214,13 @@ def _requires_unquantized_residual(
   Returns:
     True if the backward contraction cannot reuse the forward operand.
   """
-  return config.use_original_residuals or _is_block_scaled(operand_qt)
+  return (
+      config.use_original_residuals
+      or config.multipass_mode is not None
+      or config.dlhs_multipass_mode is not None
+      or config.drhs_multipass_mode is not None
+      or _is_block_scaled(operand_qt)
+  )
 
 
 def _get_residual_for_backward(
@@ -333,7 +342,21 @@ def dot_general_qt_fwd(
       saved_rhs_calibration,
       config,
   )
-  return dot_general.dot_general(lhs, rhs, dimension_numbers), residuals
+  if config.multipass_mode is not None:
+    # Multi-pass residual decomposition requires unquantized inputs (lhs_in,
+    # rhs_in) to compute successive residual passes (A_0 = quant(A),
+    # A_1 = quant(A - dequant(A_0))). Passing already-quantized QArrays (lhs,
+    # rhs) would cause residual decomposition to zero out subsequent passes.
+    out = dot_general.dot_general(
+        lhs_in,
+        rhs_in,
+        dimension_numbers,
+        multipass_mode=config.multipass_mode,
+        tile_size=config.tile_size,
+    )
+  else:
+    out = dot_general.dot_general(lhs, rhs, dimension_numbers)
+  return out, residuals
 
 
 def dot_general_qt_bwd(
@@ -377,6 +400,19 @@ def dot_general_qt_bwd(
       y_qtype = config.drhs_residual_qtype
       y_calibration_method = config.drhs_residual_calibration_method
       y_disable_channelwise_axes = config.drhs_residual_disable_channelwise_axes
+
+    multipass_mode = (
+        config.dlhs_multipass_mode if for_dlhs else config.drhs_multipass_mode
+    )
+    if multipass_mode is not None:
+      grad_res = dot_general.dot_general(
+          g,
+          y,
+          dimension_numbers=bwd_dnums,
+          multipass_mode=multipass_mode,
+          tile_size=g_tile_size,
+      )
+      return jax.lax.transpose(grad_res, transpose_axes)
 
     if g_qtype and numerics.should_quantize(g.dtype):
       if isinstance(y, qarray.QArray):
