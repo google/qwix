@@ -272,6 +272,50 @@ class OdmlTest(parameterized.TestCase):
         },
     )
 
+  def test_linen_module_applied_twice_shares_quant_stats(self):
+    """A module applied twice in one call reuses one set of statistics."""
+
+    # Deliberately not @nn.compact: flax rewinds a compact module's scope after
+    # each call, which already restarts the op ids. Praxis-style layers declare
+    # their parameters in setup() and keep one scope, so they are the case that
+    # actually needs the op ids to be reset on entry.
+    class SetupDense(nn.Module):
+      features: int
+
+      def setup(self):
+        self.w = self.param('w', nn.initializers.normal(), (16, self.features))
+
+      def __call__(self, x):
+        return jnp.dot(x, self.w)
+
+    class AppliesTwice(nn.Module):
+
+      def setup(self):
+        self.inner = SetupDense(features=8)
+
+      def __call__(self, x):
+        # Classifier-free guidance applies one backbone to two different
+        # inputs. Both passes have to land on the same op ids, otherwise the
+        # second pass is uncalibrated at conversion time.
+        return self.inner(x) + self.inner(2 * x)
+
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*', weight_qtype=jnp.int8, act_qtype=jnp.int8
+        )
+    ]
+    qat_model = qwix_model.quantize_model(
+        AppliesTwice(), odml.OdmlQatProvider(rules)
+    )
+    qat_vars = qat_model.init(jax.random.key(0), jnp.ones((1, 16)))
+
+    stat_paths = {
+        '/'.join(k[:-1])
+        for k in flax.traverse_util.flatten_dict(qat_vars['quant_stats'])
+    }
+    self.assertIn('inner/dot0_lhs', stat_paths)
+    self.assertNotIn('inner/dot1_lhs', stat_paths)
+
   @parameterized.parameters(False, True)
   def test_linen_original_weight_marker_is_initialized(self, use_axis_metadata):
     """Tests Linen tags one direct logical array for boxed and raw params."""
