@@ -27,6 +27,14 @@ This module provides multi-pass residual quantization emulation:
     4. 'two_pass_rhs_fp8': A_0 B_0 + A_0 B_1
        LHS uses 1 pass, RHS uses 2 residual passes.
 
+Additionally it supports int8 by decomposing into int4. This could be useful on
+devices with high int4 FLOPs. For the purposes of emulation we do this on the
+fp8 native path. We support the following int8 emulation modes:
+    1. 'four_pass_int4': full emulation for int8 x int8 matmul
+    2. 'three_pass_int4': Truncated emulation, dropping the A1 B1 term
+    3. 'two_pass_lhs_int4': Two passes for the LHS (emulating int8 x int4)
+    4. 'two_pass_rhs_int4': Two passes for the RHS (emulating int4 x int8)
+
 All decomposed passes are evaluated on quantized operands directly through the
 hardware FP8 path (via `_fast_dot_general` with hardware FP8 accumulation) or
 via `jax.nn.scaled_matmul` on supported GPUs.
@@ -53,6 +61,7 @@ This design choice is made because:
    yields similar SQNR to independent scale choices.
 """
 
+import functools
 from typing import Any, Literal, TypeAlias
 import jax
 import jax.numpy as jnp
@@ -66,6 +75,10 @@ MultiPassMode: TypeAlias = Literal[
     'four_pass_fp8',
     'two_pass_lhs_fp8',
     'two_pass_rhs_fp8',
+    'four_pass_int4',
+    'three_pass_int4',
+    'two_pass_lhs_int4',
+    'two_pass_rhs_int4',
 ]
 
 
@@ -165,6 +178,304 @@ def _residual_decompose(
   return tuple(passes)
 
 
+def _prep_int8_parts(x: jax.Array) -> tuple[jax.Array, jax.Array]:
+  """Decomposes signed INT8 into high and low signed INT4 parts in [-8, 7]."""
+  x = x.astype(jnp.int8)
+  x_h = x >> 4
+  x_l = (x & 0x0F) - 8
+  return x_h, x_l
+
+
+def _emulated_signed_int8_dot_general(
+    a: jax.Array,
+    b: jax.Array,
+    dimension_numbers: jax.lax.DotDimensionNumbers = (((1,), (0,)), ((), ())),
+    *,
+    compute_dtype: jax.typing.DTypeLike = jnp.float8_e4m3fn,
+    triangular: bool = False,
+    preferred_element_type: jax.typing.DTypeLike | None = None,
+) -> jax.Array:
+  """Emulated signed int8 GEMM using 4 (full) or 3 (triangular) uncoupled passes."""
+  (lhs_ca, rhs_ca), _ = dimension_numbers
+
+  a_h, a_l = _prep_int8_parts(a)
+  b_h, b_l = _prep_int8_parts(b)
+
+  # Note: Despite converting to compute_type here, if native int4 is supported
+  # it can be used for all passes.
+  a_h_c = a_h.astype(compute_dtype)
+  a_l_c = a_l.astype(compute_dtype)
+  b_h_c = b_h.astype(compute_dtype)
+  b_l_c = b_l.astype(compute_dtype)
+
+  def _dot(x: jax.Array, y: jax.Array) -> jax.Array:
+    return jax.lax.dot_general(
+        x,
+        y,
+        dimension_numbers=dimension_numbers,
+        preferred_element_type=jnp.float32,
+    ).astype(jnp.int32)
+
+  p11 = _dot(a_h_c, b_h_c)
+  p10 = _dot(a_h_c, b_l_c)
+  p01 = _dot(a_l_c, b_h_c)
+
+  xy_product = (p11 << 8) + ((p10 + p01) << 4)
+  if not triangular:
+    p00 = _dot(a_l_c, b_l_c)
+    xy_product = xy_product + p00
+
+  k_size = 1
+  for d in lhs_ca:
+    k_size *= a.shape[d]
+
+  # pylint: disable=protected-access
+  lhs_transpose, rhs_transpose = dg._get_scale_transpose(
+      dimension_numbers, (a.ndim, b.ndim)
+  )
+  # pylint: enable=protected-access
+  sum_a = qarray.transpose_array(
+      jnp.sum(a, axis=lhs_ca, dtype=jnp.int32, keepdims=True), lhs_transpose
+  )
+  sum_b = qarray.transpose_array(
+      jnp.sum(b, axis=rhs_ca, dtype=jnp.int32, keepdims=True), rhs_transpose
+  )
+
+  res = xy_product + (sum_a * 8) + (sum_b * 8) - (64 * k_size)
+  if preferred_element_type is not None:
+    return res.astype(preferred_element_type)
+  return res
+
+
+def _triangular_signed_int8_dot_general(
+    a: jax.Array,
+    b: jax.Array,
+    dimension_numbers: jax.lax.DotDimensionNumbers = (((1,), (0,)), ((), ())),
+    *,
+    compute_dtype: jax.typing.DTypeLike = jnp.float8_e4m3fn,
+    preferred_element_type: jax.typing.DTypeLike | None = None,
+) -> jax.Array:
+  """Triangular signed int8 GEMM using 3 uncoupled native signed int4 passes."""
+  return _emulated_signed_int8_dot_general(
+      a,
+      b,
+      dimension_numbers=dimension_numbers,
+      compute_dtype=compute_dtype,
+      triangular=True,
+      preferred_element_type=preferred_element_type,
+  )
+
+
+def _asymmetric_signed_int4_int8_dot_general(
+    a: jax.Array,
+    b: jax.Array,
+    dimension_numbers: jax.lax.DotDimensionNumbers = (((1,), (0,)), ((), ())),
+    *,
+    compute_dtype: jax.typing.DTypeLike = jnp.float8_e4m3fn,
+    multipass_mode: str = 'two_pass_lhs_int4',
+    preferred_element_type: jax.typing.DTypeLike | None = None,
+) -> jax.Array:
+  """Asymmetric signed INT4 x INT8 matrix multiplication via 2 INT4 passes."""
+  a_int = a.astype(jnp.int32)
+  b_int = b.astype(jnp.int32)
+
+  def _dot(x: jax.Array, y: jax.Array) -> jax.Array:
+    return jax.lax.dot_general(
+        x.astype(compute_dtype),
+        y.astype(compute_dtype),
+        dimension_numbers=dimension_numbers,
+        preferred_element_type=jnp.float32,
+    ).astype(jnp.int32)
+
+  (lhs_ca, rhs_ca), _ = dimension_numbers
+  # pylint: disable=protected-access
+  lhs_transpose, rhs_transpose = dg._get_scale_transpose(
+      dimension_numbers, (a_int.ndim, b_int.ndim)
+  )
+  # pylint: enable=protected-access
+
+  if multipass_mode == 'two_pass_rhs_int4':
+    b_h, b_l = _prep_int8_parts(b_int)
+
+    p1 = _dot(a_int, b_h)
+    p0 = _dot(a_int, b_l)
+
+    sum_a = qarray.transpose_array(
+        jnp.sum(a_int, axis=lhs_ca, keepdims=True), lhs_transpose
+    )
+    res = (p1 << 4) + p0 + (sum_a * 8)
+  elif multipass_mode == 'two_pass_lhs_int4':
+    a_h, a_l = _prep_int8_parts(a_int)
+
+    p1 = _dot(a_h, b_int)
+    p0 = _dot(a_l, b_int)
+
+    sum_b = qarray.transpose_array(
+        jnp.sum(b_int, axis=rhs_ca, keepdims=True), rhs_transpose
+    )
+    res = (p1 << 4) + p0 + (sum_b * 8)
+  else:
+    raise ValueError(
+        f'Unsupported multipass_mode for asymmetric int8: {multipass_mode}'
+    )
+
+  if preferred_element_type is not None:
+    return res.astype(preferred_element_type)
+  return res
+
+
+def _asymmetric_int_dot_general(
+    lhs: jax.Array,
+    rhs: jax.Array,
+    dimension_numbers: jax.lax.DotDimensionNumbers = (((1,), (0,)), ((), ())),
+    *,
+    compute_dtype: jax.typing.DTypeLike = jnp.float8_e4m3fn,
+    multipass_mode: str = 'two_pass_lhs_int4',
+    tile_size: int | None = 256,
+    preferred_element_type: jax.typing.DTypeLike | None = None,
+    **kwargs: Any,
+) -> jax.Array:
+  """Evaluates asymmetric integer matrix multiplication."""
+  del kwargs
+  return _int8_multipass_dot_general(
+      lhs,
+      rhs,
+      dimension_numbers=dimension_numbers,
+      compute_dtype=compute_dtype,
+      multipass_mode=multipass_mode,
+      tile_size=tile_size,
+      preferred_element_type=preferred_element_type,
+  )
+
+
+def _int8_multipass_dot_general(
+    lhs: jax.Array,
+    rhs: jax.Array,
+    dimension_numbers: jax.lax.DotDimensionNumbers = (((1,), (0,)), ((), ())),
+    *,
+    multipass_mode: str = 'four_pass_int4',
+    compute_dtype: jax.typing.DTypeLike = jnp.float8_e4m3fn,
+    tile_size: int | None = 256,
+    preferred_element_type: jax.typing.DTypeLike | None = None,
+    **kwargs: Any,
+) -> jax.Array:
+  """Executes scaled INT8 (channelwise or subchannel) GEMM via INT4 passes."""
+  del kwargs
+  match multipass_mode:
+    case 'four_pass_int4':
+      lhs_qtype = jnp.int8
+      rhs_qtype = jnp.int8
+      dot_fn = _emulated_signed_int8_dot_general
+    case 'three_pass_int4':
+      lhs_qtype = jnp.int8
+      rhs_qtype = jnp.int8
+      dot_fn = _triangular_signed_int8_dot_general
+    case 'two_pass_lhs_int4':
+      lhs_qtype = jnp.int8
+      rhs_qtype = jnp.int4
+      dot_fn = functools.partial(
+          _asymmetric_signed_int4_int8_dot_general,
+          multipass_mode='two_pass_lhs_int4',
+      )
+    case 'two_pass_rhs_int4':
+      lhs_qtype = jnp.int4
+      rhs_qtype = jnp.int8
+      dot_fn = functools.partial(
+          _asymmetric_signed_int4_int8_dot_general,
+          multipass_mode='two_pass_rhs_int4',
+      )
+    case _:
+      raise ValueError(f'Unknown multipass_mode: {multipass_mode!r}')
+
+  if not isinstance(lhs, qarray.QArray):
+    lhs_how = dg.get_how_to_quantize(
+        dimension_numbers=dimension_numbers,
+        ndims=(lhs.ndim, rhs.ndim),
+        for_lhs=True,
+        tile_size=tile_size,
+        qtype=lhs_qtype,
+    )
+    q_lhs = qarray.quantize(lhs, lhs_how)
+  else:
+    q_lhs = lhs
+
+  if not isinstance(rhs, qarray.QArray):
+    rhs_how = dg.get_how_to_quantize(
+        dimension_numbers=dimension_numbers,
+        ndims=(lhs.ndim, rhs.ndim),
+        for_lhs=False,
+        tile_size=tile_size,
+        qtype=rhs_qtype,
+    )
+    q_rhs = qarray.quantize(rhs, rhs_how)
+  else:
+    q_rhs = rhs
+
+  (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dimension_numbers
+  lhs_value = q_lhs.qvalue
+  rhs_value = q_rhs.qvalue
+  lhs_scale = q_lhs.scale
+  rhs_scale = q_rhs.scale
+
+  lhs_tiled_axes = qarray.get_tiled_axes(q_lhs)
+  rhs_tiled_axes = qarray.get_tiled_axes(q_rhs)
+
+  lhs_tiled_ca = {}
+  rhs_tiled_ca = {}
+  for l, r in zip(lhs_ca, rhs_ca):
+    lhs_tile_size = lhs_tiled_axes.get(l)
+    rhs_tile_size = rhs_tiled_axes.get(r)
+    if lhs_tile_size and rhs_tile_size and lhs_tile_size != rhs_tile_size:
+      raise ValueError(
+          'Contracting axes must be tiled with the same tile size.'
+          f' {lhs_tiled_axes=} {rhs_tiled_axes=} {dimension_numbers=}'
+      )
+    if lhs_tile_size or rhs_tile_size:
+      lhs_tiled_ca[l] = lhs_tile_size or rhs_tile_size
+      rhs_tiled_ca[r] = lhs_tile_size or rhs_tile_size
+
+  # Split lhs/rhs_value for tiled axes.
+  lhs_value = qarray.split_axis(lhs_value, lhs_tiled_ca)
+  rhs_value = qarray.split_axis(rhs_value, rhs_tiled_ca)
+
+  # Update dimension_numbers and get sum_axes for tiled axes.
+  # pylint: disable=protected-access
+  lhs_ca, lhs_ba, sum_axes = dg._apply_tiling(lhs_ca, lhs_ba, lhs_tiled_ca)
+  rhs_ca, rhs_ba, _ = dg._apply_tiling(rhs_ca, rhs_ba, rhs_tiled_ca)
+  dimension_numbers = (lhs_ca, rhs_ca), (lhs_ba, rhs_ba)
+
+  # Transpose lhs/rhs_scale for generic broadcasting.
+  lhs_scale_transpose, rhs_scale_transpose = dg._get_scale_transpose(
+      dimension_numbers, (len(lhs_value.shape), len(rhs_value.shape))
+  )
+  # pylint: enable=protected-access
+  if lhs_scale is not None:
+    lhs_scale = qarray.split_axis(lhs_scale, {a: 1 for a in lhs_tiled_ca})
+    lhs_scale = qarray.transpose_array(lhs_scale, lhs_scale_transpose)
+  if rhs_scale is not None:
+    rhs_scale = qarray.split_axis(rhs_scale, {a: 1 for a in rhs_tiled_ca})
+    rhs_scale = qarray.transpose_array(rhs_scale, rhs_scale_transpose)
+
+  res = dot_fn(
+      lhs_value,
+      rhs_value,
+      dimension_numbers=dimension_numbers,
+      compute_dtype=compute_dtype,
+      preferred_element_type=jnp.float32,
+  )
+
+  if lhs_scale is not None:
+    res = qarray.call_with_generic_broadcast(jnp.multiply, res, lhs_scale)
+  if rhs_scale is not None:
+    res = qarray.call_with_generic_broadcast(jnp.multiply, res, rhs_scale)
+  if sum_axes:
+    res = jnp.sum(res, axis=sum_axes)
+
+  if preferred_element_type is not None:
+    return res.astype(preferred_element_type)
+  return res
+
+
 def multipass_dot_general(
     lhs: jax.Array,
     rhs: jax.Array,
@@ -211,22 +522,37 @@ def multipass_dot_general(
     )
   tile_size = kwargs.pop('tile_size', None)
 
-  # Multi-pass quantization only supports FP8 in this version.
-  lhs_qtype = jnp.float8_e4m3fn
-  rhs_qtype = jnp.float8_e4m3fn
+  if multipass_mode in (
+      'four_pass_int4',
+      'three_pass_int4',
+      'two_pass_lhs_int4',
+      'two_pass_rhs_int4',
+  ):
+    compute_dtype = kwargs.pop('compute_dtype', jnp.float8_e4m3fn)
+    return _int8_multipass_dot_general(
+        lhs,
+        rhs,
+        dimension_numbers=dimension_numbers,
+        compute_dtype=compute_dtype,
+        multipass_mode=multipass_mode,
+        tile_size=tile_size,
+        preferred_element_type=preferred_element_type,
+        **kwargs,
+    )
 
+  # Except for the emulated int modes above, we only support FP8 for now.
   lhs_how = dg.get_how_to_quantize(
       dimension_numbers=dimension_numbers,
       ndims=(lhs.ndim, rhs.ndim),
       for_lhs=True,
-      qtype=lhs_qtype,
+      qtype=jnp.float8_e4m3fn,
       tile_size=tile_size,
   )
   rhs_how = dg.get_how_to_quantize(
       dimension_numbers=dimension_numbers,
       ndims=(lhs.ndim, rhs.ndim),
       for_lhs=False,
-      qtype=rhs_qtype,
+      qtype=jnp.float8_e4m3fn,
       tile_size=tile_size,
   )
 
@@ -273,5 +599,6 @@ def multipass_dot_general(
     raise ValueError(
         f'Unknown multipass mode: {multipass_mode!r}. Expected one of:'
         " 'three_pass_fp8', 'four_pass_fp8', 'two_pass_lhs_fp8',"
-        " 'two_pass_rhs_fp8'."
+        " 'two_pass_rhs_fp8', 'four_pass_int4',"
+        " 'three_pass_int4', 'two_pass_lhs_int4', 'two_pass_rhs_int4'."
     )
