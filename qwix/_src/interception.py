@@ -184,6 +184,16 @@ def wrap_func_intercepted(
   return wrapper
 
 
+class _ActiveInterceptor:
+  """Tracks an active interceptor and its enabled state in a thread."""
+
+  __slots__ = ("interceptor", "enabled")
+
+  def __init__(self, interceptor: Interceptor, enabled: bool = True):
+    self.interceptor = interceptor
+    self.enabled = enabled
+
+
 class _InterceptionManager:
   """Manages the lifecycle of function interceptions.
 
@@ -198,7 +208,8 @@ class _InterceptionManager:
     nested way.
 
   Since patching a Python module is a global state mutation, this class has to
-  be a process-wide singleton and be protected by a lock.
+  be a process-wide singleton and be protected by a lock for administrative
+  operations (such as installing or removing global module/bytecode patches).
 
   When an interceptor is installed, this class will
 
@@ -212,7 +223,8 @@ class _InterceptionManager:
   """
 
   def __init__(self):
-    # Accessing following variables must be protected by this lock.
+    # Administrative operations (installing/removing patches) are protected by
+    # this lock.
     self._lock = threading.Lock()
 
     # A mapping from intercepted function names to the original functions. This
@@ -220,22 +232,27 @@ class _InterceptionManager:
     # to restore the original functions when the interception is removed.
     self._original_fns: dict[str, types.FunctionType] = {}
 
-    # A list of interceptors, in installation order. We don't expect too many
-    # interceptors, so it's fine to use a list for all the interceptors, and
-    # it's fine to iterate over all of them in _on_intercepted_called.
-    self._interceptors: list[Interceptor] = []
+    # Globally installed interceptors: interceptor_id -> Interceptor.
+    self._global_interceptors: dict[int, Interceptor] = {}
 
-    # A dict of { (thread_id, interceptor_id): enabled } indicating whether the
-    # current thread should apply the interception. The interception only
-    # applies when the key (thread_id, interceptor_id) is in the dict and the
-    # value enabled is True.
-    self._intercepted_threads: dict[tuple[int, int], bool] = {}
+    # Reference count of active threads per interceptor:
+    # interceptor_id -> count.
+    self._interceptor_refcounts: dict[int, int] = {}
+
+    # Thread-local storage for per-thread active/disabled interceptor state.
+    self._local = threading.local()
+
+  def _get_thread_interceptors(self) -> dict[int, _ActiveInterceptor]:
+    """Returns the thread-local dictionary of active interceptors."""
+    interceptors = getattr(self._local, "interceptors", None)
+    if interceptors is None:
+      interceptors = {}
+      self._local.interceptors = interceptors
+    return interceptors
 
   def is_active(self, interceptor: Interceptor) -> bool:
     """Returns whether the interceptor is active for the current thread."""
-    this_thread = threading.get_ident()
-    with self._lock:
-      return (this_thread, interceptor.id) in self._intercepted_threads
+    return interceptor.id in self._get_thread_interceptors()
 
   def activate_interceptor(self, interceptor: Interceptor):
     """Activates the interceptor for the current thread.
@@ -249,26 +266,29 @@ class _InterceptionManager:
     """
     interceptor_id = interceptor.id
     this_thread = threading.get_ident()
+    thread_interceptors = self._get_thread_interceptors()
+    if interceptor_id in thread_interceptors:
+      raise ValueError(f"{interceptor_id} already activated in {this_thread}.")
+    thread_interceptors[interceptor_id] = _ActiveInterceptor(
+        interceptor=interceptor, enabled=True
+    )
     with self._lock:
-      if (this_thread, interceptor_id) in self._intercepted_threads:
-        raise ValueError(
-            f"{interceptor_id} already activated in {this_thread}."
-        )
-      self._intercepted_threads[(this_thread, interceptor_id)] = True
-      # Check if the interceptor is already installed by other threads.
-      if any(interceptor_id == i.id for i in self._interceptors):
+      if interceptor_id in self._global_interceptors:
+        self._interceptor_refcounts[interceptor_id] += 1
         return
-      self._interceptors.append(interceptor)
       # Register the interception for all the intercepted names.
       registered = []
       try:
+        self._global_interceptors[interceptor_id] = interceptor
+        self._interceptor_refcounts[interceptor_id] = 1
         for name in interceptor:
           self._maybe_apply_interception(name)
           registered.append(name)
       except ValueError as e:
-        # Uninstall to ensure data consistency if an registration fails.
-        del self._intercepted_threads[(this_thread, interceptor_id)]
-        self._interceptors.pop()
+        # Uninstall to ensure data consistency if a registration fails.
+        del thread_interceptors[interceptor_id]
+        self._global_interceptors.pop(interceptor_id, None)
+        self._interceptor_refcounts.pop(interceptor_id, None)
         for name in registered:
           self._maybe_remove_interception(name)
         raise e
@@ -277,26 +297,20 @@ class _InterceptionManager:
     """Deactivates the interceptor for the current thread."""
     interceptor_id = interceptor.id
     this_thread = threading.get_ident()
+    thread_interceptors = self._get_thread_interceptors()
+    # The current thread must already be intercepted.
+    if interceptor_id not in thread_interceptors:
+      raise ValueError(f"{interceptor_id} not activated for {this_thread}.")
+    if not thread_interceptors[interceptor_id].enabled:
+      raise ValueError(f"{interceptor_id} is disabled for {this_thread}.")
+    del thread_interceptors[interceptor_id]
     with self._lock:
-      # The current thread must already be intercepted.
-      if (this_thread, interceptor_id) not in self._intercepted_threads:
-        raise ValueError(f"{interceptor_id} not activated for {this_thread}.")
-      if not self._intercepted_threads[(this_thread, interceptor_id)]:
-        raise ValueError(f"{interceptor_id} is disabled for {this_thread}.")
-      del self._intercepted_threads[(this_thread, interceptor_id)]
-      # Check if any other threads are still using this interceptor.
-      if any(interceptor_id == iid for _, iid in self._intercepted_threads):
-        return
-      # Remove the interceptor. This is inefficient but we don't expect too
-      # many interceptors.
-      interceptor_index = next(
-          i
-          for i, interceptor in enumerate(self._interceptors)
-          if interceptor.id == interceptor_id
-      )
-      interceptor = self._interceptors.pop(interceptor_index)
-      for name in interceptor:
-        self._maybe_remove_interception(name)
+      self._interceptor_refcounts[interceptor_id] -= 1
+      if self._interceptor_refcounts[interceptor_id] == 0:
+        del self._interceptor_refcounts[interceptor_id]
+        removed_interceptor = self._global_interceptors.pop(interceptor_id)
+        for name in removed_interceptor:
+          self._maybe_remove_interception(name)
 
   def _maybe_apply_interception(self, name: str):
     """Tries to patch a specific Python attribute.
@@ -323,7 +337,7 @@ class _InterceptionManager:
     )
     if attr == "__code__":  # special handling for code objects.
       # Check if we accidentally register different aliases for the same object.
-      if aux_data.get(obj.__code__, "fn", None) is not None:  # pytype: disable=attribute-error
+      if aux_data.get(obj.__code__, "fn", None) is not None:  # pyrefly: ignore[missing-attribute]
         raise ValueError(f"Intercept aliases for the same object: {name}.")
       # _copy_fn is needed because obj will be modified below.
       self._original_fns[name] = _copy_fn(obj)
@@ -349,7 +363,10 @@ class _InterceptionManager:
     Args:
       name: The name of the function to un-intercept.
     """
-    if any(name in interceptor for interceptor in self._interceptors):
+    if any(
+        name in interceptor
+        for interceptor in self._global_interceptors.values()
+    ):
       return
     obj, attr = _resolve_path(name)
     if attr == "__code__":
@@ -360,51 +377,46 @@ class _InterceptionManager:
 
   def _on_intercepted_called(self, name: str, args, kwargs):
     """Called when an intercepted function is called."""
-    # Locate the interceptor to disable and the handler to call.
-    this_thread = threading.get_ident()
-    interceptor_to_use = None
-    with self._lock:
-      # We apply the earliest interceptor first. This creates a behavior that
-      # a later-installed interceptor will be called inside an earlier-installed
-      # interceptor.
-      for interceptor in self._interceptors:
-        interceptor_id = interceptor.id
-        if (
-            self._intercepted_threads.get((this_thread, interceptor_id), False)
-            and name in interceptor
-        ):
-          # Disable this interceptor for the current thread to avoid recursion.
-          self._intercepted_threads[(this_thread, interceptor_id)] = False
-          interceptor_to_use = interceptor_id, interceptor
-          break
+    # Locate the interceptor to disable and the handler to call using
+    # thread-local storage.
+    target_entry = None
+    thread_interceptors = self._get_thread_interceptors()
+    # We apply the earliest interceptor first. This creates a behavior that
+    # a later-installed interceptor will be called inside an earlier-installed
+    # interceptor.
+    for entry in thread_interceptors.values():
+      if entry.enabled and name in entry.interceptor:
+        target_entry = entry
+        break
 
-    if interceptor_to_use is None:
+    if target_entry is None:
       return self._original_fns[name](*args, **kwargs)
+
+    # Disable this interceptor for the current thread to avoid recursion.
+    target_entry.enabled = False
     try:
-      return interceptor_to_use[1][name](*args, **kwargs)
+      return target_entry.interceptor[name](*args, **kwargs)
     finally:
-      with self._lock:
-        self._intercepted_threads[(this_thread, interceptor_to_use[0])] = True
+      target_entry.enabled = True
 
   def disable_interception(self) -> list[int]:
     """Disables all interceptions for the current thread and returns the list of disabled interceptors."""
-    this_thread = threading.get_ident()
     disabled_interceptor_ids = []
-    with self._lock:
-      for (tid, iid), enabled in self._intercepted_threads.items():
-        if tid == this_thread and enabled:
-          self._intercepted_threads[(tid, iid)] = False
-          disabled_interceptor_ids.append(iid)
+    for entry in self._get_thread_interceptors().values():
+      if entry.enabled:
+        entry.enabled = False
+        disabled_interceptor_ids.append(entry.interceptor.id)
     return disabled_interceptor_ids
 
   def enable_interception(self, interceptor_ids: list[int]):
     """Enables the given interceptions for the current thread."""
     this_thread = threading.get_ident()
-    with self._lock:
-      for iid in interceptor_ids:
-        if self._intercepted_threads[(this_thread, iid)]:
-          raise ValueError(f"{iid} is already enabled for {this_thread}.")
-        self._intercepted_threads[(this_thread, iid)] = True
+    thread_interceptors = self._get_thread_interceptors()
+    for iid in interceptor_ids:
+      entry = thread_interceptors.get(iid)
+      if entry is None or entry.enabled:
+        raise ValueError(f"{iid} is already enabled for {this_thread}.")
+      entry.enabled = True
 
 
 interception_manager = _InterceptionManager()
@@ -425,7 +437,7 @@ def _fn_to_code(fn: Function) -> types.CodeType:
     import inspect  # pylint: disable=g-import-not-at-top,redefined-outer-name,reimported
     from qwix._src import aux_data  # pylint: disable=g-import-not-at-top,redefined-outer-name,reimported
 
-    fn = aux_data.get(inspect.currentframe().f_code, "fn")  # pytype: disable=attribute-error # pyrefly: ignore
+    fn = aux_data.get(inspect.currentframe().f_code, "fn")  # pyrefly: ignore[missing-attribute]
     return fn(*args, **kwargs)
 
   code = wrapper.__code__.replace()  # this creates a new code object

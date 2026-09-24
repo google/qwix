@@ -400,6 +400,156 @@ class InterceptionTest(absltest.TestCase):
     interception.interception_manager.deactivate_interceptor(i_code)
     self.assertEqual(jax.lax.sin(0.0), 0.0)
 
+  def test_concurrent_multithreaded_interception(self):
+    num_threads = 8
+    barrier = threading.Barrier(num_threads)
+    results = [None] * num_threads
+
+    def worker(tid):
+      def my_sin(x):
+        return jax.lax.sin(x) + (tid + 1) * 10.0
+
+      interceptor = lambda: interception.Interceptor(
+          mapping={"jax.lax.sin": my_sin}, id=100 + tid
+      )
+
+      def compute(x):
+        return jax.lax.sin(x)
+
+      wrapped_compute = interception.wrap_func_intercepted(
+          compute, interceptor, disable_jit=True
+      )
+
+      barrier.wait()
+      results[tid] = [wrapped_compute(0.0) for _ in range(50)]
+
+    threads = [
+        threading.Thread(target=worker, args=(i,)) for i in range(num_threads)
+    ]
+    for t in threads:
+      t.start()
+    for t in threads:
+      t.join()
+
+    for tid in range(num_threads):
+      expected = (tid + 1) * 10.0
+      self.assertEqual(results[tid], [expected] * 50)
+
+  def test_concurrent_same_interceptor_shared(self):
+    num_threads = 8
+    barrier = threading.Barrier(num_threads)
+    results = [None] * num_threads
+
+    def replaced_cos(x):
+      return jax.lax.cos(x) + 42.0
+
+    interceptor = lambda: interception.Interceptor(
+        mapping={"jax.lax.cos": replaced_cos}, id=200
+    )
+
+    def worker(tid):
+      def compute(x):
+        return jax.lax.cos(x)
+
+      wrapped = interception.wrap_func_intercepted(
+          compute, interceptor, disable_jit=True
+      )
+
+      barrier.wait()
+      results[tid] = [wrapped(0.0) for _ in range(50)]
+
+    threads = [
+        threading.Thread(target=worker, args=(i,)) for i in range(num_threads)
+    ]
+    for t in threads:
+      t.start()
+    for t in threads:
+      t.join()
+
+    for tid in range(num_threads):
+      self.assertEqual(results[tid], [43.0] * 50)
+
+  def test_concurrent_disable_interceptions(self):
+    barrier = threading.Barrier(2)
+    t1_results = []
+    t2_results = []
+
+    interceptor = lambda: interception.Interceptor(
+        mapping={"jax.lax.cos": lambda x: jax.lax.cos(x) + 100.0}, id=300
+    )
+
+    def compute(x):
+      return jax.lax.cos(x)
+
+    wrapped = interception.wrap_func_intercepted(
+        compute, interceptor, disable_jit=True
+    )
+
+    @interception.disable_interceptions
+    def compute_disabled(x):
+      return jax.lax.cos(x)
+
+    def worker1():
+      barrier.wait()
+      for _ in range(50):
+
+        def inner(x):
+          return compute_disabled(x)
+
+        w = interception.wrap_func_intercepted(
+            inner, interceptor, disable_jit=True
+        )
+        t1_results.append(w(0.0))
+
+    def worker2():
+      barrier.wait()
+      for _ in range(50):
+        t2_results.append(wrapped(0.0))
+
+    th1 = threading.Thread(target=worker1)
+    th2 = threading.Thread(target=worker2)
+    th1.start()
+    th2.start()
+    th1.join()
+    th2.join()
+
+    self.assertEqual(t1_results, [1.0] * 50)
+    self.assertEqual(t2_results, [101.0] * 50)
+
+  def test_is_active_thread_isolation(self):
+    i = interception.Interceptor(
+        mapping={"jax.lax.sin": lambda x: jax.lax.sin(x) + 1}, id=400
+    )
+    barrier1 = threading.Barrier(2)
+    barrier2 = threading.Barrier(2)
+    barrier3 = threading.Barrier(2)
+    t2_checks = []
+
+    def worker():
+      barrier1.wait()
+      t2_checks.append(interception.interception_manager.is_active(i))
+      interception.interception_manager.activate_interceptor(i)
+      t2_checks.append(interception.interception_manager.is_active(i))
+      barrier2.wait()
+      barrier3.wait()
+      t2_checks.append(interception.interception_manager.is_active(i))
+      interception.interception_manager.deactivate_interceptor(i)
+      t2_checks.append(interception.interception_manager.is_active(i))
+
+    th = threading.Thread(target=worker)
+    th.start()
+
+    interception.interception_manager.activate_interceptor(i)
+    self.assertTrue(interception.interception_manager.is_active(i))
+    barrier1.wait()
+    barrier2.wait()
+    interception.interception_manager.deactivate_interceptor(i)
+    self.assertFalse(interception.interception_manager.is_active(i))
+    barrier3.wait()
+    th.join()
+
+    self.assertEqual(t2_checks, [False, True, True, False])
+
 
 if __name__ == "__main__":
   absltest.main()
