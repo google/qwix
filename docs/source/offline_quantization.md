@@ -4,7 +4,8 @@ Qwix's Offline Quantization feature enables loading pre-quantized checkpoints
 and continuing training or inference workloads in the desired target numeric.
 
 *   **Quantized Training/Inference**: Keep weights in the original quantization
-    schema for quantized training or optimized serving.
+    schema or requantize weights to another quantization schema for quantized
+    training or optimized serving.
 *   **Full-Precision Training/Inference**: Dequantize weights back to
     full-precision (e.g. BF16) for continued training or full-precision
     inference.
@@ -57,6 +58,8 @@ quantization_rules = qwix.restore_quantization_rules(
     qwix.QuantizationRule,
     tile_size=64,
 )
+# If applicable, replace quantization rules as needed for the target
+# quantization schema.
 
 
 def build_model():
@@ -284,6 +287,7 @@ def override_opaque_layers(
         shape[-2] // block_size,
         shape[-1] // block_size,
     )
+    # Override to the target qtype.
     return {
         "array": {
             "qvalue": nnx.Param(
