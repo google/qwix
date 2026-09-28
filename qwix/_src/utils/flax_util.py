@@ -105,7 +105,20 @@ def get_or_create_variable(
     # Instead of module.variable, use module.scope.variable which allows us to
     # create variables in non-compact modules.
     assert module.scope is not None
-    variable = module.scope.variable(collection, name, init_fn)
+    scope = module.scope
+    if scope.name_reserved(name, collection) and scope.has_variable(
+        collection, name
+    ):
+      # This module body is running again within the same `apply`, which
+      # happens whenever a model applies the same layer more than once (for
+      # example the conditional and unconditional passes of classifier-free
+      # guidance). `Scope.variable` would reserve the name a second time and
+      # flax rejects that, and a non-compact scope is never rewound between
+      # invocations. Bind to the variable the first invocation created so the
+      # invocations share one set of statistics.
+      variable = flax.core.scope.Variable(scope, collection, name, unbox=True)
+    else:
+      variable = scope.variable(collection, name, init_fn)
     _check_shape(variable.value, init_fn)
     return variable
   elif isinstance(module, nnx.Module):
