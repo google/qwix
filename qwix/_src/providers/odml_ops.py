@@ -145,6 +145,18 @@ class AuxDataKey(str, enum.Enum):
   # static weight.
   WEIGHT_NAME = 'weight_name'  # str
 
+  # The full path of the weight in the parameter tree, rooted at the module
+  # `apply` was called on, e.g. `('encoder', 'ffn', 'linear', 'w')`.
+  #
+  # WEIGHT_NAME alone is not enough to locate a weight in the static parameter
+  # tree, because the op that consumes it does not necessarily execute inside
+  # the module that owns it. Praxis, for instance, routes every matmul through
+  # a child `EinsumOp` module, so at interception time the current module path
+  # is `.../linear/einsum` while the parameter lives at `.../linear/w`. This
+  # key is captured where the parameter is actually read, so it stays correct
+  # regardless of which module the consuming op runs in.
+  WEIGHT_PATH = 'weight_path'  # tuple[str, ...]
+
   # Whether this exact array is the direct logical value exposed by the
   # Linen/NNX parameter API, with no subsequently intercepted tensor transform.
   # This is stricter than WEIGHT_NAME, but it does not prove that a lifted or
@@ -166,6 +178,7 @@ class AuxDataKey(str, enum.Enum):
 # mechanism its output cannot be treated as the direct parameter API value.
 _VALUE_DEPENDENT_METADATA = (
     AuxDataKey.WEIGHT_NAME,
+    AuxDataKey.WEIGHT_PATH,
     AuxDataKey.FQ_RULE,
     AuxDataKey.FIXED_RANGE,
     AuxDataKey.ALLOW_FUSION,
@@ -614,6 +627,7 @@ def _forward_metadata(
   is_activation = False
   all_args_quantized = True
   weight_names = set()
+  weight_paths = set()
   for arg in jax.tree.leaves(inputs):
     if not isinstance(arg, jax.Array):
       continue
@@ -633,6 +647,8 @@ def _forward_metadata(
           continue
         if key == AuxDataKey.WEIGHT_NAME:
           weight_names.add(val)
+        elif key == AuxDataKey.WEIGHT_PATH:
+          weight_paths.add(val)
         else:
           # Last wins for value dependent metadata.
           metadata[key] = val
@@ -649,6 +665,10 @@ def _forward_metadata(
   # For value-preserving ops, set WEIGHT_NAME if purely a single weight op.
   elif len(weight_names) == 1:
     metadata[AuxDataKey.WEIGHT_NAME] = next(iter(weight_names))
+    # WEIGHT_PATH rides along under the same uniqueness rule, so the name and
+    # the path can never end up describing different weights.
+    if len(weight_paths) == 1:
+      metadata[AuxDataKey.WEIGHT_PATH] = next(iter(weight_paths))
   # For value-preserving ops, set FQ_ARRAY if all args are fq and out is act.
   if is_value_preserving_op and is_activation and all_args_quantized:
     metadata[AuxDataKey.FQ_ARRAY] = 'self'
