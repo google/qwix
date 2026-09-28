@@ -18,6 +18,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 from jax import numpy as jnp
+import numpy as np
 from qwix._src.core import numerics
 from qwix._src.core import qarray
 from qwix._src.core import sparsity
@@ -622,6 +623,31 @@ class QArrayTest(parameterized.TestCase):
         [0.5, 1.0, 1.0, 2.0, 2.0, 4.0], dtype=scale_i4.dtype
     )
     self.assertTrue(jnp.array_equal(scale_i4, expected_scales_i4))
+
+  @parameterized.named_parameters(
+      # float64 is the case the guard used to miss. It arises in practice from
+      # `SimpleMovingAverage.get_calibration`, which divides a float32 sum by
+      # an int32 count; numpy promotes that to float64.
+      ('float64', np.float64),
+      ('float32', np.float32),
+  )
+  def test_degenerate_calibration_range_yields_unit_scale(self, dtype):
+    # A calibration range that has collapsed to a single point would give a
+    # zero scale, and dividing by it produces inf/nan.
+    # `compute_scale_zero_point` substitutes 1 instead, which is exact: every
+    # value in the range is the same, so any scale reproduces it.
+    asymmetric = {
+        'min': np.array([2.5], dtype),
+        'max': np.array([2.5], dtype),
+    }
+    scale, zero_point = qarray.compute_scale_zero_point(asymmetric, jnp.int8)
+    self.assertEqual(scale.tolist(), [1.0])
+    self.assertIsNotNone(zero_point)
+
+    symmetric = {'absmax': np.array([0.0], dtype)}
+    scale, zero_point = qarray.compute_scale_zero_point(symmetric, jnp.int8)
+    self.assertEqual(scale.tolist(), [1.0])
+    self.assertIsNone(zero_point)
 
   def test_mxint8_quantize_dequantize(self):
     x = jnp.array(
