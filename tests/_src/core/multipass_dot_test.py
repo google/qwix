@@ -1009,6 +1009,57 @@ class MultiPassDotTest(parameterized.TestCase):
     self.assertAlmostEqual(snr_four_pass, 39.51, delta=1.5)
     self.assertAlmostEqual(err_four_pass, 0.0106, delta=0.005)
 
+    # 6. Approximate INT8 via INT4 Truncated (3 passes, drop low-order product)
+    res_i8_tri = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='three_pass_int4',
+    )
+    snr_i8_tri = float(compute_snr_db(ref_f32, res_i8_tri))
+    err_i8_tri = float(compute_relative_error(ref_f32, res_i8_tri))
+
+    # 7. Asymmetric INT8 via INT4 (2 passes)
+    res_i8_asym_l = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='two_pass_lhs_int4',
+    )
+    snr_i8_asym_l = float(compute_snr_db(ref_f32, res_i8_asym_l))
+    err_i8_asym_l = float(compute_relative_error(ref_f32, res_i8_asym_l))
+
+    res_i8_asym_r = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='two_pass_rhs_int4',
+    )
+    snr_i8_asym_r = float(compute_snr_db(ref_f32, res_i8_asym_r))
+    err_i8_asym_r = float(compute_relative_error(ref_f32, res_i8_asym_r))
+
+    print(
+        f'INT8 Truncated (3-pass): SNR={snr_i8_tri:.2f} dB,'
+        f' err={err_i8_tri:.4f}'
+    )
+    print(
+        f'INT8 Asym LHS (2-pass): SNR={snr_i8_asym_l:.2f} dB,'
+        f' err={err_i8_asym_l:.4f}'
+    )
+    print(
+        f'INT8 Asym RHS (2-pass): SNR={snr_i8_asym_r:.2f} dB,'
+        f' err={err_i8_asym_r:.4f}'
+    )
+
+    self.assertAlmostEqual(snr_i8_tri, 34.85, delta=1.5)
+    self.assertAlmostEqual(err_i8_tri, 0.0182, delta=0.005)
+
+    self.assertAlmostEqual(snr_i8_asym_l, 17.89, delta=1.5)
+    self.assertAlmostEqual(err_i8_asym_l, 0.1275, delta=0.02)
+
+    self.assertAlmostEqual(snr_i8_asym_r, 17.99, delta=1.5)
+    self.assertAlmostEqual(err_i8_asym_r, 0.1274, delta=0.02)
+
   def test_qtype_specified_with_multipass_mode_raises_error(self):
     """Verifies that passing lhs_qtype or rhs_qtype with multipass_mode raises ValueError."""
     lhs = jnp.ones((4, 4), dtype=jnp.float32)
@@ -1127,6 +1178,7 @@ class MultiPassDotTest(parameterized.TestCase):
         rhs,
         dnums,
         compute_dtype=jnp.float8_e4m3fn,
+        multipass_mode='four_pass_int4',
         tile_size=32,
     )
     snr_int8_32_emulated = float(compute_snr_db(ref_f32, res_int8_32_emulated))
@@ -1163,6 +1215,7 @@ class MultiPassDotTest(parameterized.TestCase):
         rhs,
         dnums,
         compute_dtype=jnp.float8_e4m3fn,
+        multipass_mode='four_pass_int4',
         tile_size=256,
     )
     snr_int8_256_emulated = float(
@@ -1181,7 +1234,11 @@ class MultiPassDotTest(parameterized.TestCase):
     )
     ref_int8_exact = jnp.matmul(a_int8, b_int8)
     res_emulated_exact = multipass_dot._emulated_signed_int8_dot_general(
-        a_int8, b_int8, dnums, compute_dtype=jnp.float8_e4m3fn
+        a_int8,
+        b_int8,
+        dnums,
+        multipass_mode='four_pass_int4',
+        compute_dtype=jnp.float8_e4m3fn,
     )
     max_diff_emulated = int(
         jnp.max(jnp.abs(res_emulated_exact - ref_int8_exact))
@@ -1305,7 +1362,11 @@ class MultiPassDotTest(parameterized.TestCase):
     ref = lax.dot_general(a, b, dnums, preferred_element_type=jnp.int32)
 
     res = multipass_dot._emulated_signed_int8_dot_general(
-        a, b, dnums, compute_dtype=jnp.float8_e4m3fn
+        a,
+        b,
+        dnums,
+        multipass_mode='four_pass_int4',
+        compute_dtype=jnp.float8_e4m3fn,
     )
     if is_ghostfish():
       self.assertGreater(compute_snr_db(ref, res), 60.0)
@@ -1324,17 +1385,27 @@ class MultiPassDotTest(parameterized.TestCase):
 
     ref = jnp.matmul(a, b)
     res_emulated = multipass_dot._emulated_signed_int8_dot_general(
-        a, b, dnums, compute_dtype=jnp.float8_e4m3fn
+        a,
+        b,
+        dnums,
+        multipass_mode='four_pass_int4',
+        compute_dtype=jnp.float8_e4m3fn,
     )
 
     np.testing.assert_array_equal(res_emulated, ref)
 
   @parameterized.parameters(
-      (32, 64),
-      (256, 256),
+      ('four_pass_int4', 32, 64, 36.0),
+      ('four_pass_int4', 256, 256, 36.0),
+      ('three_pass_int4', 32, 64, 33.0),
+      ('three_pass_int4', 256, 256, 33.0),
+      ('two_pass_lhs_int4', 32, 64, 16.0),
+      ('two_pass_rhs_int4', 32, 64, 16.0),
   )
-  def test_int8_multipass_dot(self, tile_size, k_dim):
-    """Verifies subchannel int8 GEMM using Full Cross passes."""
+  def test_int8_multipass_dot(
+      self, multipass_mode, tile_size, k_dim, min_snr=36.0
+  ):
+    """Verifies subchannel int8 GEMM using multi-pass integer modes."""
     k1, k2 = jax.random.split(self.rng)
     lhs = jax.random.normal(k1, (16, k_dim), dtype=jnp.float32)
     rhs = jax.random.normal(k2, (k_dim, 16), dtype=jnp.float32)
@@ -1345,6 +1416,7 @@ class MultiPassDotTest(parameterized.TestCase):
         rhs,
         dnums,
         compute_dtype=jnp.float8_e4m3fn,
+        multipass_mode=multipass_mode,
         tile_size=tile_size,
     )
     self.assertEqual(res_multipass.shape, (16, 16))
@@ -1356,7 +1428,7 @@ class MultiPassDotTest(parameterized.TestCase):
         lhs,
         rhs,
         dnums,
-        multipass_mode='four_pass_int4',
+        multipass_mode=multipass_mode,
         tile_size=tile_size,
     )
     np.testing.assert_allclose(res_direct, res_multipass, atol=1e-5)
@@ -1364,7 +1436,7 @@ class MultiPassDotTest(parameterized.TestCase):
     # Should closely match reference float dot
     true_dot = lax.dot_general(lhs, rhs, dnums)
     snr = compute_snr_db(true_dot, res_multipass)
-    self.assertGreater(snr, 36.0)
+    self.assertGreater(snr, min_snr)
 
   @parameterized.parameters(
       # Leading batch with tile_size=32
@@ -1450,6 +1522,126 @@ class MultiPassDotTest(parameterized.TestCase):
     for g in gemms_bf16:
       in_dtypes = [getattr(v.aval, 'dtype', None) for v in g.invars[:2]]
       self.assertEqual(in_dtypes, [jnp.bfloat16, jnp.bfloat16])
+
+  @parameterized.parameters(
+      ((8, 16), (16, 8)),
+      ((16, 32), (32, 16)),
+      ((32, 64), (64, 32)),
+      ((64, 64), (64, 64)),
+      # Non-leading contraction axes
+      ((16, 8, 32), (32, 16, 8), (((1,), (2,)), ((), ()))),
+      # Leading batch axis
+      ((2, 8, 16), (2, 16, 8), (((2,), (1,)), ((0,), (0,)))),
+      # Non-leading batch axis
+      ((8, 2, 16), (16, 2, 8), (((2,), (0,)), ((1,), (1,)))),
+      # Multi-axis contraction with non-leading batch axis
+      ((4, 2, 8, 16), (2, 8, 16, 6), (((2, 3), (1, 2)), ((1,), (0,)))),
+  )
+  def test_asymmetric_exact_int4_int8_multiplication(
+      self, shape_l, shape_r, dnums=(((1,), (0,)), ((), ()))
+  ):
+    """Verifies 2-pass asym INT4 x INT8 matmul produces exact products."""
+    k1, k2 = jax.random.split(self.rng)
+    # Case 1: LHS INT4 [-8, 7], RHS INT8 [-128, 127]
+    # Case 2: LHS INT8 [-128, 127], RHS INT4 [-8, 7]
+    a_4 = jax.random.randint(k1, shape_l, minval=-8, maxval=8).astype(jnp.int32)
+    b_8 = jax.random.randint(k2, shape_r, minval=-128, maxval=128).astype(
+        jnp.int32
+    )
+    a_8 = jax.random.randint(k1, shape_l, minval=-128, maxval=128).astype(
+        jnp.int32
+    )
+    b_4 = jax.random.randint(k2, shape_r, minval=-8, maxval=8).astype(jnp.int32)
+
+    for a, b, mode in (
+        (a_4, b_8, 'two_pass_rhs_int4'),
+        (a_8, b_4, 'two_pass_lhs_int4'),
+    ):
+      ref = lax.dot_general(
+          a, b, dimension_numbers=dnums, preferred_element_type=jnp.int32
+      )
+      res = multipass_dot._emulated_signed_int8_dot_general(
+          a,
+          b,
+          dnums,
+          multipass_mode=mode,
+          compute_dtype=jnp.float8_e4m3fn,
+      )
+      if is_ghostfish():
+        self.assertGreater(compute_snr_db(ref, res), 60.0)
+        self.assertLessEqual(int(jnp.max(jnp.abs(res - ref))), 256)
+      else:
+        np.testing.assert_array_equal(res, ref)
+        self.assertEqual(int(jnp.max(jnp.abs(res - ref))), 0)
+
+  def test_triangular_signed_int8_dot(self):
+    """Verifies triangular int8 matmul drops p00 and achieves >33 dB SQNR."""
+    k1, k2 = jax.random.split(self.rng)
+    shape_l = (32, 64)
+    shape_r = (64, 32)
+    a = jax.random.randint(k1, shape_l, minval=-128, maxval=128).astype(
+        jnp.int32
+    )
+    b = jax.random.randint(k2, shape_r, minval=-128, maxval=128).astype(
+        jnp.int32
+    )
+    ref = jnp.matmul(a, b)
+    dnums = (((1,), (0,)), ((), ()))
+    res = multipass_dot._emulated_signed_int8_dot_general(
+        a,
+        b,
+        dnums,
+        multipass_mode='three_pass_int4',
+        compute_dtype=jnp.float8_e4m3fn,
+    )
+
+    # Algebraic identity check: ref - res must be exactly p00 = a_l * b_l
+    _, a_l = multipass_dot._prep_int8_parts(a)
+    _, b_l = multipass_dot._prep_int8_parts(b)
+    p00 = jnp.matmul(a_l.astype(jnp.int32), b_l.astype(jnp.int32))
+    diff = ref - res
+    if is_ghostfish():
+      self.assertGreater(compute_snr_db(diff, p00), 45.0)
+      self.assertLessEqual(int(jnp.max(jnp.abs(diff - p00))), 256)
+    else:
+      np.testing.assert_array_equal(diff, p00)
+
+    # SQNR must exceed 33.0 dB
+    sqnr = compute_snr_db(ref, res)
+    self.assertGreater(sqnr, 33.0)
+
+  def test_emulated_signed_int8_dot_invalid_mode_raises_error(self):
+    """Verifies that an unsupported multipass_mode raises ValueError in emulated int8 dot."""
+    a = jnp.ones((4, 4), dtype=jnp.int32)
+    b = jnp.ones((4, 4), dtype=jnp.int32)
+    with self.assertRaisesRegex(ValueError, 'Unsupported multipass_mode'):
+      multipass_dot._emulated_signed_int8_dot_general(
+          a, b, multipass_mode='invalid_mode', compute_dtype=jnp.float8_e4m3fn
+      )
+
+  @parameterized.parameters(
+      ('three_pass_int4', 3, False),
+      ('two_pass_lhs_int4', 2, True),
+      ('two_pass_rhs_int4', 2, True),
+  )
+  def test_approx_int8_multipass_graph_mechanics_and_gemm_ops(
+      self, mode, expected_gemms, expect_int4_cast
+  ):
+    """Verifies low-level graph mechanics and GEMM counts for approx INT8 modes."""
+    lhs = jnp.ones((16, 32), dtype=jnp.float32)
+    rhs = jnp.ones((32, 16), dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+
+    fn = lambda x, y: multipass_dot.multipass_dot_general(
+        x, y, dnums, multipass_mode=mode, tile_size=32
+    )
+    gemms, casts = get_graph_gemms_and_casts(fn, lhs, rhs)
+    self.assertLen(gemms, expected_gemms)
+    for g in gemms:
+      in_dtypes = [getattr(v.aval, 'dtype', None) for v in g.invars[:2]]
+      self.assertEqual(in_dtypes, [jnp.float8_e4m3fn, jnp.float8_e4m3fn])
+    if expect_int4_cast:
+      self.assertIn(jnp.dtype(jnp.int4), casts)
 
 
 if __name__ == '__main__':
