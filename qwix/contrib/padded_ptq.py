@@ -194,13 +194,13 @@ def dot_general(
     target_shape = list(rhs.shape)
     for rhs_axis, lhs_axis in zip(rhs_contract, lhs_contract):
       target_shape[rhs_axis] = lhs.shape[lhs_axis]
-    rhs = pad_to_shape(rhs, tuple(target_shape))
+    rhs = pad_to_shape(rhs, tuple(target_shape))  # pyrefly: ignore[bad-argument-type]
 
   if not isinstance(lhs, PaddedQArray):
     target_shape = list(lhs.shape)
     for lhs_axis, rhs_axis in zip(lhs_contract, rhs_contract):
       target_shape[lhs_axis] = rhs.shape[rhs_axis]
-    lhs = pad_to_shape(lhs, tuple(target_shape))
+    lhs = pad_to_shape(lhs, tuple(target_shape))  # pyrefly: ignore[bad-argument-type]
 
   return core_dot_general.dot_general(
       lhs,
@@ -251,7 +251,7 @@ def einsum(
       if name in info.contract_chars:
         lhs_axis = info.lhs.index(name)
         target_shape[axis] = lhs.shape[lhs_axis]
-    rhs = pad_to_shape(rhs, tuple(target_shape))
+    rhs = pad_to_shape(rhs, tuple(target_shape))  # pyrefly: ignore[bad-argument-type]
 
   if not isinstance(lhs, PaddedQArray):
     target_shape = list(lhs.shape)
@@ -259,7 +259,7 @@ def einsum(
       if name in info.contract_chars:
         rhs_axis = info.rhs.index(name)
         target_shape[axis] = rhs.shape[rhs_axis]
-    lhs = pad_to_shape(lhs, tuple(target_shape))
+    lhs = pad_to_shape(lhs, tuple(target_shape))  # pyrefly: ignore[bad-argument-type]
 
   return core_einsum.einsum(
       einsum_str,
