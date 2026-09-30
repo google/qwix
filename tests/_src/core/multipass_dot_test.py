@@ -1060,6 +1060,56 @@ class MultiPassDotTest(parameterized.TestCase):
     self.assertAlmostEqual(snr_i8_asym_r, 17.99, delta=1.5)
     self.assertAlmostEqual(err_i8_asym_r, 0.1274, delta=0.02)
 
+    # 8. Hybrid FP8 + 4-Bit Strategies (3 passes)
+    res_fp8_fp4 = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='three_pass_fp8_fp4',
+    )
+    snr_fp8_fp4 = float(compute_snr_db(ref_f32, res_fp8_fp4))
+    err_fp8_fp4 = float(compute_relative_error(ref_f32, res_fp8_fp4))
+
+    res_fp8_int4 = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='three_pass_fp8_int4',
+    )
+    snr_fp8_int4 = float(compute_snr_db(ref_f32, res_fp8_int4))
+    err_fp8_int4 = float(compute_relative_error(ref_f32, res_fp8_int4))
+
+    res_fp8_mixed4 = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='three_pass_fp8_mixed4',
+    )
+    snr_fp8_mixed4 = float(compute_snr_db(ref_f32, res_fp8_mixed4))
+    err_fp8_mixed4 = float(compute_relative_error(ref_f32, res_fp8_mixed4))
+
+    print(f'Hybrid FP8+FP4: SNR={snr_fp8_fp4:.2f} dB, err={err_fp8_fp4:.4f}')
+    print(f'Hybrid FP8+INT4: SNR={snr_fp8_int4:.2f} dB, err={err_fp8_int4:.4f}')
+    print(
+        f'Hybrid FP8+Mixed4: SNR={snr_fp8_mixed4:.2f} dB,'
+        f' err={err_fp8_mixed4:.4f}'
+    )
+
+    fp8_fp4_target = 41.83 if is_ghostfish() else 43.75
+    err_fp8_fp4_target = 0.0081 if is_ghostfish() else 0.0065
+    self.assertAlmostEqual(snr_fp8_fp4, fp8_fp4_target, delta=1.5)
+    self.assertAlmostEqual(err_fp8_fp4, err_fp8_fp4_target, delta=0.002)
+
+    fp8_int4_target = 41.27 if is_ghostfish() else 42.95
+    err_fp8_int4_target = 0.0086 if is_ghostfish() else 0.0071
+    self.assertAlmostEqual(snr_fp8_int4, fp8_int4_target, delta=1.5)
+    self.assertAlmostEqual(err_fp8_int4, err_fp8_int4_target, delta=0.002)
+
+    fp8_mixed4_target = 41.72 if is_ghostfish() else 43.58
+    err_fp8_mixed4_target = 0.0082 if is_ghostfish() else 0.0066
+    self.assertAlmostEqual(snr_fp8_mixed4, fp8_mixed4_target, delta=1.5)
+    self.assertAlmostEqual(err_fp8_mixed4, err_fp8_mixed4_target, delta=0.002)
+
   def test_qtype_specified_with_multipass_mode_raises_error(self):
     """Verifies that passing lhs_qtype or rhs_qtype with multipass_mode raises ValueError."""
     lhs = jnp.ones((4, 4), dtype=jnp.float32)
@@ -1642,6 +1692,128 @@ class MultiPassDotTest(parameterized.TestCase):
       self.assertEqual(in_dtypes, [jnp.float8_e4m3fn, jnp.float8_e4m3fn])
     if expect_int4_cast:
       self.assertIn(jnp.dtype(jnp.int4), casts)
+
+  @parameterized.parameters(
+      'three_pass_fp8_fp4',
+      'three_pass_fp8_int4',
+      'three_pass_fp8_mixed4',
+  )
+  def test_hybrid_fp8_4bit_multipass_dot(self, mode):
+    """Verifies basic hybrid FP8 + 4-bit (FP4, INT4, Mixed) 3-pass matmuls."""
+    k1, k2 = jax.random.split(self.rng)
+    lhs = jax.random.normal(k1, (16, 64), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (64, 16), dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+
+    res = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode=mode,
+        tile_size=32,
+    )
+    self.assertEqual(res.shape, (16, 16))
+    self.assertFalse(jnp.isnan(res).any())
+
+    ref = lax.dot_general(lhs, rhs, dnums)
+    snr = compute_snr_db(ref, res)
+    self.assertGreater(snr, 38.0)
+
+  @parameterized.parameters(
+      ('three_pass_fp8_fp4', 'three_pass_fp8_fp4/fp4_fp4/fp4'),
+      ('three_pass_fp8_int4', 'three_pass_fp8_int4/int4_int4/int4'),
+      ('three_pass_fp8_mixed4', 'three_pass_fp8_int4/fp4_fp4/int4'),
+  )
+  def test_hybrid_fp8_4bit_aliases(self, canonical_mode, alias_mode):
+    """Verifies that explicit slash-separated aliases match canonical modes exactly."""
+    k1, k2 = jax.random.split(self.rng)
+    lhs = jax.random.normal(k1, (16, 32), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (32, 16), dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+
+    res_canonical = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode=canonical_mode,
+        tile_size=32,
+    )
+    res_alias = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode=alias_mode,
+        tile_size=32,
+    )
+    np.testing.assert_allclose(res_canonical, res_alias, rtol=1e-5, atol=1e-5)
+
+  @parameterized.parameters(
+      ('three_pass_fp8_fp4', 4, 0, 6),
+      ('three_pass_fp8_int4', 0, 4, 6),
+      ('three_pass_fp8_mixed4', 2, 2, 6),
+  )
+  def test_hybrid_fp8_4bit_graph_mechanics_and_gemm_ops(
+      self, mode, fp4_casts, int4_casts, fp8_casts
+  ):
+    """Verifies low-level graph mechanics and 4-bit casts for hybrid FP8 modes."""
+    lhs = jnp.ones((16, 32), dtype=jnp.float32)
+    rhs = jnp.ones((32, 16), dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+
+    fn = lambda x, y: multipass_dot.multipass_dot_general(
+        x, y, dnums, multipass_mode=mode, tile_size=32
+    )
+    gemms, casts = get_graph_gemms_and_casts(fn, lhs, rhs)
+    self.assertLen(gemms, 3)
+    for g in gemms:
+      in_dtypes = [getattr(v.aval, 'dtype', None) for v in g.invars[:2]]
+      self.assertEqual(in_dtypes, [jnp.float8_e4m3fn, jnp.float8_e4m3fn])
+    self.assertEqual(casts.count(jnp.dtype(jnp.float4_e2m1fn)), fp4_casts)
+    self.assertEqual(casts.count(jnp.dtype(jnp.int4)), int4_casts)
+    self.assertEqual(casts.count(jnp.dtype(jnp.float8_e4m3fn)), fp8_casts)
+
+  def test_downcast_by_shift(self):
+    """Tests _downcast_by_shift scaling, clipping bounds, and target types."""
+    # Test MXINT4 downcasting with negative value that clips to -7.0
+    # shift = 32.0, so -224.0 / 32 = -7.0, -320.0 / 32 = -10.0 (clips to -7.0)
+    qval = jnp.array([-320.0, -224.0, 0.0, 224.0, 320.0], dtype=jnp.float32)
+    scale = jnp.array([1.0], dtype=jnp.float32)
+    qarr = qarray.QArray(qvalue=qval, scale=scale, qtype=jnp.float8_e4m3fn)
+
+    down_int = multipass_dot._downcast_by_shift(qarr, 'mxint4')
+    self.assertEqual(down_int.qtype, jnp.int4)
+    np.testing.assert_array_equal(
+        down_int.qvalue, jnp.array([-7, -7, 0, 7, 7], dtype=jnp.int4)
+    )
+    np.testing.assert_allclose(down_int.scale, scale * 32.0)
+
+    down_int_dtype = multipass_dot._downcast_by_shift(qarr, jnp.int4)
+    self.assertEqual(down_int_dtype.qtype, jnp.int4)
+    np.testing.assert_array_equal(
+        down_int_dtype.qvalue, jnp.array([-7, -7, 0, 7, 7], dtype=jnp.int4)
+    )
+
+    # Test MXFP4 downcasting with negative value clipping to -6.0
+    # shift = 64.0, so -384.0 / 64 = -6.0, -500.0 / 64 = -7.8125 (clips to -6.0)
+    qval_fp = jnp.array([-500.0, -384.0, 0.0, 384.0, 500.0], dtype=jnp.float32)
+    qarr_fp = qarray.QArray(
+        qvalue=qval_fp, scale=scale, qtype=jnp.float8_e4m3fn
+    )
+
+    down_fp = multipass_dot._downcast_by_shift(qarr_fp, 'mxfp4')
+    self.assertEqual(down_fp.qtype, jnp.float4_e2m1fn)
+    np.testing.assert_array_equal(
+        down_fp.qvalue,
+        jnp.array([-6.0, -6.0, 0.0, 6.0, 6.0], dtype=jnp.float4_e2m1fn),
+    )
+    np.testing.assert_allclose(down_fp.scale, scale * 64.0)
+
+    down_fp_dtype = multipass_dot._downcast_by_shift(qarr_fp, jnp.float4_e2m1fn)
+    self.assertEqual(down_fp_dtype.qtype, jnp.float4_e2m1fn)
+    np.testing.assert_array_equal(
+        down_fp_dtype.qvalue,
+        jnp.array([-6.0, -6.0, 0.0, 6.0, 6.0], dtype=jnp.float4_e2m1fn),
+    )
 
 
 if __name__ == '__main__':
