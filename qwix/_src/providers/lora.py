@@ -323,7 +323,7 @@ class LoraProvider(boxed_param.BoxedParamProvider):
       **kwargs,
   ) -> jax.Array:
     """LoRA einsum."""
-    res = super().einsum(einsum_str, *operands, **kwargs)  # pyrefly: ignore[bad-argument-type]
+    res = super().einsum(einsum_str, *operands, **kwargs)
 
     rule, _ = self._get_current_rule_and_op_id('einsum', repeated_call=True)
     if not isinstance(rule, LoraRule):

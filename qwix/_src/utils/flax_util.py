@@ -39,7 +39,7 @@ def should_update_quant_stats() -> bool:
         return False  # Don't update quant_stats during initialization.
       return module.is_mutable_collection('quant_stats')
     case nnx.Module():
-      return not module.disable_quant_stats_update  # pyrefly: ignore[missing-attribute]
+      return not getattr(module, 'disable_quant_stats_update')
 
 
 def get_current_module() -> nn.Module | nnx.Module:
@@ -83,7 +83,7 @@ def get_current_module_path() -> tuple[str, ...]:
       return module.path
     case nnx.Module():
       # Paths of nnx modules are set when they are quantized.
-      return module.qwix_path  # pyrefly: ignore[missing-attribute]
+      return getattr(module, 'qwix_path')
 
 
 def get_or_create_variable(
@@ -181,12 +181,13 @@ def get_or_create_param(
       _check_shape(param.value, init_fn)
     else:
       if need_rng:
-        if not isinstance(module.qwix_rngs, nnx.Rngs):  # pyrefly: ignore[missing-attribute]
+        qwix_rngs = getattr(module, 'qwix_rngs', None)
+        if not isinstance(qwix_rngs, nnx.Rngs):
           raise ValueError(
               'Cannot find rngs in the current module. Please set rngs via'
               ' model.set_attributes(qwix_rngs=nnx.Rngs(...)).'
           )
-        init_value = init_fn(module.qwix_rngs.params())
+        init_value = init_fn(qwix_rngs.params())
       else:
         init_value = init_fn()
       param = jax.tree.map(nnx_param_type, init_value)
@@ -341,13 +342,14 @@ def update_sharding(
   """
   assert bool(split) + bool(merge) + bool(transpose) <= 1
   is_pspec = isinstance(spec, jax.sharding.PartitionSpec)
+  spec = tuple(spec)
 
   if split:
-    spec = [(a, None) if i in split else (a,) for i, a in enumerate(spec)]
-    spec = sum(spec, ())  # flatten the list of tuples.
+    spec_list = [(a, None) if i in split else (a,) for i, a in enumerate(spec)]
+    spec = sum(spec_list, ())  # flatten the list of tuples.
   elif merge:
     for i in merge:
-      spec = spec[: i + 1] + spec[i + 2 :]  # pyrefly: ignore[unsupported-operation]
+      spec = spec[: i + 1] + spec[i + 2 :]
   elif transpose:
     spec = tuple(spec[i] if i is not None else None for i in transpose)
 
@@ -359,7 +361,7 @@ def update_sharding(
   if is_pspec:
     return jax.sharding.PartitionSpec(*spec)
 
-  return spec  # pyrefly: ignore[bad-return]
+  return spec
 
 
 def update_boxed(
@@ -399,7 +401,9 @@ def update_boxed(
         axes = update_sharding(
             axes, shape=shape, split=split, merge=merge, transpose=transpose
         )
-        boxed = dataclasses.replace(boxed, **{possible_field: axes})  # pyrefly: ignore[bad-specialization]
+        boxed = dataclasses.replace(  # pyrefly: ignore[bad-specialization]
+            boxed, **{possible_field: axes}
+        )
   elif isinstance(boxed, nnx.Variable):
     if value is not None:
       boxed = boxed.replace(value)
@@ -453,12 +457,13 @@ def make_rng(rng_stream: str) -> jax.Array:
   if isinstance(module, nn.Module):
     return module.make_rng(rng_stream)
   elif isinstance(module, nnx.Module):
-    if not isinstance(module.qwix_rngs, nnx.Rngs):  # pyrefly: ignore[missing-attribute]
+    qwix_rngs = getattr(module, 'qwix_rngs', None)
+    if not isinstance(qwix_rngs, nnx.Rngs):
       raise ValueError(
           'Cannot find rngs in the current module. Please set rngs via'
           ' model.set_attributes(qwix_rngs=nnx.Rngs(...)).'
       )
-    return module.qwix_rngs[rng_stream]()
+    return qwix_rngs[rng_stream]()
   else:
     raise ValueError('Current module is not known.')
 
@@ -485,6 +490,8 @@ def get_value_from_path(obj: Any, path: tuple[str | int, ...]) -> Any:
       obj = obj.get(key)
     elif isinstance(obj, (list, nnx.List)) and isinstance(key, int):
       obj = obj[key] if 0 <= key < len(obj) else None
+    elif isinstance(key, str):
+      obj = getattr(obj, key, None)
     else:
-      obj = getattr(obj, key, None)  # pyrefly: ignore[no-matching-overload]
+      return None
   return obj

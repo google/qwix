@@ -55,14 +55,14 @@ def get_transpose(
     dimension_numbers: jax.lax.ConvDimensionNumbers, for_lhs: bool
 ) -> list[int | None]:
   """Returns the transpose list for the given dimension_numbers."""
-  transpose = [None] * len(dimension_numbers.out_spec)
+  transpose: list[int | None] = [None] * len(dimension_numbers.out_spec)
   if for_lhs:
     # Only batch dimension can be channelwise thus transposed.
-    transpose[dimension_numbers.out_spec[0]] = dimension_numbers.lhs_spec[0]  # pyrefly: ignore[unsupported-operation]
+    transpose[dimension_numbers.out_spec[0]] = dimension_numbers.lhs_spec[0]
   else:
     # Only out feature dimension can be channelwise thus transposed.
-    transpose[dimension_numbers.out_spec[1]] = dimension_numbers.rhs_spec[0]  # pyrefly: ignore[unsupported-operation]
-  return transpose  # pyrefly: ignore[bad-return]
+    transpose[dimension_numbers.out_spec[1]] = dimension_numbers.rhs_spec[0]
+  return transpose
 
 
 def _slow_conv_general_dilated(

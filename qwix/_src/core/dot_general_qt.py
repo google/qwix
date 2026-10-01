@@ -300,29 +300,31 @@ def dot_general_qt_fwd(
 ):
   """Forward pass for dot_general_qt custom VJP."""
   lhs_in, rhs_in = lhs, rhs
-  if lhs_calibration is not None:
+  qlhs: qarray.MaybeQArray = lhs
+  qrhs: qarray.MaybeQArray = rhs
+  if lhs_calibration is not None and config.lhs_qtype is not None:
     scale, zero_point = qarray.compute_scale_zero_point(
-        lhs_calibration, config.lhs_qtype  # pyrefly: ignore[bad-argument-type]
+        lhs_calibration, config.lhs_qtype
     )
-    lhs = qarray.quantize_with_scale_zero_point(  # pyrefly: ignore[bad-assignment]
-        lhs, config.lhs_qtype, scale, zero_point  # pyrefly: ignore[bad-argument-type]
+    qlhs = qarray.quantize_with_scale_zero_point(
+        lhs, config.lhs_qtype, scale, zero_point
     )
-  if rhs_calibration is not None:
+  if rhs_calibration is not None and config.rhs_qtype is not None:
     scale, zero_point = qarray.compute_scale_zero_point(
-        rhs_calibration, config.rhs_qtype  # pyrefly: ignore[bad-argument-type]
+        rhs_calibration, config.rhs_qtype
     )
-    rhs = qarray.quantize_with_scale_zero_point(  # pyrefly: ignore[bad-assignment]
-        rhs, config.rhs_qtype, scale, zero_point  # pyrefly: ignore[bad-argument-type]
+    qrhs = qarray.quantize_with_scale_zero_point(
+        rhs, config.rhs_qtype, scale, zero_point
     )
   saved_lhs_in = None
   if _needs_original_residual(
-      config, lhs, lhs_calibration, config.lhs_calibration_method
+      config, qlhs, lhs_calibration, config.lhs_calibration_method
   ):
     saved_lhs_in = lhs_in
 
   saved_rhs_in = None
   if _needs_original_residual(
-      config, rhs, rhs_calibration, config.rhs_calibration_method
+      config, qrhs, rhs_calibration, config.rhs_calibration_method
   ):
     saved_rhs_in = rhs_in
 
@@ -336,8 +338,8 @@ def dot_general_qt_fwd(
   residuals = (
       saved_lhs_in,
       saved_rhs_in,
-      lhs,
-      rhs,
+      qlhs,
+      qrhs,
       saved_lhs_calibration,
       saved_rhs_calibration,
       config,
@@ -355,7 +357,7 @@ def dot_general_qt_fwd(
         tile_size=config.tile_size,
     )
   else:
-    out = dot_general.dot_general(lhs, rhs, dimension_numbers)
+    out = dot_general.dot_general(qlhs, qrhs, dimension_numbers)
   return out, residuals
 
 
@@ -414,6 +416,7 @@ def dot_general_qt_bwd(
       )
       return jax.lax.transpose(grad_res, transpose_axes)
 
+    qg: qarray.MaybeQArray = g
     if g_qtype and numerics.should_quantize(g.dtype):
       if isinstance(y, qarray.QArray):
         # Scale shifting for quantized residuals (use_original_residuals=False)
@@ -435,7 +438,7 @@ def dot_general_qt_bwd(
       if g_disable_channelwise_axes:
         g_how = dataclasses.replace(g_how, channelwise_axes=[])
 
-      g = qarray.quantize(g, g_how)  # pyrefly: ignore[bad-assignment]
+      qg = qarray.quantize(g, g_how)
 
     if (
         isinstance(y, jax.Array)
@@ -444,7 +447,7 @@ def dot_general_qt_bwd(
     ):
       y_how = dot_general.get_how_to_quantize(
           dimension_numbers=bwd_dnums,
-          ndims=(g.ndim, y.ndim),
+          ndims=(qg.ndim, y.ndim),
           for_lhs=False,
           qtype=y_qtype,
           tile_size=g_tile_size,
@@ -454,7 +457,7 @@ def dot_general_qt_bwd(
         y_how = dataclasses.replace(y_how, channelwise_axes=[])
       y = qarray.quantize(y, y_how)
 
-    grad_res = dot_general.dot_general(g, y, bwd_dnums)
+    grad_res = dot_general.dot_general(qg, y, bwd_dnums)
     return jax.lax.transpose(grad_res, transpose_axes)
 
   dlhs = _compute_gradient_for_operand(g, for_dlhs=True)
