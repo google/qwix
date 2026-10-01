@@ -213,7 +213,7 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
       op: Type[odml_ops.QuantizedOp]
       intercept_map[name] = op(
           op_full_name=name,
-          get_rule_and_op_id_fn=self._get_current_rule_and_op_id,  # pyrefly: ignore[bad-argument-type]
+          get_rule_and_op_id_fn=self._get_current_rule_and_op_id,
           fake_quant_fn=self._fake_quant,
       )
     return intercept_map
@@ -707,18 +707,23 @@ class OdmlConversionProvider(OdmlQatProvider):
   ) -> dict[str, Any]:
     """Return the attributes for the fake_quant composite."""
     # For dynamic-range quantization, the scale is an empty array.
-    if scale is None:
-      scale = np.array([], np.float32)  # pyrefly: ignore[bad-assignment]
-    if jnp.isnan(scale).any() or jnp.isinf(scale).any() or (scale == 0).any():  # pyrefly: ignore[bad-argument-type, missing-attribute]
-      raise ValueError(f'Invalid scale: {scale}')
+    scale_arr = np.array([], np.float32) if scale is None else scale
+    if (
+        jnp.isnan(scale_arr).any()
+        or jnp.isinf(scale_arr).any()
+        or (scale_arr == 0).any()
+    ):
+      raise ValueError(f'Invalid scale: {scale_arr}')
     # Flatten the scale because ODML wants a 1D array.
     quantization_dim = None
-    for dim, length in enumerate(scale.shape):  # pyrefly: ignore[missing-attribute]
+    for dim, length in enumerate(scale_arr.shape):
       if length > 1:
         if quantization_dim is None:
           quantization_dim = dim
         else:
-          raise ValueError(f'Cannot flatten scale with shape {scale.shape}.')  # pyrefly: ignore[missing-attribute]
+          raise ValueError(
+              f'Cannot flatten scale with shape {scale_arr.shape}.'
+          )
     match jnp.dtype(dtype):
       case jnp.int8:
         dtype = 'i8'
@@ -729,7 +734,7 @@ class OdmlConversionProvider(OdmlQatProvider):
       case _:
         raise ValueError(f'Unsupported dtype {dtype} for ODML conversion.')
     attributes: dict[str, Any] = {
-        'scale': np.asarray(scale, np.float32).flatten(),
+        'scale': np.asarray(scale_arr, np.float32).flatten(),
         'dtype': dtype,
         # narrow_range is an ODML-specific optimization that reduces the range
         # of int8 quantization from [-128, 127] to [-127, 127], such that the

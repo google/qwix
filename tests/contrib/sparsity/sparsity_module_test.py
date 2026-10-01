@@ -87,6 +87,27 @@ class SparsityQtTest(parameterized.TestCase):
     self.assertTrue(jnp.array_equal(out_inputs, inputs))
     self.assertEqual(module.step.value, 0)
 
+  def test_weight_sparsity_lazy_mask_initialization(self):
+    rule = sparsity.SparsityRule(
+        weight_sparsity_n=1,
+        weight_sparsity_m=2,
+        weight_sparsity_start_step=0,
+        weight_sparsity_update_step=1,
+    )
+    module = sparsity_module.SparsityModule(
+        shape=(4,), sharding_axes=(), sparsity_rule=rule
+    )
+    module.mask = None
+    inputs = jnp.array([1.0, 1.0, 1.0, 1.0])
+    weight = jnp.array([1.0, 2.0, 3.0, 4.0])
+
+    self.assertIsNone(module.mask)
+    out_inputs, out_weight = module(inputs, weight)
+    self.assertIsNotNone(module.mask)
+    expected_weight = jnp.array([0.0, 2.0, 0.0, 4.0])
+    self.assertTrue(jnp.array_equal(out_inputs, inputs))
+    self.assertTrue(jnp.array_equal(out_weight, expected_weight))
+
 
 if __name__ == "__main__":
   absltest.main()

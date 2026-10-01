@@ -152,8 +152,8 @@ def _fast_ragged_dot_general(
   # Figure out the tiled axes to use for the dot_general. For greater
   # flexibility, we allow a non-tiled axis to be contracted with a tiled axis.
   # However, if both axes are tiled, their tile sizes must be the same.
-  lhs_tiled_ca = {}
-  rhs_tiled_ca = {}
+  lhs_tiled_ca: dict[int, int | float] = {}
+  rhs_tiled_ca: dict[int, int | float] = {}
   for l, r in zip(lhs_ca, rhs_ca):
     lhs_tile_size = lhs_tiled_axes.get(l)
     rhs_tile_size = rhs_tiled_axes.get(r)
@@ -162,13 +162,14 @@ def _fast_ragged_dot_general(
           'Contracting axes must be tiled with the same tile size.'
           f' {lhs_tiled_axes=} {rhs_tiled_axes=} {dimension_numbers=}'
       )
-    if lhs_tile_size or rhs_tile_size:
-      lhs_tiled_ca[l] = lhs_tile_size or rhs_tile_size
-      rhs_tiled_ca[r] = lhs_tile_size or rhs_tile_size
+    tile_size = lhs_tile_size or rhs_tile_size
+    if tile_size is not None:
+      lhs_tiled_ca[l] = tile_size
+      rhs_tiled_ca[r] = tile_size
 
   # Split lhs/rhs_value for tiled axes.
-  lhs_val = qarray.split_axis(lhs_val, lhs_tiled_ca)  # pyrefly: ignore[bad-argument-type]
-  rhs_val = qarray.split_axis(rhs_val, rhs_tiled_ca)  # pyrefly: ignore[bad-argument-type]
+  lhs_val = qarray.split_axis(lhs_val, lhs_tiled_ca)
+  rhs_val = qarray.split_axis(rhs_val, rhs_tiled_ca)
 
   lhs_ca, lhs_ba, sum_axes = _apply_tiling(lhs_ca, lhs_ba, lhs_tiled_ca)
   rhs_ca, rhs_ba, _ = _apply_tiling(rhs_ca, rhs_ba, rhs_tiled_ca)

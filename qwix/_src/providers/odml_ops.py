@@ -200,7 +200,7 @@ _LINEAR_ARITHMETIC_PRIMITIVES = {
 }
 
 
-GetRuleAndOpIdFn = Callable[[str], tuple[qconfig.QuantizationRule, str]]
+GetRuleAndOpIdFn = Callable[[str], tuple[qconfig.QuantizationRule | None, str]]
 FakeQuantFn = Callable[[jax.Array, qarray.HowToQuantize, str | None], jax.Array]
 
 
@@ -305,10 +305,10 @@ class QuantizedOp:
   def _call_original_op(self, *args, **kwargs) -> Any:
     """Get the original function from op_full_name."""
     name_parts = self._op_full_name.split('.')
-    obj = sys.modules[name_parts[0]]
+    obj: Any = sys.modules[name_parts[0]]
     for attr in name_parts[1:]:
       obj = getattr(obj, attr)
-    return obj(*args, **kwargs)  # pyrefly: ignore[not-callable]
+    return obj(*args, **kwargs)
 
   def _fake_quant_inputs(
       self,
@@ -374,7 +374,7 @@ class QuantizedOp:
             tiled_axes={},
             # Use act_calibration_method because it is more like an activation,
             # i.e., asymmetric rather than symmetric.
-            calibration_method=rule.act_calibration_method,  # pyrefly: ignore[bad-argument-type]
+            calibration_method=rule.act_calibration_method or 'minmax',
         )
         fq_array = self._fake_quant_fn(array, how, None)
         aux_data.set(array, AuxDataKey.FQ_ARRAY, fq_array)
@@ -431,7 +431,7 @@ class QuantizedOp:
         # Use per-channel scales for batch axes, which will be reduced later
         # in _update_and_get_quant_stat.
         channelwise_axes=effective_rule.act_batch_axes,
-        calibration_method=effective_rule.act_calibration_method,  # pyrefly: ignore[bad-argument-type]
+        calibration_method=effective_rule.act_calibration_method or 'minmax',
     )
 
     fq_array = self._fake_quant_fn(array, how, quant_stat_name)
@@ -682,7 +682,7 @@ class PrimitiveBindOp(QuantizedOp):
   def __init__(self, **kwargs):
     super().__init__(
         op_full_name=interception.PRIMITIVE_BIND_KEY,
-        get_rule_and_op_id_fn=lambda x: (None, ''),  # pyrefly: ignore[bad-argument-type]
+        get_rule_and_op_id_fn=lambda x: (None, ''),
         fake_quant_fn=lambda x, y, z: x,
         **kwargs,
     )
@@ -939,7 +939,7 @@ class DotEinsumConv(QuantizedOp):
       lhs_how = self._get_how_to_quantize(
           for_lhs=True,
           qtype=rule.act_qtype,
-          calibration_method=rule.act_calibration_method,  # pyrefly: ignore[bad-argument-type]
+          calibration_method=rule.act_calibration_method or 'minmax',
           args=args,
           kwargs=kwargs,
       )

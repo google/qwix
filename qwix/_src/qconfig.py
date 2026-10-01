@@ -16,7 +16,7 @@
 from collections.abc import Callable, Collection, Sequence
 import dataclasses
 import re
-from typing import Any
+from typing import Any, Literal, overload
 
 from absl import logging
 from flax import linen as nn
@@ -137,7 +137,7 @@ class QuantizationProvider:
   def get_intercept_map(self) -> dict[str, Callable[..., Any]]:
     """Returns the intercept map for interception.wrap_func_intercepted."""
     # Common functions that are intercepted by all quantization providers.
-    intercept_map = {
+    intercept_map: dict[str, Callable[..., Any]] = {
         'qwix._src.qconfig.get_current_rule': (
             lambda op: self._get_current_rule_and_op_id(op, only_rule=True)[0]
         )
@@ -146,8 +146,8 @@ class QuantizationProvider:
       # 1. Disable interceptions during the pallas_call factory setup.
       # 2. Wrap the returned callable so that interceptions remain disabled
       #    during deferred execution.
-      intercept_map['jax.experimental.pallas.pallas_call'] = (  # pyrefly: ignore
-          lambda *args, **kwargs: interception.disable_interceptions(  # pyrefly: ignore
+      intercept_map['jax.experimental.pallas.pallas_call'] = (
+          lambda *args, **kwargs: interception.disable_interceptions(
               interception.disable_interceptions(pl.pallas_call)(
                   *args, **kwargs
               )
@@ -185,6 +185,36 @@ class QuantizationProvider:
     del method_name
     self._initial_run_complete = True
     return model_output
+
+  @overload
+  def _get_current_rule_and_op_id(
+      self,
+      op_name: str,
+      *,
+      only_rule: Literal[False] = False,
+      repeated_call: bool = False,
+  ) -> tuple[QuantizationRule | None, str]:
+    ...
+
+  @overload
+  def _get_current_rule_and_op_id(
+      self,
+      op_name: str,
+      *,
+      only_rule: Literal[True],
+      repeated_call: bool = False,
+  ) -> tuple[QuantizationRule | None, None]:
+    ...
+
+  @overload
+  def _get_current_rule_and_op_id(
+      self,
+      op_name: str,
+      *,
+      only_rule: bool,
+      repeated_call: bool = False,
+  ) -> tuple[QuantizationRule | None, str | None]:
+    ...
 
   def _get_current_rule_and_op_id(
       self,

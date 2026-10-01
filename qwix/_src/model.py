@@ -208,12 +208,12 @@ def quantize_nnx_model(
   # Unlike linen module, nnx module does not have scope or path attribute, we
   # need to iterate over all modules and set the path for them.
   for path, module in model.iter_modules():
-    module.qwix_path = path  # pyrefly: ignore[missing-attribute]
+    setattr(module, "qwix_path", path)
     # Disable quant_stats update for the first call.
-    module.disable_quant_stats_update = True  # pyrefly: ignore[missing-attribute]
+    setattr(module, "disable_quant_stats_update", True)
     # Set the rngs, which is shared by all modules and useful for lora weights
     # initialization.
-    module.qwix_rngs = rngs  # pyrefly: ignore[missing-attribute]
+    setattr(module, "qwix_rngs", rngs)
 
   # Because nnx modules are stateful, we need to call them once to initialize
   # them (convert weights, create quant_stats) unless users explicitly opt out.
@@ -241,7 +241,9 @@ def _output_transform_nnx(
   # flax_util.get_current_module() can work inside the output transform.
   # We cannot use the model in quantize_nnx_model because users may choose to
   # clone the model.
-  args = inspect.currentframe().f_back.f_locals["args"]  # pytype: disable=attribute-error # pyrefly: ignore
+  frame = inspect.currentframe()
+  assert frame is not None and frame.f_back is not None
+  args = frame.f_back.f_locals["args"]
   self = args[0]  # pylint: disable=unused-variable
   return provider.process_model_output(method_name, output)
 
