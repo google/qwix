@@ -48,6 +48,16 @@ fp8 native path. We support the following int8 emulation modes:
        nibble (a_l * b_l)
     3. 'two_pass_lhs_int4': Two passes for the LHS (emulating int8 x int4)
     4. 'two_pass_rhs_int4': Two passes for the RHS (emulating int4 x int8)
+    5. 'four_pass_zero_offset_int4': 4-pass zero-offset int4 (radix-16 split
+    into
+       2 signed nibbles in [-8, 7] without +8 offset, evaluating a0b0, a0b1,
+       a1b0, a1b1)
+    6. 'six_pass_zero_offset_int4': 6-pass zero-offset int4 (radix-16 split into
+       3 signed nibbles in [-8, 7] without +8 offset, evaluating a0b0, a0b1,
+       a1b0, a1b1, a2b0, a0b2)
+    7. 'eight_pass_zero_offset_int4': 8-pass zero-offset int4 (same 3 signed
+       nibbles in [-8, 7], evaluating a0b0, a0b1, a1b0, a1b1, a2b0, a0b2, a1b2,
+       a2b1)
 
 All decomposed passes are evaluated on quantized operands directly through the
 hardware FP8 path (via `_fast_dot_general` with hardware FP8 accumulation) or
@@ -95,6 +105,9 @@ MultiPassMode: TypeAlias = Literal[
     'three_pass_int4',
     'two_pass_lhs_int4',
     'two_pass_rhs_int4',
+    'four_pass_zero_offset_int4',
+    'six_pass_zero_offset_int4',
+    'eight_pass_zero_offset_int4',
     # Hybrid FP8 + 4-bit modes:
     'three_pass_fp8_fp4/fp4_fp4/fp4',
     'three_pass_fp8_int4/int4_int4/int4',
@@ -210,6 +223,29 @@ def _prep_int8_parts(x: jax.Array) -> tuple[jax.Array, jax.Array]:
   return x_h, x_l
 
 
+def _prep_zero_offset_int4_parts(
+    x: jax.Array, n_parts: int = 3
+) -> tuple[jax.Array, ...]:
+  """Decomposes integers into 2 or 3 zero-offset INT4 parts in [-8, 7]."""
+  if n_parts == 2:
+    # Max positive value for 2 signed INT4 parts in [-8, 7]:
+    # 16 * 7 + 7 = 119.
+    x = jnp.clip(x.astype(jnp.int32), -119, 119)
+    x_1 = ((x + 8) & 0x0F) - 8
+    x_0 = (x + 8) >> 4
+    return x_0.astype(jnp.int8), x_1.astype(jnp.int8)
+  if n_parts == 3:
+    # Max positive value for 3 signed INT4 parts in [-8, 7]:
+    # 256 * 7 + 16 * 7 + 7 = 1911.
+    x = jnp.clip(x.astype(jnp.int32), -1911, 1911)
+    x_2 = ((x + 8) & 0x0F) - 8
+    x_p = (x + 8) >> 4
+    x_1 = ((x_p + 8) & 0x0F) - 8
+    x_0 = (x_p + 8) >> 4
+    return x_0.astype(jnp.int8), x_1.astype(jnp.int8), x_2.astype(jnp.int8)
+  raise ValueError(f'Unsupported n_parts: {n_parts!r}. Expected 2 or 3.')
+
+
 def _emulated_signed_int8_dot_general(
     a: jax.Array,
     b: jax.Array,
@@ -280,6 +316,30 @@ def _emulated_signed_int8_dot_general(
       )
       res = xy_product + (sum_a * 8)
 
+    case 'four_pass_zero_offset_int4':
+      a0, a1 = _prep_zero_offset_int4_parts(a, n_parts=2)
+      b0, b1 = _prep_zero_offset_int4_parts(b, n_parts=2)
+      p00 = _dot(a0, b0)
+      p01 = _dot(a0, b1)
+      p10 = _dot(a1, b0)
+      p11 = _dot(a1, b1)
+      res = (p00 << 8) + ((p01 + p10) << 4) + p11
+
+    case 'six_pass_zero_offset_int4' | 'eight_pass_zero_offset_int4':
+      a0, a1, a2 = _prep_zero_offset_int4_parts(a, n_parts=3)
+      b0, b1, b2 = _prep_zero_offset_int4_parts(b, n_parts=3)
+      p00 = _dot(a0, b0)
+      p01 = _dot(a0, b1)
+      p10 = _dot(a1, b0)
+      p11 = _dot(a1, b1)
+      p20 = _dot(a2, b0)
+      p02 = _dot(a0, b2)
+      res = (p00 << 8) + ((p01 + p10) << 4) + (p11 + p20 + p02)
+      if multipass_mode == 'eight_pass_zero_offset_int4':
+        p12 = _dot(a1, b2)
+        p21 = _dot(a2, b1)
+        res = (res << 4) + (p12 + p21)
+
     case _:
       raise ValueError(f'Unsupported multipass_mode: {multipass_mode!r}')
 
@@ -298,7 +358,10 @@ def _int8_multipass_dot_general(
     tile_size: int | None = None,
     preferred_element_type: jax.typing.DTypeLike | None = None,
 ) -> jax.Array:
-  """Executes scaled INT8 (channelwise or subchannel) GEMM via INT4 passes."""
+  """Executes scaled integer (channelwise or subchannel) GEMM via INT4 passes."""
+  calib = 'absmax'
+  scale_mult = 1.0
+  quantize_in_f32 = False
   match multipass_mode:
     case 'four_pass_int4' | 'three_pass_int4':
       lhs_qtype = jnp.int8
@@ -309,6 +372,29 @@ def _int8_multipass_dot_general(
     case 'two_pass_rhs_int4':
       lhs_qtype = jnp.int4
       rhs_qtype = jnp.int8
+    case 'four_pass_zero_offset_int4':
+      lhs_qtype = jnp.int8
+      rhs_qtype = jnp.int8
+      # Override int8 bound (127.5) so scale = max|x| / 119.0
+      # (where 119 = 16 * 7 + 7 for 2 INT4 parts).
+      calib = f'absmax,{127.5 / 119.0}'
+      quantize_in_f32 = True
+    case 'six_pass_zero_offset_int4':
+      lhs_qtype = jnp.int16
+      rhs_qtype = jnp.int16
+      # Override int16 bound (32768.0) so scale = max|x| / 1911.0
+      # (where 1911 = 256 * 7 + 16 * 7 + 7 for 3 INT4 parts).
+      calib = f'absmax,{32768.0 / 1911.0}'
+      # Order-2 terms have weight 256 = 16^2; absorb 16x into each scale.
+      scale_mult = 16.0
+      quantize_in_f32 = True
+    case 'eight_pass_zero_offset_int4':
+      lhs_qtype = jnp.int16
+      rhs_qtype = jnp.int16
+      calib = f'absmax,{32768.0 / 1911.0}'
+      # Order-3 terms have weight 16 = 4^2; absorb 4x into each scale.
+      scale_mult = 4.0
+      quantize_in_f32 = True
     case _:
       raise ValueError(f'Unknown multipass_mode: {multipass_mode!r}')
 
@@ -323,23 +409,28 @@ def _int8_multipass_dot_general(
       for_lhs=True,
       tile_size=tile_size,
       qtype=lhs_qtype,
+      calibration_method=calib,
   )
-  q_lhs = qarray.quantize(lhs, lhs_how)
-
   rhs_how = dg.get_how_to_quantize(
       dimension_numbers=dimension_numbers,
       ndims=(lhs.ndim, rhs.ndim),
       for_lhs=False,
       tile_size=tile_size,
       qtype=rhs_qtype,
+      calibration_method=calib,
   )
-  q_rhs = qarray.quantize(rhs, rhs_how)
+  if quantize_in_f32:
+    q_lhs = qarray.quantize(lhs.astype(jnp.float32), lhs_how)
+    q_rhs = qarray.quantize(rhs.astype(jnp.float32), rhs_how)
+  else:
+    q_lhs = qarray.quantize(lhs, lhs_how)
+    q_rhs = qarray.quantize(rhs, rhs_how)
+  lhs_scale = q_lhs.scale * scale_mult
+  rhs_scale = q_rhs.scale * scale_mult
 
   (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dimension_numbers
   lhs_value = q_lhs.qvalue
   rhs_value = q_rhs.qvalue
-  lhs_scale = q_lhs.scale
-  rhs_scale = q_rhs.scale
 
   lhs_tiled_axes = qarray.get_tiled_axes(q_lhs)
   rhs_tiled_axes = qarray.get_tiled_axes(q_rhs)
@@ -390,7 +481,7 @@ def _int8_multipass_dot_general(
   if sum_axes:
     res = jnp.sum(res, axis=sum_axes)
   _, result_type = qarray.get_accumulator_and_result_type(
-      q_lhs, q_rhs, preferred_element_type=preferred_element_type
+      lhs, rhs, preferred_element_type=preferred_element_type
   )
   return res.astype(result_type)
 
@@ -923,6 +1014,9 @@ def multipass_dot_general(
       'three_pass_int4',
       'two_pass_lhs_int4',
       'two_pass_rhs_int4',
+      'four_pass_zero_offset_int4',
+      'six_pass_zero_offset_int4',
+      'eight_pass_zero_offset_int4',
   ):
     # Note for the selected compute_dtype is fp8. The intended goal is emulation
     # for quality studies using TPU7x.
