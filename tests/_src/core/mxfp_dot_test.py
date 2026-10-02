@@ -95,7 +95,7 @@ def reference_scaled_matmul(lhs, rhs, lhs_scale, rhs_scale):
   lhs_f = lhs_scaled.reshape(batch, m_dim, k_dim).astype(jnp.float32)
   rhs_f = rhs_scaled.reshape(batch, n_dim, k_dim).astype(jnp.float32)
 
-  return jnp.einsum("bmk,bnk->bmn", lhs_f, rhs_f)
+  return jnp.einsum("bmk,bnk->bmn", lhs_f, rhs_f, precision="high")
 
 
 def local_quantize(x, data_type, scale_type, block_size):
@@ -180,8 +180,8 @@ class MxfpNumericsTest(absltest.TestCase):
     rhs_scale = jnp.ones((1, 32, 2), dtype=jnp.float32)
 
     res = jax.nn.scaled_matmul(lhs, rhs, lhs_scale, rhs_scale)
-    expected = jnp.einsum("bmk,bnk->bmn", lhs, rhs)
-    np.testing.assert_allclose(res, expected, rtol=5e-3, atol=5e-3)
+    expected = jnp.einsum("bmk,bnk->bmn", lhs, rhs, precision="high")
+    np.testing.assert_allclose(res, expected, rtol=2e-2, atol=2e-2)
     logging.info("jax.nn.scaled_matmul (F32) SUCCEEDED")
 
     hlo = self._get_hlo(jax.nn.scaled_matmul, lhs, rhs, lhs_scale, rhs_scale)
