@@ -13,8 +13,9 @@
 # limitations under the License.
 """Shared provider support for boxed quantized parameters."""
 
+import dataclasses
 import functools
-from typing import Callable, Generic, Sequence, TypeVar
+from typing import Any, Callable, Generic, Sequence, TypeVar, cast
 
 import flax
 from flax import linen as nn
@@ -59,9 +60,15 @@ class WithAux(Generic[ArrayTypeVar]):
   __getitem__ = lambda self, key: jax.tree.map(lambda x: x[key], self.value)
   dtype = property(lambda self: flax_util.unbox(self.array).dtype)
 
+  def replace(self, **updates: Any) -> 'WithAux[Any]':
+    """Returns a new object replacing the specified fields with new values."""
+    return dataclasses.replace(self, **updates)
+
   def astype(self, dtype):
     new_value = flax_util.unbox(self.array).astype(dtype)
-    return self.replace(array=flax_util.update_boxed(self.array, value=new_value))  # pyrefly: ignore[missing-attribute]
+    return self.replace(
+        array=flax_util.update_boxed(self.array, value=new_value)
+    )
 
   def reshape(self, *shape):
     if len(shape) == 1:
@@ -120,7 +127,7 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
     if rule is None or rule.weight_qtype is None:
       return jax.lax.dot_general(
           lhs,
-          rhs,  # pyrefly: ignore[bad-argument-type]
+          cast(jax.Array, rhs),
           dimension_numbers,
           precision=precision,
           preferred_element_type=preferred_element_type,
@@ -135,45 +142,49 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
     )
 
     # Prepare rhs.
+    qrhs: qarray.MaybeQArray
     if isinstance(rhs, WithAux):  # weight, already quantized
-      rhs = rhs.array  # pyrefly: ignore[bad-assignment]
+      qrhs = rhs.array
     elif weight_name := flax_util.find_param(rhs):  # weight, not quantized
       rhs_how = get_how_to_quantize(
           for_lhs=False,
           qtype=rule.weight_qtype,
           calibration_method=rule.weight_calibration_method,
       )
-      rhs = create_quantized_param(  # pyrefly: ignore[bad-assignment]
+      qrhs = create_quantized_param(
           weight_name, rhs, rhs_how, _qarray_module=self._qarray_module
       ).array
     elif rule.act_qtype is not None:  # act
       rhs_how = get_how_to_quantize(
           for_lhs=False,
           qtype=rule.act_qtype,
-          calibration_method=rule.act_calibration_method,
+          calibration_method=rule.act_calibration_method or 'absmax',
       )
-      rhs = quantize_act(  # pyrefly: ignore[bad-assignment]
-          rhs, rhs_how, rule, op_id + '_rhs', _qarray_module=self._qarray_module  # pyrefly: ignore[unsupported-operation]
+      qrhs = quantize_act(
+          rhs, rhs_how, rule, op_id + '_rhs', _qarray_module=self._qarray_module
       )
+    else:
+      qrhs = rhs
 
     # Prepare lhs.
+    qlhs: qarray.MaybeQArray = lhs
     if rule.act_qtype is not None:
       lhs_how = get_how_to_quantize(
           for_lhs=True,
           qtype=rule.act_qtype,
-          calibration_method=rule.act_calibration_method,
+          calibration_method=rule.act_calibration_method or 'absmax',
       )
-      lhs = quantize_act(  # pyrefly: ignore[bad-assignment]
-          lhs, lhs_how, rule, op_id + '_lhs', _qarray_module=self._qarray_module  # pyrefly: ignore[unsupported-operation]
+      qlhs = quantize_act(
+          lhs, lhs_how, rule, op_id + '_lhs', _qarray_module=self._qarray_module
       )
     return self._dot_general_fn(
-        lhs, rhs, dimension_numbers, out_sharding=out_sharding  # pyrefly: ignore[bad-argument-type]
+        qlhs, qrhs, dimension_numbers, out_sharding=out_sharding
     )
 
   def einsum(
       self,
       einsum_str: str,
-      *operands: jax.Array,
+      *operands: Any,
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
       _dot_general: Callable[..., jax.Array] = jax.lax.dot_general,  # pylint: disable=invalid-name
@@ -194,6 +205,7 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
       raise ValueError(f'Unsupported einsum format: {einsum_str=} {operands=}')
 
     lhs, rhs = operands
+    assert not isinstance(lhs, WithAux)
     get_how_to_quantize = functools.partial(
         einsum.get_how_to_quantize,
         einsum_str=einsum_str,
@@ -202,38 +214,42 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
     )
 
     # Prepare rhs.
+    qrhs: qarray.MaybeQArray
     if isinstance(rhs, WithAux):  # weight, already quantized
-      rhs = rhs.array
+      qrhs = rhs.array
     elif weight_name := flax_util.find_param(rhs):  # weight, not quantized
       rhs_how = get_how_to_quantize(
           for_lhs=False,
           qtype=rule.weight_qtype,
           calibration_method=rule.weight_calibration_method,
       )
-      rhs = create_quantized_param(
+      qrhs = create_quantized_param(
           weight_name, rhs, rhs_how, _qarray_module=self._qarray_module
       ).array
     elif rule.act_qtype is not None:  # act
       rhs_how = get_how_to_quantize(
           for_lhs=False,
           qtype=rule.act_qtype,
-          calibration_method=rule.act_calibration_method,
+          calibration_method=rule.act_calibration_method or 'absmax',
       )
-      rhs = quantize_act(
-          rhs, rhs_how, rule, op_id + '_rhs', _qarray_module=self._qarray_module  # pyrefly: ignore[unsupported-operation]
+      qrhs = quantize_act(
+          rhs, rhs_how, rule, op_id + '_rhs', _qarray_module=self._qarray_module
       )
+    else:
+      qrhs = rhs
 
     # Prepare lhs.
+    qlhs: qarray.MaybeQArray = lhs
     if rule.act_qtype is not None:
       lhs_how = get_how_to_quantize(
           for_lhs=True,
           qtype=rule.act_qtype,
-          calibration_method=rule.act_calibration_method,
+          calibration_method=rule.act_calibration_method or 'absmax',
       )
-      lhs = quantize_act(
-          lhs, lhs_how, rule, op_id + '_lhs', _qarray_module=self._qarray_module  # pyrefly: ignore[unsupported-operation]
+      qlhs = quantize_act(
+          lhs, lhs_how, rule, op_id + '_lhs', _qarray_module=self._qarray_module
       )
-    return self._einsum_fn(einsum_str, lhs, rhs)
+    return self._einsum_fn(einsum_str, qlhs, qrhs)
 
   def conv_general_dilated(
       self,
@@ -254,7 +270,7 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
     if rule is None or rule.weight_qtype is None:
       return jax.lax.conv_general_dilated(
           lhs,
-          rhs,  # pyrefly: ignore[bad-argument-type]
+          cast(jax.Array, rhs),
           window_strides,
           padding,
           lhs_dilation=lhs_dilation,
@@ -271,18 +287,20 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
     )
 
     # Prepare rhs.
+    qrhs: qarray.MaybeQArray
     if isinstance(rhs, WithAux):  # weight, already quantized
-      rhs = rhs.array  # pyrefly: ignore[bad-assignment]
+      qrhs = rhs.array
     else:
       weight_name = flax_util.find_param(rhs)
+      assert weight_name is not None
       rhs_how = conv_general.get_how_to_quantize(
           dimension_numbers=dimension_numbers,
           for_lhs=False,
           qtype=rule.weight_qtype,
           calibration_method=rule.weight_calibration_method,
       )
-      rhs = create_quantized_param(  # pyrefly: ignore[bad-assignment]
-          weight_name, rhs, rhs_how, _qarray_module=self._qarray_module  # pyrefly: ignore[bad-argument-type]
+      qrhs = create_quantized_param(
+          weight_name, rhs, rhs_how, _qarray_module=self._qarray_module
       ).array
 
     # Prepare lhs.
@@ -295,14 +313,14 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
         dimension_numbers=dimension_numbers,
         for_lhs=True,
         qtype=rule.act_qtype,
-        calibration_method=rule.act_calibration_method,
+        calibration_method=rule.act_calibration_method or 'absmax',
     )
-    lhs = quantize_act(  # pyrefly: ignore[bad-assignment]
-        lhs, lhs_how, rule, op_id + '_lhs', _qarray_module=self._qarray_module  # pyrefly: ignore[unsupported-operation]
+    qlhs = quantize_act(
+        lhs, lhs_how, rule, op_id + '_lhs', _qarray_module=self._qarray_module
     )
     return self._conv_general_dilated_fn(
-        lhs,
-        rhs,  # pyrefly: ignore[bad-argument-type]
+        qlhs,
+        qrhs,
         window_strides,
         padding,
         lhs_dilation=lhs_dilation,
@@ -340,7 +358,7 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
     """Intercepts jax.numpy.dot."""
     return dot.dot(
         a,
-        b,  # pyrefly: ignore[bad-argument-type]
+        cast(Any, b),
         precision=precision,
         preferred_element_type=preferred_element_type,
         out_sharding=out_sharding,
@@ -380,14 +398,18 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
       if isinstance(a, nnx.State) and 'qvalue' in a and 'scale' in a:
         # Since we already unboxed, the values inside the state are no longer
         # nnx.Variable.
-        qkwargs = {'qvalue': a['qvalue'], 'scale': a['scale']}
         if 'zero_point' in a:
-          qkwargs['zero_point'] = a['zero_point']
-        a = qarray.QArray(**qkwargs)  # pyrefly: ignore[bad-argument-type]
+          a = qarray.QArray(
+              qvalue=a['qvalue'],
+              scale=a['scale'],
+              zero_point=a['zero_point'],
+          )
+        else:
+          a = qarray.QArray(qvalue=a['qvalue'], scale=a['scale'])
 
     # 3. Handle custom types
     if isinstance(a, WithAux):
-      return a.replace(  # pyrefly: ignore[missing-attribute]
+      return a.replace(
           array=self.asarray(a.array, dtype=dtype, order=order, **kwargs)
       )
 
@@ -417,7 +439,7 @@ def quantize_act(
     array: jax.Array,
     how: qarray.HowToQuantize,
     rule: qconfig.QuantizationRule,
-    act_name: str,
+    act_name: str | None = None,
     *,
     _qarray_module=qarray,
 ) -> qarray.QArray:
@@ -425,6 +447,7 @@ def quantize_act(
   if not rule.act_static_scale:
     return _qarray_module.quantize(array, how)
 
+  assert act_name is not None
   # Construct the scale and zero_point from the quant stats, if available.
   # This is useful in NNX when a boxed-param model is converted from a QAT
   # model. We delete the quant_stat after the first forward pass so that the

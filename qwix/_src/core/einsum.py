@@ -14,7 +14,7 @@
 """Quantized einsum with subchannel support."""
 # pylint: disable=line-too-long
 
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, cast
 
 import jax
 from jax import numpy as jnp
@@ -144,13 +144,16 @@ def einsum(
   # immediately, which fails for jax symbolic dimensions that raise error on
   # __int__. We pass sanitized integer shapes instead.
   sanitized_shapes = [einsum_info.sanitize_shape(op.shape) for op in operands]
-  _, contractions = opt_einsum.contract_path(
-      f'{input_subs}->{output_subs}',
-      *sanitized_shapes,
-      shapes=True,
-      einsum_call=True,  # This is necessary for opt_einsum to return the contraction list.
+  _, contractions = cast(
+      tuple[Any, list[Any]],
+      opt_einsum.contract_path(
+          f'{input_subs}->{output_subs}',
+          *sanitized_shapes,
+          shapes=True,
+          einsum_call=True,  # This is necessary for opt_einsum to return the contraction list.
+      ),
   )
-  for contraction in contractions:  # pytype: disable=attribute-error # pyrefly: ignore
+  for contraction in contractions:
     # operand_indices: (0, 1), einsum_str: "ij,jk->ik"
     operand_indices, _, einsum_str = contraction[:3]
     if len(operand_indices) == 1:

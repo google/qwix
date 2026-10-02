@@ -297,6 +297,71 @@ class QtTest(parameterized.TestCase):
     grads = train_step(qt_linear, model_input)
     self.assertIsNotNone(grads)
 
+  def test_create_ragged_dot_qt_config(self):
+    """Tests creation of RaggedDotQtConfig in QtProvider."""
+    rule = qt.QtRule(
+        act_qtype=jnp.int8,
+        weight_qtype=jnp.int8,
+        bwd_qtype=jnp.int8,
+    )
+    provider = qt.QtProvider([rule])
+    config = provider._create_ragged_dot_qt_config(rule)
+    self.assertEqual(config.lhs_qtype, jnp.int8)
+    self.assertEqual(config.rhs_qtype, jnp.int8)
+    self.assertEqual(config.dlhs_grad_qtype, jnp.int8)
+    self.assertEqual(config.drhs_grad_qtype, jnp.int8)
+
+  def test_ragged_dot_qt_execution(self):
+    """Tests ragged_dot execution with QtProvider."""
+    rule = qt.QtRule(
+        act_qtype=jnp.float8_e4m3fn,
+        weight_qtype=jnp.float8_e4m3fn,
+        bwd_qtype=jnp.float8_e4m3fn,
+    )
+    provider = qt.QtProvider([rule])
+
+    class TestModule(nn.Module):
+      provider: qt.QtProvider
+
+      def __call__(self, lhs, rhs, group_sizes):
+        return self.provider.ragged_dot(lhs, rhs, group_sizes)
+
+    lhs = jnp.ones((4, 8), dtype=jnp.float32)
+    rhs = jnp.ones((2, 8, 8), dtype=jnp.float32)
+    group_sizes = jnp.array([2, 2], dtype=jnp.int32)
+    module = TestModule(provider)
+    out = module.apply({}, lhs, rhs, group_sizes)
+    self.assertEqual(out.shape, (4, 8))
+
+  def test_rhs_activation_static_scale(self):
+    """Tests static scale calibration when RHS is an activation."""
+
+    class WeightLeftDotModule(nn.Module):
+      provider: qt.QtProvider
+
+      @nn.compact
+      def __call__(self, x):
+        w = self.param("w", nn.initializers.ones, (3, 4), jnp.float32)
+        dimension_numbers = (((1,), (0,)), ((), ()))
+        return self.provider.dot_general(w, x, dimension_numbers)
+
+    provider = qt.QtProvider([
+        qt.QtRule(
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+            act_static_scale=True,
+            act_batch_axes=[1],
+        ),
+    ])
+    module = WeightLeftDotModule(provider)
+    x = jnp.ones((4, 5), dtype=jnp.float32)
+    variables = module.init(jax.random.key(0), x)
+    self.assertIn("quant_stats", variables)
+    self.assertIn("dot_general0_rhs", variables["quant_stats"])
+    out, new_vars = module.apply(variables, x, mutable="quant_stats")
+    self.assertEqual(out.shape, (3, 5))
+    self.assertEqual(new_vars["quant_stats"]["dot_general0_rhs"]["count"], 1)
+
 
 if __name__ == "__main__":
   absltest.main()

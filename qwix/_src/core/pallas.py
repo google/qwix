@@ -16,7 +16,7 @@
 import copy
 import dataclasses
 import functools
-from typing import Any, Callable
+from typing import Any, Callable, Sequence, cast
 
 import jax
 from jax.experimental import pallas as pl
@@ -94,27 +94,32 @@ def update_block_specs_for_qarray(block_specs: Any, args: Any) -> Any:
     if not isinstance(arg, qarray.QArray):
       return spec
 
+    assert spec.block_shape is not None
+    assert spec.index_map is not None
     # Calculate block size of the scale array for each axis.
-    scale_block_shape = []
-    for v, bv, s in zip(arg.qvalue.shape, spec.block_shape, arg.scale.shape):  # pyrefly: ignore[bad-argument-type]
+    scale_block_shape: list[int | None] = []
+    for v, bv, s in zip(arg.qvalue.shape, spec.block_shape, arg.scale.shape):
       if bv is None:
         scale_block_shape.append(None)
       elif s == 1:
         scale_block_shape.append(1)
       else:
-        assert v % bv == 0 and s % (v // bv) == 0, f"{v=} {bv=} {s=}"  # pyrefly: ignore[unsupported-operation]
-        scale_block_shape.append(s // (v // bv))  # pyrefly: ignore[unsupported-operation]
-    scale_block_shape = tuple(scale_block_shape)
+        assert isinstance(bv, int)
+        assert v % bv == 0 and s % (v // bv) == 0, f"{v=} {bv=} {s=}"
+        scale_block_shape.append(s // (v // bv))
 
+    index_map = spec.index_map
     scale_index_map = lambda *a: tuple(
-        i if s > 1 else 0 for i, s in zip(spec.index_map(*a), arg.scale.shape)  # pyrefly: ignore[not-callable]
+        i if s > 1 else 0 for i, s in zip(index_map(*a), arg.scale.shape)
     )
     scale_block_spec = dataclasses.replace(
-        spec, block_shape=scale_block_shape, index_map=scale_index_map
+        spec, block_shape=tuple(scale_block_shape), index_map=scale_index_map
     )
     assert arg.zero_point is None, "Zero point is not supported yet."
 
-    return dataclasses.replace(arg, qvalue=spec, scale=scale_block_spec)  # pyrefly: ignore[bad-argument-type]
+    return dataclasses.replace(
+        arg, qvalue=cast(Any, spec), scale=cast(Any, scale_block_spec)
+    )
 
   return jax.tree.map(_update_block_spec, block_specs, args)
 
@@ -145,7 +150,7 @@ def transform_block_specs_for_tpu(
   # Information needed to restore the original block shapes inside the kernel.
   # The keys are the indices of the arrays in the flattened pytree. A key may
   # only appear in one of the dictionaries.
-  reverse_transposes = {}
+  reverse_transposes: dict[int, list[int]] = {}
   reverse_reshapes = {}
 
   for i, (spec, arg) in enumerate(zip(flatten_block_specs, flatten_args)):
@@ -154,9 +159,11 @@ def transform_block_specs_for_tpu(
       continue
 
     # Solution 1: try to transpose the array to put the longest axis at the end.
-    transpose = np.argsort([1 if s is None else s for s in spec.block_shape])
-    block_shape_t = _reorder(spec.block_shape, transpose)  # pyrefly: ignore[bad-argument-type]
-    if _can_fit_tpu_requirements(block_shape_t, _reorder(arg.shape, transpose)):  # pyrefly: ignore[bad-argument-type]
+    transpose = np.argsort(
+        [1 if s is None else s for s in spec.block_shape]
+    ).tolist()
+    block_shape_t = _reorder(spec.block_shape, transpose)
+    if _can_fit_tpu_requirements(block_shape_t, _reorder(arg.shape, transpose)):
       flatten_args[i] = arg.transpose(transpose)
       index_map_t = functools.partial(
           lambda spec, transpose, *a: _reorder(spec.index_map(*a), transpose),
@@ -168,7 +175,7 @@ def transform_block_specs_for_tpu(
       )
       reverse_transposes[i] = np.argsort(
           [t for t in transpose if spec.block_shape[t] is not None]
-      )
+      ).tolist()
       continue
 
     # Solution 2: reshape the array into (*num_blocks, 1, prod(block_shape))).
@@ -194,7 +201,7 @@ def transform_block_specs_for_tpu(
       if i in reverse_transposes:
         # Use pallas-friendly transpose.
         kernel_args[i] = qarray.transpose_array(
-            kernel_arg[...], reverse_transposes[i]  # pyrefly: ignore
+            kernel_arg[...], reverse_transposes[i]
         )
       elif i in reverse_reshapes:
         kernel_args[i] = kernel_arg[...].reshape(reverse_reshapes[i])
@@ -207,9 +214,7 @@ def transform_block_specs_for_tpu(
   )
 
 
-def _reorder(
-    sequence: tuple[Any, ...], order: tuple[int, ...]
-) -> tuple[Any, ...]:
+def _reorder(sequence: Sequence[Any], order: Sequence[int]) -> tuple[Any, ...]:
   """Reorder/transpose a sequence of elements."""
   return tuple(sequence[i] for i in order)
 
@@ -218,22 +223,22 @@ def _can_fit_tpu_requirements(
     block_shape: tuple[int | None, ...], arg_shape: tuple[int, ...]
 ) -> bool:
   """Check if the block shape can fit the TPU requirements."""
-  block_shape = tuple(1 if s is None else s for s in block_shape)
-  return (block_shape[-1] % 128 == 0 or block_shape[-1] == arg_shape[-1]) and (  # pyrefly: ignore[unsupported-operation]
-      block_shape[-2] % 8 == 0 or block_shape[-2] == arg_shape[-2]  # pyrefly: ignore[unsupported-operation]
-  )
+  padded_shape = tuple(1 if s is None else s for s in block_shape)
+  return (
+      padded_shape[-1] % 128 == 0 or padded_shape[-1] == arg_shape[-1]
+  ) and (padded_shape[-2] % 8 == 0 or padded_shape[-2] == arg_shape[-2])
 
 
 def _is_optimal_for_tpu(
     block_shape: tuple[int | None, ...], arg_shape: tuple[int, ...]
 ) -> bool:
   """Check if the block shape is already optimal for TPU."""
-  block_shape = tuple(1 if s is None else s for s in block_shape)
-  if not _can_fit_tpu_requirements(block_shape, arg_shape):
+  padded_shape = tuple(1 if s is None else s for s in block_shape)
+  if not _can_fit_tpu_requirements(padded_shape, arg_shape):
     # Not optimal if cannot fit the TPU requirements.
     return False
-  if block_shape[-1] % 128 == 0 and block_shape[-2] % 8 == 0:  # pyrefly: ignore[unsupported-operation]
+  if padded_shape[-1] % 128 == 0 and padded_shape[-2] % 8 == 0:
     # Optimal if no padding is needed.
     return True
   # Optimal if the block shape is already sorted.
-  return sorted(block_shape) == list(block_shape)  # pyrefly: ignore[bad-specialization]
+  return sorted(padded_shape) == list(padded_shape)
