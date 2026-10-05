@@ -46,6 +46,8 @@ class SparsityRule:
   activation_sparsity_order: str = 'R'
   activation_sparsity_block_size: int = 0
   activation_sparsity_offset: int = 0
+  compress_weights: bool = False
+  sparse_axis: int = 0
 
 
 def apply_sparsity(
@@ -296,3 +298,134 @@ def prune_inputs_n_m(
   """
   mask = get_sparsity_mask(inputs, n, m, order=order, offset=offset)
   return jnp.where(mask, inputs, jnp.zeros(inputs.shape, inputs.dtype))
+
+
+def pack_u2_indices(indices: jax.Array, pack_axis: int = 0) -> jax.Array:
+  """Packs 4 consecutive 2-bit index values [0..3] along pack_axis into uint8."""
+  axis = pack_axis % indices.ndim
+  if indices.shape[axis] % 4 != 0:
+    raise ValueError(
+        f'Axis {axis} size ({indices.shape[axis]}) must be divisible by 4 for'
+        ' u2 index packing.'
+    )
+  grouped_shape = (
+      indices.shape[:axis]
+      + (indices.shape[axis] // 4, 4)
+      + indices.shape[axis + 1 :]
+  )
+  grouped = indices.reshape(grouped_shape).astype(jnp.uint8)
+  i0 = jnp.take(grouped, 0, axis=axis + 1) & 0x3
+  i1 = (jnp.take(grouped, 1, axis=axis + 1) & 0x3) << 2
+  i2 = (jnp.take(grouped, 2, axis=axis + 1) & 0x3) << 4
+  i3 = (jnp.take(grouped, 3, axis=axis + 1) & 0x3) << 6
+  return (i0 | i1 | i2 | i3).astype(jnp.uint8)
+
+
+def unpack_u2_indices(
+    packed_indices: jax.Array, pack_axis: int = 0
+) -> jax.Array:
+  """Unpacks uint8 elements along pack_axis into 4 consecutive uint8 values [0..3]."""
+  axis = pack_axis % packed_indices.ndim
+  packed_u8 = packed_indices.astype(jnp.uint8)
+  i0 = packed_u8 & 0x3
+  i1 = (packed_u8 >> 2) & 0x3
+  i2 = (packed_u8 >> 4) & 0x3
+  i3 = (packed_u8 >> 6) & 0x3
+  stacked = jnp.stack([i0, i1, i2, i3], axis=axis + 1)
+  unpacked_shape = (
+      packed_indices.shape[:axis]
+      + (packed_indices.shape[axis] * 4,)
+      + packed_indices.shape[axis + 1 :]
+  )
+  return stacked.reshape(unpacked_shape).astype(jnp.uint8)
+
+
+def compress_1_4(
+    array: jax.Array,
+    *,
+    axis: int = 0,
+    order: str = 'C',
+    pack_indices: bool = False,
+) -> tuple[jax.Array, jax.Array]:
+  """Compresses an array along axis using 1:4 structured sparsity.
+
+  Args:
+    array: The input tensor whose size along `axis` must be divisible by 4.
+    axis: The dimension along which to apply 1:4 compression.
+    order: Grouping order ('C' or 'R').
+    pack_indices: If True, packs 4 consecutive 2-bit indices along `axis` into a
+      single uint8 (requiring `array.shape[axis]` to be divisible by 16).
+
+  Returns:
+    A tuple of `(compressed_values, indices)` where `compressed_values` has
+    `shape[axis] == array.shape[axis] // 4` and `indices` has dtype `uint8`
+    with `shape[axis] == array.shape[axis] // 4` (or `array.shape[axis] // 16`
+    when `pack_indices=True`).
+  """
+  if order not in ('C', 'R'):
+    raise ValueError(f'Index order {order} not supported.')
+  axis = axis % array.ndim
+  k = array.shape[axis]
+  if k % 4 != 0:
+    raise ValueError(
+        f'Axis {axis} size ({k}) must be divisible by 4 for 1:4 compression.'
+    )
+  grouped_shape = array.shape[:axis] + (k // 4, 4) + array.shape[axis + 1 :]
+  grouped = array.reshape(grouped_shape)
+  indices = jnp.argmax(
+      jnp.abs(grouped.astype(jnp.float32)), axis=axis + 1
+  ).astype(jnp.uint8)
+  compressed_values = jnp.take_along_axis(
+      grouped, jnp.expand_dims(indices, axis=axis + 1), axis=axis + 1
+  ).squeeze(axis=axis + 1)
+  if pack_indices:
+    indices = pack_u2_indices(indices, pack_axis=axis)
+  return compressed_values, indices
+
+
+def decompress_1_4(
+    values: jax.Array,
+    indices: jax.Array,
+    *,
+    axis: int = 0,
+) -> jax.Array:
+  """Reconstructs the dense tensor from 1:4 compressed values and indices.
+
+  Args:
+    values: Compressed values tensor of shape `[..., K // 4, ...]`.
+    indices: Index tensor of shape `[..., K // 4, ...]` (unpacked uint8 in
+      `[0..3]`) or `[..., K // 16, ...]` (packed u2 in uint8).
+    axis: The compressed dimension.
+
+  Returns:
+    The decompressed tensor of shape `[..., K, ...]` with dtype `values.dtype`.
+  """
+  axis = axis % values.ndim
+  if indices.ndim != values.ndim:
+    raise ValueError(
+        f'indices.ndim ({indices.ndim}) must match values.ndim ({values.ndim}).'
+    )
+  if indices.shape[axis] * 4 == values.shape[axis]:
+    indices = unpack_u2_indices(indices, pack_axis=axis)
+  if indices.shape != values.shape:
+    raise ValueError(
+        f'Unpacked indices shape {indices.shape} must match values shape'
+        f' {values.shape}.'
+    )
+  slots_shape = (1,) * (axis + 1) + (4,) + (1,) * (values.ndim - axis - 1)
+  slots = jnp.arange(4, dtype=indices.dtype).reshape(slots_shape)
+  mask = jnp.expand_dims(indices, axis=axis + 1) == slots
+  grouped = jnp.where(
+      mask,
+      jnp.expand_dims(values, axis=axis + 1),
+      jnp.zeros(
+          values.shape[:axis]
+          + (values.shape[axis], 4)
+          + values.shape[axis + 1 :],
+          dtype=values.dtype,
+      ),
+  )
+  dense_shape = (
+      values.shape[:axis] + (values.shape[axis] * 4,) + values.shape[axis + 1 :]
+  )
+  return grouped.reshape(dense_shape)

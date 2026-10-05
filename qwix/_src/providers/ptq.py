@@ -98,7 +98,7 @@ def quantize_params(
     if isinstance(abs_param, boxed_param.WithAux):
       # The param might not be in the shape needed for compute, in case the
       # module reshapes before compute. Abstract param has the compute shape.
-      param = param.reshape(abs_param.shape)
+      param = param.reshape(abs_param.logical_shape)
       param = abs_param.replace(  # pyrefly: ignore[missing-attribute]
           array=_qarray_module.quantize(param, abs_param.how)
       )

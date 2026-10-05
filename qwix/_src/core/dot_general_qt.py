@@ -246,6 +246,21 @@ def _get_residual_for_backward(
   if _requires_unquantized_residual(config, operand_qt):
     assert operand_in is not None
     return operand_in
+  if (
+      isinstance(operand_qt, qarray.QArray)
+      and operand_qt.sparsity_indices is not None
+  ):
+    decompressed_qvalue = sparsity.decompress_1_4(
+        operand_qt.qvalue,
+        operand_qt.sparsity_indices,
+        axis=operand_qt.sparse_axis or 0,
+    )
+    return qarray.QArray(
+        qvalue=decompressed_qvalue,
+        scale=operand_qt.scale,
+        zero_point=operand_qt.zero_point,
+        qtype=operand_qt.qtype,
+    )
   return operand_qt
 
 
@@ -311,8 +326,21 @@ def dot_general_qt_fwd(
     scale, zero_point = qarray.compute_scale_zero_point(
         rhs_calibration, config.rhs_qtype  # pyrefly: ignore[bad-argument-type]
     )
+    rhs_sparsity_rule = config.sparsity_rule
+    if (
+        rhs_sparsity_rule is not None
+        and rhs_sparsity_rule.compress_weights
+        and dimension_numbers[0][1]
+    ):
+      rhs_sparsity_rule = dataclasses.replace(
+          rhs_sparsity_rule, sparse_axis=dimension_numbers[0][1][-1]
+      )
     rhs = qarray.quantize_with_scale_zero_point(  # pyrefly: ignore[bad-assignment]
-        rhs, config.rhs_qtype, scale, zero_point  # pyrefly: ignore[bad-argument-type]
+        rhs,
+        config.rhs_qtype,  # pyrefly: ignore[bad-argument-type]
+        scale,
+        zero_point,
+        sparsity_rule=rhs_sparsity_rule,
     )
   saved_lhs_in = None
   if _needs_original_residual(
@@ -519,7 +547,10 @@ def dot_general_qt(
 
   # Sparsify rhs before calibration and quantization to make sure we
   # are quantizing the remaining values correctly
-  if config.sparsity_rule is not None:
+  if (
+      config.sparsity_rule is not None
+      and not config.sparsity_rule.compress_weights
+  ):
     rhs = qarray.sparsify(rhs, config.sparsity_rule)
   if config.rhs_qtype and numerics.should_quantize(rhs.dtype):
     rhs_how = dot_general.get_how_to_quantize(
@@ -529,12 +560,25 @@ def dot_general_qt(
         qtype=config.rhs_qtype,
         tile_size=config.tile_size,
         calibration_method=config.rhs_calibration_method,
+        sparsity_rule=config.sparsity_rule,
     )
     if config.rhs_disable_channelwise_axes:
       rhs_how = dataclasses.replace(rhs_how, channelwise_axes=[])
     rhs_calibration = qarray.calibrate(rhs, rhs_how)
     if config.rhs_collect_quant_stat:
       rhs_calibration = config.rhs_collect_quant_stat(rhs_calibration)
+  elif (
+      config.sparsity_rule is not None and config.sparsity_rule.compress_weights
+  ):
+    sparse_axis = (
+        dimension_numbers[0][1][-1]
+        if dimension_numbers[0][1]
+        else config.sparsity_rule.sparse_axis
+    )
+    compressed, indices = sparsity.compress_1_4(
+        rhs, axis=sparse_axis, order=config.sparsity_rule.weight_sparsity_order
+    )
+    rhs = sparsity.decompress_1_4(compressed, indices, axis=sparse_axis)
   return dot_general_qt_fwd_bwd(
       lhs, rhs, lhs_calibration, rhs_calibration, dimension_numbers, config
   )

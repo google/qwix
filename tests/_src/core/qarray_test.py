@@ -695,6 +695,130 @@ class QArrayTest(parameterized.TestCase):
         sqnr, 15.0, f'mxint4 SQNR {sqnr:.2f} dB is below expected 15 dB'
     )
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='f8e4m3_per_channel',
+          qtype=jnp.float8_e4m3fn,
+          tiled_axes={},
+          sparse_axis=0,
+      ),
+      dict(
+          testcase_name='f8e5m2_subchannel',
+          qtype=jnp.float8_e5m2,
+          tiled_axes={0: 32},
+          sparse_axis=0,
+      ),
+      dict(
+          testcase_name='int4_per_channel',
+          qtype=jnp.int4,
+          tiled_axes={},
+          sparse_axis=0,
+      ),
+      dict(
+          testcase_name='int4_subchannel',
+          qtype=jnp.int4,
+          tiled_axes={0: 32},
+          sparse_axis=0,
+      ),
+      dict(
+          testcase_name='mxfp8_axis0',
+          qtype='mxfp8',
+          tiled_axes={0: 32},
+          sparse_axis=0,
+      ),
+      dict(
+          testcase_name='mxint4_axis1',
+          qtype='mxint4',
+          tiled_axes={1: 32},
+          sparse_axis=1,
+      ),
+  )
+  def test_compressed_qarray_quantize_dequantize(
+      self, qtype, tiled_axes, sparse_axis
+  ):
+    array = self._make_array((128, 64))
+    channelwise_axes = [1 - sparse_axis]
+    rule = sparsity.SparsityRule(
+        weight_sparsity_n=1,
+        weight_sparsity_m=4,
+        compress_weights=True,
+        sparse_axis=sparse_axis,
+    )
+    how = qarray.HowToQuantize(
+        qtype=qtype,
+        channelwise_axes=channelwise_axes,
+        tiled_axes=tiled_axes,
+        sparsity_rule=rule,
+    )
+    q = qarray.quantize(array, how)
+    expected_qshape = list(array.shape)
+    expected_qshape[sparse_axis] //= 4
+    self.assertEqual(q.qvalue.shape, tuple(expected_qshape))
+    self.assertIsNotNone(q.sparsity_indices)
+    self.assertEqual(q.sparsity_indices.shape, tuple(expected_qshape))
+    self.assertEqual(q.sparsity_indices.dtype, jnp.uint8)
+    self.assertEqual(q.sparse_axis, sparse_axis)
+    self.assertEqual(q.logical_shape, array.shape)
+
+    dq = qarray.dequantize(q)
+    self.assertEqual(dq.shape, array.shape)
+
+    # Compare against dense 1:4 pruned + quantized array.
+    pruned_vals, indices = sparsity.compress_1_4(array, axis=sparse_axis)
+    pruned_dense = sparsity.decompress_1_4(
+        pruned_vals, indices, axis=sparse_axis
+    )
+    dense_how = qarray.HowToQuantize(
+        qtype=qtype,
+        channelwise_axes=channelwise_axes,
+        tiled_axes=tiled_axes,
+    )
+    dense_q = qarray.quantize(pruned_dense, dense_how)
+    dense_dq = qarray.dequantize(dense_q)
+    self.assertTrue(jnp.allclose(dq, dense_dq, atol=1e-5))
+
+  def test_compressed_qarray_transpose_and_validation(self):
+    array = self._make_array((64, 32))
+    rule = sparsity.SparsityRule(
+        weight_sparsity_n=1,
+        weight_sparsity_m=4,
+        compress_weights=True,
+        sparse_axis=0,
+    )
+    q = qarray.quantize_api(
+        array, jnp.float8_e4m3fn, channelwise_axes=[1], sparsity_rule=rule
+    )
+    self.assertEqual(q.shape, (16, 32))
+    self.assertEqual(q.logical_shape, (64, 32))
+
+    qt = q.T
+    self.assertEqual(qt.shape, (32, 16))
+    self.assertEqual(qt.sparse_axis, 1)
+    self.assertEqual(qt.logical_shape, (32, 64))
+    self.assertTrue(
+        jnp.array_equal(qarray.dequantize(qt), qarray.dequantize(q).T)
+    )
+
+    q_swap = q.swapaxes(0, 1)
+    self.assertEqual(q_swap.sparse_axis, 1)
+    self.assertEqual(q_swap.logical_shape, (32, 64))
+
+    with self.assertRaisesRegex(ValueError, 'compress_weights=True'):
+      bad_rule = sparsity.SparsityRule(
+          weight_sparsity_n=2, weight_sparsity_m=4, compress_weights=True
+      )
+      qarray.quantize_api(array, jnp.int8, sparsity_rule=bad_rule)
+
+    with self.assertRaisesRegex(ValueError, 'uint8'):
+      qarray.validate_qarray(
+          qarray.QArray(
+              qvalue=jnp.ones((16, 32), jnp.int8),
+              scale=jnp.ones((1, 32), jnp.float32),
+              sparsity_indices=jnp.ones((16, 32), jnp.int32),
+              sparse_axis=0,
+          )
+      )
+
 
 if __name__ == '__main__':
   absltest.main()

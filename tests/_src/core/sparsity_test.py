@@ -22,7 +22,6 @@ from jax import numpy as jnp
 import numpy as np
 from qwix._src.core import sparsity
 
-
 dataclass = dataclasses.dataclass
 
 
@@ -413,6 +412,76 @@ class BlockPruningFunctionalityTest(parameterized.TestCase):
     )
     output = sparsity.apply_sparsity(inputs, block_mask)
     np.testing.assert_array_equal(output, exp_output)
+
+
+class StructuredCompression1To4Test(parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      dict(testcase_name='f32_axis0', dtype=jnp.float32, axis=0),
+      dict(testcase_name='bf16_axis1', dtype=jnp.bfloat16, axis=1),
+      dict(testcase_name='f8e4m3_axis0', dtype=jnp.float8_e4m3fn, axis=0),
+      dict(testcase_name='f8e5m2_axis_neg1', dtype=jnp.float8_e5m2, axis=-1),
+      dict(testcase_name='int4_axis0', dtype=jnp.int4, axis=0),
+  )
+  def test_compress_decompress_roundtrip(self, dtype, axis):
+    rng = np.random.default_rng(42)
+    raw = rng.integers(-7, 8, size=(16, 12)).astype(np.float32)
+    # Add distinct magnitudes within each group of 4 so argmax is unique.
+    arr = jnp.array(raw).astype(dtype)
+    values, indices = sparsity.compress_1_4(arr, axis=axis)
+    norm_axis = axis % arr.ndim
+    expected_shape = list(arr.shape)
+    expected_shape[norm_axis] //= 4
+    self.assertEqual(values.shape, tuple(expected_shape))
+    self.assertEqual(values.dtype, dtype)
+    self.assertEqual(indices.shape, tuple(expected_shape))
+    self.assertEqual(indices.dtype, jnp.uint8)
+
+    decompressed = sparsity.decompress_1_4(values, indices, axis=axis)
+    self.assertEqual(decompressed.shape, arr.shape)
+    self.assertEqual(decompressed.dtype, dtype)
+
+    # Compare with dense 1:4 pruning along the same axis.
+    moved = jnp.moveaxis(arr, norm_axis, -1)
+    grouped = moved.reshape(*moved.shape[:-1], -1, 4)
+    idx = jnp.argmax(jnp.abs(grouped.astype(jnp.float32)), axis=-1)
+    mask = jax_one_hot_bool(idx, 4)
+    expected_dense = jnp.moveaxis(
+        jnp.where(mask, grouped, jnp.zeros_like(grouped)).reshape(moved.shape),
+        -1,
+        norm_axis,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(decompressed, dtype=np.float32),
+        np.asarray(expected_dense, dtype=np.float32),
+    )
+
+  def test_pack_unpack_u2_indices(self):
+    rng = np.random.default_rng(0)
+    indices = jnp.array(rng.integers(0, 4, size=(8, 16), dtype=np.uint8))
+    for pack_axis in (0, 1, -1):
+      packed = sparsity.pack_u2_indices(indices, pack_axis=pack_axis)
+      norm_axis = pack_axis % indices.ndim
+      expected_shape = list(indices.shape)
+      expected_shape[norm_axis] //= 4
+      self.assertEqual(packed.shape, tuple(expected_shape))
+      self.assertEqual(packed.dtype, jnp.uint8)
+      unpacked = sparsity.unpack_u2_indices(packed, pack_axis=pack_axis)
+      np.testing.assert_array_equal(unpacked, indices)
+
+  def test_compress_invalid_shape_raises(self):
+    x = jnp.ones((6, 8), dtype=jnp.float32)
+    with self.assertRaisesRegex(ValueError, 'divisible by 4'):
+      sparsity.compress_1_4(x, axis=0)
+
+  def test_pack_u2_invalid_shape_raises(self):
+    idx = jnp.zeros((6, 8), dtype=jnp.uint8)
+    with self.assertRaisesRegex(ValueError, 'divisible by 4'):
+      sparsity.pack_u2_indices(idx, pack_axis=0)
+
+
+def jax_one_hot_bool(indices, num_classes):
+  return indices[..., None] == jnp.arange(num_classes, dtype=indices.dtype)
 
 
 if __name__ == '__main__':

@@ -16,6 +16,8 @@
 # pylint: disable=line-too-long
 
 from collections.abc import Collection, Mapping, Sequence
+import dataclasses
+import functools
 import itertools
 from typing import Any
 import jax
@@ -23,6 +25,7 @@ from jax import numpy as jnp
 from qwix._src.core import mxfp_dot
 from qwix._src.core import numerics
 from qwix._src.core import qarray
+from qwix._src.core import sparse_dot
 
 
 def get_how_to_quantize(
@@ -68,6 +71,16 @@ def get_how_to_quantize(
   channelwise_axes = sorted(
       set(range(ndim)) - set(contracting_axes) - set(tiled_axes.keys())
   )
+
+  sparsity_rule = kwargs.get('sparsity_rule')
+  if (
+      sparsity_rule is not None
+      and sparsity_rule.compress_weights
+      and contracting_axes
+  ):
+    kwargs['sparsity_rule'] = dataclasses.replace(
+        sparsity_rule, sparse_axis=contracting_axes[-1]
+    )
 
   return qarray.HowToQuantize(
       channelwise_axes=channelwise_axes,
@@ -317,6 +330,8 @@ def loop_dot_general(
     The accumulated result of the dot product.
   """
   if isinstance(lhs, qarray.QArray):
+    if lhs.sparsity_indices is not None:
+      lhs = sparse_dot.decompress_qarray(lhs)
     lhs_value = lhs.qvalue
     lhs_scale = lhs.scale
     assert lhs.zero_point is None
@@ -326,6 +341,8 @@ def loop_dot_general(
     lhs_scale = None
     lhs_tiled_axes = {}
   if isinstance(rhs, qarray.QArray):
+    if rhs.sparsity_indices is not None:
+      rhs = sparse_dot.decompress_qarray(rhs)
     rhs_value = rhs.qvalue
     rhs_scale = rhs.scale
     assert rhs.zero_point is None
@@ -444,6 +461,18 @@ def dot_general(
         precision=precision,
         preferred_element_type=preferred_element_type,
         **kwargs,
+    )
+
+  if (isinstance(lhs, qarray.QArray) and lhs.sparsity_indices is not None) or (
+      isinstance(rhs, qarray.QArray) and rhs.sparsity_indices is not None
+  ):
+    return sparse_dot.sparse_dot_general(
+        lhs,
+        rhs,
+        dimension_numbers,
+        precision=precision,
+        preferred_element_type=preferred_element_type,
+        dot_general_fn=functools.partial(dot_general, **kwargs),
     )
 
   # Try hardware-accelerated MXFP dot.

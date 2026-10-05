@@ -55,21 +55,32 @@ class WithAux(Generic[ArrayTypeVar]):
   # This allows us to appear like nnx.Variable.
   value = property(flax_util.unbox)
   shape = property(lambda self: flax_util.unbox(self.array).shape)
+  logical_shape = property(
+      lambda self: flax_util.unbox(self.array).logical_shape
+      if isinstance(flax_util.unbox(self.array), qarray.QArray)
+      else flax_util.unbox(self.array).shape
+  )
   ndim = property(lambda self: flax_util.unbox(self.array).ndim)
   __getitem__ = lambda self, key: jax.tree.map(lambda x: x[key], self.value)
   dtype = property(lambda self: flax_util.unbox(self.array).dtype)
 
   def astype(self, dtype):
+    """Casts the underlying unboxed array to the given dtype."""
     new_value = flax_util.unbox(self.array).astype(dtype)
-    return self.replace(array=flax_util.update_boxed(self.array, value=new_value))  # pyrefly: ignore[missing-attribute]
+    return self.replace(  # pyrefly: ignore[missing-attribute]
+        array=flax_util.update_boxed(self.array, value=new_value)
+    )
 
   def reshape(self, *shape):
+    """Validates that the boxed parameter already matches the target shape."""
     if len(shape) == 1:
       try:
         shape = tuple(shape[0])
       except TypeError:
         pass
-    if tuple(self.shape) != tuple(shape):
+    if tuple(self.shape) != tuple(shape) and tuple(self.logical_shape) != tuple(
+        shape
+    ):
       raise ValueError(
           'Boxed weights should already have the target shape. Got'
           f' {self.shape=} but {shape=} is requested.'
@@ -142,6 +153,7 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
           for_lhs=False,
           qtype=rule.weight_qtype,
           calibration_method=rule.weight_calibration_method,
+          sparsity_rule=rule.weight_sparsity_rule,
       )
       rhs = create_quantized_param(  # pyrefly: ignore[bad-assignment]
           weight_name, rhs, rhs_how, _qarray_module=self._qarray_module
@@ -209,6 +221,7 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
           for_lhs=False,
           qtype=rule.weight_qtype,
           calibration_method=rule.weight_calibration_method,
+          sparsity_rule=rule.weight_sparsity_rule,
       )
       rhs = create_quantized_param(
           weight_name, rhs, rhs_how, _qarray_module=self._qarray_module
@@ -383,6 +396,8 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
         qkwargs = {'qvalue': a['qvalue'], 'scale': a['scale']}
         if 'zero_point' in a:
           qkwargs['zero_point'] = a['zero_point']
+        if 'sparsity_indices' in a:
+          qkwargs['sparsity_indices'] = a['sparsity_indices']
         a = qarray.QArray(**qkwargs)  # pyrefly: ignore[bad-argument-type]
 
     # 3. Handle custom types
@@ -451,7 +466,7 @@ def quantize_act(
   if zp is not None:
     zp = flax_util.get_or_create_param(act_name + '_zero_point', lambda: zp)
   return _qarray_module.quantize_with_scale_zero_point(
-      array, how.qtype, scale.array, zp
+      array, how.qtype, scale.array, zp, sparsity_rule=how.sparsity_rule
   )
 
 

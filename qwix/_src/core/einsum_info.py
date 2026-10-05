@@ -212,8 +212,13 @@ def broadcast_operands(
   """
   char_to_size = {}
   for operand, subs in zip(operands, operand_subs_list):
+    op_shape = (
+        operand.logical_shape
+        if isinstance(operand, qarray.QArray)
+        else operand.shape
+    )
     for i, char in enumerate(subs):
-      size = operand.shape[i]
+      size = op_shape[i]
       if char not in char_to_size:
         # First time we see this character, just record the size.
         char_to_size[char] = size
@@ -235,7 +240,13 @@ def broadcast_operands(
 
   broadcasted_operands = []
   for operand, subs in zip(operands, operand_subs_list):
-    target_shape = tuple(char_to_size[c] for c in subs)
-    operand = qarray.broadcast_to(operand, target_shape)
+    target_shape = list(char_to_size[c] for c in subs)
+    if (
+        isinstance(operand, qarray.QArray)
+        and operand.sparsity_indices is not None
+    ):
+      sparse_ax = (operand.sparse_axis or 0) % operand.ndim
+      target_shape[sparse_ax] = target_shape[sparse_ax] // 4
+    operand = qarray.broadcast_to(operand, tuple(target_shape))
     broadcasted_operands.append(operand)
   return broadcasted_operands

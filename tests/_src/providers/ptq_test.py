@@ -24,6 +24,7 @@ from jax import numpy as jnp
 from jax.experimental import pallas as pl
 from qwix._src import model as qwix_model
 from qwix._src import qconfig
+from qwix._src.core import sparsity
 from qwix._src.providers import boxed_param
 from qwix._src.providers import ptq
 from qwix._src.providers import qt
@@ -733,6 +734,81 @@ class PtqTest(parameterized.TestCase):
     out = ptq_layer(x)
     self.assertEqual(out.shape, (2, 16))
     self.assertEqual(ptq_layer.w.array.scale.shape, (4, 8))
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="f8e4m3_per_channel",
+          weight_qtype=jnp.float8_e4m3fn,
+          tile_size=None,
+      ),
+      dict(
+          testcase_name="int4_subchannel",
+          weight_qtype=jnp.int4,
+          tile_size=32,
+      ),
+  )
+  def test_nn_ptq_compressed_sparsity(self, weight_qtype, tile_size):
+    dense = nn.Dense(features=16)
+    sparsity_rule = sparsity.SparsityRule(
+        weight_sparsity_n=1,
+        weight_sparsity_m=4,
+        compress_weights=True,
+    )
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*",
+            weight_qtype=weight_qtype,
+            tile_size=tile_size,
+            weight_sparsity_rule=sparsity_rule,
+        ),
+    ]
+    ptq_dense = qwix_model.quantize_model(dense, ptq.PtqProvider(q_rules))
+    model_input = jax.random.normal(jax.random.key(1), (8, 64))
+    ptq_params = ptq_dense.init(jax.random.key(0), model_input)["params"]
+    ptq_abs_params = jax.eval_shape(
+        ptq_dense.init, jax.random.key(0), model_input
+    )["params"]
+
+    qw = ptq_abs_params["kernel"].array
+    self.assertEqual(qw.qvalue.shape, (16, 16))
+    self.assertIsNotNone(qw.sparsity_indices)
+    self.assertEqual(qw.sparsity_indices.shape, (16, 16))
+    self.assertEqual(qw.logical_shape, (64, 16))
+
+    orig_params = dense.init(jax.random.key(0), model_input)["params"]
+    quantized_params = ptq.quantize_params(orig_params, ptq_abs_params)
+    out1 = ptq_dense.apply({"params": ptq_params}, model_input)
+    out2 = ptq_dense.apply({"params": quantized_params}, model_input)
+    self.assertEqual(out1.shape, (8, 16))
+    self.assertTrue(jnp.allclose(out1, out2))
+
+  def test_nnx_ptq_compressed_sparsity(self):
+    sparsity_rule = sparsity.SparsityRule(
+        weight_sparsity_n=1,
+        weight_sparsity_m=4,
+        compress_weights=True,
+    )
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*",
+            weight_qtype=jnp.int4,
+            tile_size=32,
+            weight_sparsity_rule=sparsity_rule,
+        ),
+    ]
+    model_input = jax.random.normal(jax.random.key(1), (8, 64))
+    fp_linear = nnx.Linear(in_features=64, out_features=16, rngs=nnx.Rngs(0))
+    ptq_linear = qwix_model.quantize_model(
+        fp_linear, ptq.PtqProvider(q_rules), model_input
+    )
+    qw = ptq_linear.kernel.array
+    self.assertEqual(qw.qvalue.shape, (16, 16))
+    self.assertIsNotNone(qw.sparsity_indices)
+    self.assertEqual(qw.sparsity_indices.shape, (16, 16))
+    self.assertEqual(qw.logical_shape, (64, 16))
+
+    out = ptq_linear(model_input)
+    self.assertEqual(out.shape, (8, 16))
 
 
 if __name__ == "__main__":

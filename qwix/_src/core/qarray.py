@@ -50,6 +50,9 @@ class QArray:
     qtype: The logical type of the qvalue, which could be different from the
       dtype used for storage in qvalue. If None, the qvalue's dtype will be used
       as the logical type.
+    sparsity_indices: Optional 2-bit/uint8 index metadata for 1:4 structured
+      sparsity compression along `sparse_axis`.
+    sparse_axis: The axis along which `qvalue` is 1:4 compressed.
   """
 
   qvalue: jax.Array
@@ -58,13 +61,39 @@ class QArray:
   qtype: jax.typing.DTypeLike = flax.struct.field(
       pytree_node=False, default=None
   )
+  sparsity_indices: jax.Array | None = None
+  sparse_axis: int | None = flax.struct.field(pytree_node=False, default=None)
 
   # Array-like methods.
   shape = property(lambda self: self.qvalue.shape)
   ndim = property(lambda self: self.qvalue.ndim)
   dtype = property(lambda self: self.scale.dtype)
   T = property(lambda self: self.transpose())
-  mT = property(lambda self: jax.tree.map(lambda x: x.mT, self))  # pylint: disable=invalid-name
+
+  @property
+  def logical_shape(self) -> tuple[int, ...]:
+    """Returns the logical (uncompressed) shape of the QArray."""
+    if self.sparsity_indices is None:
+      return self.qvalue.shape
+    axis = (self.sparse_axis or 0) % self.qvalue.ndim
+    return (
+        self.qvalue.shape[:axis]
+        + (self.qvalue.shape[axis] * 4,)
+        + self.qvalue.shape[axis + 1 :]
+    )
+
+  @property
+  def mT(self) -> 'QArray':  # pylint: disable=invalid-name
+    """Returns the matrix transpose of the QArray."""
+    res = jax.tree.map(lambda x: x.mT, self)
+    if self.sparse_axis is not None:
+      ax = self.sparse_axis % self.ndim
+      if ax == self.ndim - 1:
+        ax = self.ndim - 2
+      elif ax == self.ndim - 2:
+        ax = self.ndim - 1
+      res = dataclasses.replace(res, sparse_axis=ax)
+    return res
 
   @property
   def scale_tile_shape(self) -> tuple[int, ...]:
@@ -79,10 +108,24 @@ class QArray:
     return tuple(o // s for o, s in zip(self.shape, self.zero_point.shape))
 
   def reshape(self, *new_shape) -> 'QArray':
+    """Returns the QArray reshaped to the given dimensions."""
     return reshape(self, *new_shape)
 
   def transpose(self, *args) -> 'QArray':
-    return jax.tree.map(lambda x: x.transpose(*args), self)
+    """Returns the QArray with its axes transposed."""
+    res = jax.tree.map(lambda x: x.transpose(*args), self)
+    if self.sparse_axis is not None:
+      ax = self.sparse_axis % self.ndim
+      if not args or args == (None,):
+        new_ax = self.ndim - 1 - ax
+      elif len(args) == 1 and isinstance(args[0], tuple | list):
+        perm = tuple(a % self.ndim for a in args[0])
+        new_ax = perm.index(ax)
+      else:
+        perm = tuple(a % self.ndim for a in args)
+        new_ax = perm.index(ax)
+      res = dataclasses.replace(res, sparse_axis=new_ax)
+    return res
 
   def __getitem__(self, idx) -> 'QArray':
     return rewriting_take(self, idx)
@@ -90,13 +133,31 @@ class QArray:
   def __post_init__(self):
     if self.qtype is None:
       object.__setattr__(self, 'qtype', self.qvalue.dtype)
+    if (
+        self.sparsity_indices is not None
+        and self.sparse_axis is not None
+        and isinstance(self.qvalue, jax.Array)
+        and -self.qvalue.ndim <= self.sparse_axis < 0
+    ):
+      object.__setattr__(
+          self, 'sparse_axis', self.sparse_axis % self.qvalue.ndim
+      )
 
   def astype(self, dtype: jax.typing.DTypeLike) -> 'QArray':
     """Cast the dequant type to the given dtype."""
     return dataclasses.replace(self, scale=self.scale.astype(dtype))
 
   def swapaxes(self, axis1: int, axis2: int) -> 'QArray':
-    return jax.tree.map(lambda x: x.swapaxes(axis1, axis2), self)
+    res = jax.tree.map(lambda x: x.swapaxes(axis1, axis2), self)
+    if self.sparse_axis is not None:
+      ax = self.sparse_axis % self.ndim
+      a1, a2 = axis1 % self.ndim, axis2 % self.ndim
+      if ax == a1:
+        ax = a2
+      elif ax == a2:
+        ax = a1
+      res = dataclasses.replace(res, sparse_axis=ax)
+    return res
 
 
 # Register as NNX data to allow JAX arrays in Module attributes.
@@ -245,6 +306,50 @@ def validate_qarray(array: QArray):
           f'Zero point {array.zero_point.dtype} should have the same dtype as'
           f' qvalue {array.qvalue.dtype}.'
       )
+  if array.sparsity_indices is not None:
+    if array.sparsity_indices.dtype != jnp.uint8:
+      raise ValueError(
+          'Sparsity indices must have dtype uint8, got'
+          f' {array.sparsity_indices.dtype}.'
+      )
+    if array.sparse_axis is None or not (
+        0 <= array.sparse_axis < array.qvalue.ndim
+    ):
+      raise ValueError(
+          f'Invalid sparse_axis {array.sparse_axis} for qvalue rank'
+          f' {array.qvalue.ndim}.'
+      )
+    if array.sparsity_indices.ndim != array.qvalue.ndim:
+      raise ValueError(
+          f'Sparsity indices {array.sparsity_indices.shape} should have the'
+          f' same rank as qvalue {array.qvalue.shape}.'
+      )
+    for ax, (q_dim, idx_dim) in enumerate(
+        zip(array.qvalue.shape, array.sparsity_indices.shape)
+    ):
+      if ax == array.sparse_axis:
+        if idx_dim != q_dim and idx_dim * 4 != q_dim:
+          raise ValueError(
+              f'Sparsity indices shape {array.sparsity_indices.shape} along'
+              f' sparse_axis {ax} must match qvalue shape'
+              f' {array.qvalue.shape} or be packed 4:1.'
+          )
+      elif idx_dim != q_dim:
+        raise ValueError(
+            f'Sparsity indices shape {array.sparsity_indices.shape} must match'
+            f' qvalue shape {array.qvalue.shape} on non-sparse axis {ax}.'
+        )
+    if (
+        array.qvalue.shape[array.sparse_axis]
+        * 4
+        % array.scale.shape[array.sparse_axis]
+        != 0
+    ):
+      logical_dim = array.qvalue.shape[array.sparse_axis] * 4
+      raise ValueError(
+          f'Logical sparse dimension {logical_dim} must be divisible by scale'
+          f' dimension {array.scale.shape[array.sparse_axis]}.'
+      )
 
 
 # ---------------------------------------------
@@ -302,6 +407,8 @@ class HowToQuantize:
   calibration_method: str = 'absmax'
   # Noise function to use for stochastic rounding.
   noise_fn: numerics.NoiseFn | None = None
+  # Optional sparsity rule for weight pruning and 1:4 compression.
+  sparsity_rule: sparsity.SparsityRule | None = None
 
   def __post_init__(self):
     if isinstance(self.qtype, str) and self.qtype in (
@@ -483,6 +590,27 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
     asymmetric quantization, or {'absmax': ...} for symmetric quantization.
     Each value in the dict has the same shape as the (expected) scale.
   """
+  if how.sparsity_rule is not None:
+    if how.sparsity_rule.compress_weights:
+      if (
+          how.sparsity_rule.weight_sparsity_n != 1
+          or how.sparsity_rule.weight_sparsity_m != 4
+      ):
+        raise ValueError(
+            'compress_weights=True only supports 1:4 sparsity, got'
+            f' {how.sparsity_rule.weight_sparsity_n}:{how.sparsity_rule.weight_sparsity_m}.'
+        )
+      compressed, indices = sparsity.compress_1_4(
+          array,
+          axis=how.sparsity_rule.sparse_axis,
+          order=how.sparsity_rule.weight_sparsity_order,
+      )
+      array = sparsity.decompress_1_4(
+          compressed, indices, axis=how.sparsity_rule.sparse_axis
+      )
+    elif how.sparsity_rule.weight_sparsity_m > 0:
+      array = sparsify(array, how.sparsity_rule)
+
   reduce_axes = []  # axes to calibrate.
   tiled_axes_offset = 0
   for axis, _ in enumerate(array.shape):
@@ -619,6 +747,7 @@ def quantize_with_scale_zero_point(
     scale: jax.Array,
     zero_point: jax.Array | None,
     noise_fn: numerics.NoiseFn | None = None,
+    sparsity_rule: sparsity.SparsityRule | None = None,
 ) -> QArray:
   """Quantizes an array with the given scale and zero_point.
 
@@ -629,6 +758,8 @@ def quantize_with_scale_zero_point(
     zero_point: The zero_point to use.
     noise_fn: The noise function to add to the quantized array for stochastic
       rounding.
+    sparsity_rule: Optional sparsity rule for weight pruning and 1:4
+      compression.
 
   Returns:
     The quantized array.
@@ -639,6 +770,25 @@ def quantize_with_scale_zero_point(
     raise ValueError(
         f'Expect zero_point shape {scale.shape} but got {zero_point.shape}'
     )
+
+  sparsity_indices = None
+  sparse_axis = None
+  if sparsity_rule is not None:
+    if sparsity_rule.compress_weights:
+      if (
+          sparsity_rule.weight_sparsity_n != 1
+          or sparsity_rule.weight_sparsity_m != 4
+      ):
+        raise ValueError(
+            'compress_weights=True only supports 1:4 sparsity, got'
+            f' {sparsity_rule.weight_sparsity_n}:{sparsity_rule.weight_sparsity_m}.'
+        )
+      sparse_axis = sparsity_rule.sparse_axis % array.ndim
+      array, sparsity_indices = sparsity.compress_1_4(
+          array, axis=sparse_axis, order=sparsity_rule.weight_sparsity_order
+      )
+    elif sparsity_rule.weight_sparsity_m > 0:
+      array = sparsify(array, sparsity_rule)
 
   # Ensure that the scale has the same dtype as the fp array, because
   # dequantize() uses the scale dtype to reconstruct the original array.
@@ -654,7 +804,14 @@ def quantize_with_scale_zero_point(
         jnp.add, qvalue, zero_point.astype(qvalue.dtype)
     )
   qvalue = numerics.convert_to(qvalue, qtype, noise_fn)
-  return QArray(qvalue, scale, zero_point, qtype)
+  return QArray(
+      qvalue,
+      scale,
+      zero_point,
+      qtype,
+      sparsity_indices=sparsity_indices,
+      sparse_axis=sparse_axis,
+  )
 
 
 def quantize(array: jax.Array, how: HowToQuantize) -> QArray:
@@ -662,7 +819,12 @@ def quantize(array: jax.Array, how: HowToQuantize) -> QArray:
   calibration = calibrate(array, how)
   scale, zero_point = compute_scale_zero_point(calibration, how.qtype)
   return quantize_with_scale_zero_point(
-      array, how.qtype, scale, zero_point, how.noise_fn
+      array,
+      how.qtype,
+      scale,
+      zero_point,
+      how.noise_fn,
+      how.sparsity_rule,
   )
 
 
@@ -674,6 +836,7 @@ def quantize_api(
     tiled_axes: Mapping[int, int | float] | None = None,
     calibration_method: str = 'absmax',
     scale_dtype: jax.typing.DTypeLike | None = None,
+    sparsity_rule: sparsity.SparsityRule | None = None,
 ) -> QArray:
   """Quantize a Jax Array into QArray using a dynamic range.
 
@@ -694,6 +857,8 @@ def quantize_api(
     scale_dtype: The dtype of the scale. If not given, the dtype will be the
       same as the array's dtype. Note that the scale's dtype decides the
       dequantized array's dtype.
+    sparsity_rule: Optional sparsity rule for weight pruning and 1:4
+      compression.
 
   Returns:
     The quantized array.
@@ -704,6 +869,7 @@ def quantize_api(
       channelwise_axes=channelwise_axes,
       tiled_axes=tiled_axes or {},
       calibration_method=calibration_method,
+      sparsity_rule=sparsity_rule,
   )
   qarray = quantize(array, how)
   if scale_dtype is not None:
@@ -727,7 +893,12 @@ def dequantize(array: QArray) -> jax.Array:
     qvalue = call_with_generic_broadcast(
         jnp.subtract, qvalue, array.zero_point.astype(qvalue.dtype)
     )
-  return call_with_generic_broadcast(jnp.multiply, qvalue, array.scale)
+  res = call_with_generic_broadcast(jnp.multiply, qvalue, array.scale)
+  if array.sparsity_indices is not None:
+    res = sparsity.decompress_1_4(
+        res, array.sparsity_indices, axis=array.sparse_axis or 0
+    )
+  return res
 
 
 def clip_to_calibration(

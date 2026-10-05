@@ -25,6 +25,7 @@ import jax
 from jax.experimental import pallas as pl
 from qwix._src import aux_data
 from qwix._src import interception
+from qwix._src.core import sparsity
 from qwix._src.utils import flax_util
 
 
@@ -91,6 +92,9 @@ class QuantizationRule:
   # per-channel scales and this config is ignored.
   act_batch_axes: Collection[int] = (0,)
 
+  # Optional sparsity rule for weights (including 1:4 structured compression).
+  weight_sparsity_rule: sparsity.SparsityRule | None = None
+
 
 def get_current_rule(op_name: str) -> QuantizationRule | None:
   """Returns the current quantization rule if intercepted, or None otherwise."""
@@ -137,7 +141,7 @@ class QuantizationProvider:
   def get_intercept_map(self) -> dict[str, Callable[..., Any]]:
     """Returns the intercept map for interception.wrap_func_intercepted."""
     # Common functions that are intercepted by all quantization providers.
-    intercept_map = {
+    intercept_map: dict[str, Callable[..., Any]] = {
         'qwix._src.qconfig.get_current_rule': (
             lambda op: self._get_current_rule_and_op_id(op, only_rule=True)[0]
         )
@@ -146,8 +150,8 @@ class QuantizationProvider:
       # 1. Disable interceptions during the pallas_call factory setup.
       # 2. Wrap the returned callable so that interceptions remain disabled
       #    during deferred execution.
-      intercept_map['jax.experimental.pallas.pallas_call'] = (  # pyrefly: ignore
-          lambda *args, **kwargs: interception.disable_interceptions(  # pyrefly: ignore
+      intercept_map['jax.experimental.pallas.pallas_call'] = (
+          lambda *args, **kwargs: interception.disable_interceptions(
               interception.disable_interceptions(pl.pallas_call)(
                   *args, **kwargs
               )
