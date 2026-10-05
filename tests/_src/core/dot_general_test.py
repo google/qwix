@@ -196,6 +196,186 @@ class DotGeneralTest(parameterized.TestCase):
     # Contracting axes for RHS are 0 and 1. Axis 1 should be selected.
     self.assertEqual(how_rhs.tiled_axes, {1: 32})
 
+  @parameterized.named_parameters(
+      dict(testcase_name='cpu_default', device_kind='cpu', expected=128),
+      dict(
+          testcase_name='gpu_default', device_kind='NVIDIA H100', expected=128
+      ),
+      dict(testcase_name='tpu_v5e', device_kind='TPU v5 lite', expected=128),
+      dict(testcase_name='tpu_v5p', device_kind='TPU v5p', expected=128),
+      dict(
+          testcase_name='tpu_v6_lite', device_kind='TPU v6 lite', expected=256
+      ),
+      dict(testcase_name='tpu_v6e', device_kind='TPU v6e', expected=256),
+      dict(testcase_name='tpu7x', device_kind='TPU7x', expected=512),
+      dict(
+          testcase_name='tpu7x_sim',
+          device_kind='TPU7x\nsimdevice',
+          expected=512,
+      ),
+      dict(testcase_name='tpu8i', device_kind='TPU8i', expected=256),
+      dict(testcase_name='tpu8t', device_kind='TPU8t', expected=256),
+  )
+  def test_get_min_tile_size_to_dequant_on_output(
+      self, device_kind: str, expected: int
+  ):
+    with mock.patch.object(
+        dot_general, '_get_device_kind', return_value=device_kind
+    ):
+      self.assertEqual(
+          dot_general.get_min_tile_size_to_dequant_on_output(), expected
+      )
+
+  def test_min_tile_size_uses_abstract_mesh_device(self):
+    fake_mesh = mock.MagicMock()
+    fake_mesh.abstract_device.device_kind = 'TPU8i'
+    with mock.patch.object(
+        jax.sharding, 'get_abstract_mesh', return_value=fake_mesh
+    ):
+      self.assertEqual(
+          dot_general.get_min_tile_size_to_dequant_on_output(), 256
+      )
+
+  def test_get_device_kind_fallback_without_abstract_device(self):
+    fake_mesh = mock.MagicMock()
+    fake_mesh.abstract_device = None
+    fake_device = mock.MagicMock()
+    fake_device.device_kind = 'TPU v6e'
+    with (
+        mock.patch.object(
+            jax.sharding, 'get_abstract_mesh', return_value=fake_mesh
+        ),
+        mock.patch.object(jax, 'devices', return_value=[fake_device]),
+    ):
+      self.assertEqual(
+          dot_general.get_min_tile_size_to_dequant_on_output(), 256
+      )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='v5p_tile128_fast',
+          device_kind='TPU v5p',
+          tile_size=128,
+          expect_fast=True,
+      ),
+      dict(
+          testcase_name='v6e_tile128_slow',
+          device_kind='TPU v6 lite',
+          tile_size=128,
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='v6e_tile256_fast',
+          device_kind='TPU v6 lite',
+          tile_size=256,
+          expect_fast=True,
+      ),
+      dict(
+          testcase_name='tpu7x_tile128_slow',
+          device_kind='TPU7x',
+          tile_size=128,
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='tpu7x_tile256_slow',
+          device_kind='TPU7x',
+          tile_size=256,
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='tpu7x_tile512_fast',
+          device_kind='TPU7x',
+          tile_size=512,
+          expect_fast=True,
+      ),
+      dict(
+          testcase_name='tpu8i_tile128_slow',
+          device_kind='TPU8i',
+          tile_size=128,
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='tpu8i_tile256_fast',
+          device_kind='TPU8i',
+          tile_size=256,
+          expect_fast=True,
+      ),
+      dict(
+          testcase_name='tpu8i_tile512_fast',
+          device_kind='TPU8i',
+          tile_size=512,
+          expect_fast=True,
+      ),
+      dict(
+          testcase_name='tpu7x_fp8_tile128_slow',
+          device_kind='TPU7x',
+          lhs_qtype=jnp.float8_e4m3fn,
+          rhs_qtype=jnp.float8_e4m3fn,
+          tile_size=128,
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='tpu7x_fp8_tile256_slow',
+          device_kind='TPU7x',
+          lhs_qtype=jnp.float8_e4m3fn,
+          rhs_qtype=jnp.float8_e4m3fn,
+          tile_size=256,
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='tpu7x_fp8_tile64_slow',
+          device_kind='TPU7x',
+          lhs_qtype=jnp.float8_e4m3fn,
+          rhs_qtype=jnp.float8_e4m3fn,
+          tile_size=64,
+          expect_fast=False,
+      ),
+  )
+  def test_dot_general_tile_size_dispatch(
+      self,
+      device_kind: str,
+      tile_size: int,
+      expect_fast: bool,
+      lhs_qtype: jax.typing.DTypeLike = jnp.int8,
+      rhs_qtype: jax.typing.DTypeLike = jnp.int4,
+  ):
+    k = 1024
+    num_tiles = k // tile_size
+    lhs = qarray.QArray(
+        jnp.ones((16, k), lhs_qtype),
+        jnp.ones((16, num_tiles), jnp.bfloat16),
+        qtype=lhs_qtype,
+    )
+    rhs = qarray.QArray(
+        jnp.ones((k, 16), rhs_qtype),
+        jnp.ones((num_tiles, 16), jnp.bfloat16),
+        qtype=rhs_qtype,
+    )
+    dnums = (([1], [0]), ([], []))
+    with (
+        mock.patch.object(
+            dot_general, '_get_device_kind', return_value=device_kind
+        ),
+        mock.patch.object(
+            dot_general,
+            '_fast_dot_general',
+            wraps=dot_general._fast_dot_general,
+        ) as mock_fast,
+        mock.patch.object(
+            dot_general,
+            '_slow_dot_general',
+            wraps=dot_general._slow_dot_general,
+        ) as mock_slow,
+    ):
+      res = dot_general.dot_general(lhs, rhs, dnums)
+      self.assertEqual(res.shape, (16, 16))
+      if expect_fast:
+        mock_fast.assert_called_once()
+        mock_slow.assert_not_called()
+      else:
+        mock_slow.assert_called_once()
+        mock_fast.assert_not_called()
+
 
 if __name__ == '__main__':
   absltest.main()
