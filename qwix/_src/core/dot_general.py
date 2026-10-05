@@ -403,6 +403,19 @@ def loop_dot_general(
 # dot general will be inefficient and we should dequantize the input first.
 MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT = 128
 
+_FAST_MIXED_QVALUE_DTYPES = (jnp.int4, jnp.uint4, jnp.float4_e2m1fn)
+
+
+def _get_min_tile_size_to_dequant_on_output() -> int:
+  """Returns the minimum contracting tile size for output dequantization."""
+  try:
+    device_kind = getattr(jax.devices()[0], 'device_kind', '')
+  except Exception:  # pylint: disable=broad-except
+    device_kind = ''
+  if device_kind in ('TPU7', 'TPU7x', 'TPU8i', 'TPU8t'):
+    return max(256, MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT)
+  return MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT
+
 
 def dot_general(
     lhs: qarray.MaybeQArray,
@@ -457,14 +470,26 @@ def dot_general(
   # then computes in floating-point types, and fast_dot_general, which
   # computes in quantized types first and then dequantize.
   use_fast_dot_general = True
-  for operand, ca in zip((lhs, rhs), dimension_numbers[0]):
+  min_tile_size = _get_min_tile_size_to_dequant_on_output()
+  for operand, other_operand, ca in zip(
+      (lhs, rhs), (rhs, lhs), dimension_numbers[0]
+  ):
     if not isinstance(operand, qarray.QArray):
       if numerics.should_quantize(operand.dtype):
-        # Always dequantize on inputs if any of the operands is in bf16/fp32,
-        # because XLA is able to fuse the dequantize and the matmul. The slow
-        # path is usually not slower than the fast path, since both use fp
-        # matmul, and will be significantly faster when subchannel or zero_point
-        # is used.
+        # For mixed float-activation x symmetric 4-bit QArray (W4A16), use
+        # fast_dot_general so unscaled 4-bit weights feed the XLA dot_general
+        # directly, unlocking hardware 4-bit MXU GainLatchModes (e.g.
+        # kNoXposeS4 and kNoXposePackedE4M3Fn on SFS). Otherwise, dequantize on
+        # inputs when any operand is in bf16/fp32, because XLA fuses input
+        # dequantization with the matmul and avoids extra dot_general calls for
+        # zero_point.
+        if (
+            isinstance(other_operand, qarray.QArray)
+            and other_operand.zero_point is None
+            and getattr(other_operand.qvalue, 'dtype', None)
+            in _FAST_MIXED_QVALUE_DTYPES
+        ):
+          continue
         use_fast_dot_general = False
         break
       # For raw arrays in lower precision, e.g. fp8, int4, bool, using fast path
@@ -484,7 +509,7 @@ def dot_general(
     for axis in ca:
       if operand.scale.shape[axis] > 1:
         tile_size = operand.qvalue.shape[axis] // operand.scale.shape[axis]
-        if tile_size < MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT:
+        if tile_size < min_tile_size:
           use_fast_dot_general = False
           break
 

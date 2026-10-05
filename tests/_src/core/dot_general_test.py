@@ -196,6 +196,125 @@ class DotGeneralTest(parameterized.TestCase):
     # Contracting axes for RHS are 0 and 1. Axis 1 should be selected.
     self.assertEqual(how_rhs.tiled_axes, {1: 32})
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='w4a16_int4_channelwise',
+          rhs_dtype=jnp.int4,
+          scale_shape=(1, 16),
+          asymmetric=False,
+          device_kind='TPU8i',
+          expect_fast=True,
+      ),
+      dict(
+          testcase_name='w4a16_fp4_channelwise',
+          rhs_dtype=jnp.float4_e2m1fn,
+          scale_shape=(1, 16),
+          asymmetric=False,
+          device_kind='TPU8i',
+          expect_fast=True,
+      ),
+      dict(
+          testcase_name='w4a16_int4_subchannel_256_sfs',
+          rhs_dtype=jnp.int4,
+          scale_shape=(2, 16),
+          asymmetric=False,
+          device_kind='TPU8i',
+          expect_fast=True,
+      ),
+      dict(
+          testcase_name='w4a16_int4_subchannel_128_sfs',
+          rhs_dtype=jnp.int4,
+          scale_shape=(4, 16),
+          asymmetric=False,
+          device_kind='TPU8i',
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='w4a16_int4_asymmetric',
+          rhs_dtype=jnp.int4,
+          scale_shape=(1, 16),
+          asymmetric=True,
+          device_kind='TPU8i',
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='w8a16_int8_channelwise',
+          rhs_dtype=jnp.int8,
+          scale_shape=(1, 16),
+          asymmetric=False,
+          device_kind='TPU8i',
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='w4a16_nf4_channelwise',
+          rhs_dtype=jnp.uint4,
+          qtype='nf4',
+          scale_shape=(1, 16),
+          asymmetric=False,
+          device_kind='TPU8i',
+          expect_fast=False,
+      ),
+  )
+  def test_w4a16_fast_dot_general_dispatch(
+      self,
+      rhs_dtype,
+      scale_shape,
+      asymmetric,
+      device_kind,
+      expect_fast,
+      qtype=None,
+  ):
+    lhs = jnp.ones((8, 512), jnp.bfloat16)
+    zero_point = jnp.zeros(scale_shape, rhs_dtype) if asymmetric else None
+    rhs = qarray.QArray(
+        qvalue=jnp.ones((512, 16), rhs_dtype),
+        scale=jnp.ones(scale_shape, jnp.bfloat16),
+        zero_point=zero_point,
+        qtype=qtype,
+    )
+    dnums = (([1], [0]), ([], []))
+    fake_device = mock.create_autospec(
+        jax.Device, instance=True, spec_set=False
+    )
+    fake_device.device_kind = device_kind
+    mock.seal(fake_device)
+    self.enter_context(
+        mock.patch.object(
+            jax,
+            'devices',
+            autospec=True,
+            spec_set=True,
+            return_value=[fake_device],
+        )
+    )
+    mock_fast = self.enter_context(
+        mock.patch.object(
+            dot_general,
+            '_fast_dot_general',
+            autospec=True,
+            spec_set=True,
+            side_effect=dot_general._fast_dot_general,
+        )
+    )
+    mock_slow = self.enter_context(
+        mock.patch.object(
+            dot_general,
+            '_slow_dot_general',
+            autospec=True,
+            spec_set=True,
+            side_effect=dot_general._slow_dot_general,
+        )
+    )
+    res = jax.eval_shape(lambda: dot_general.dot_general(lhs, rhs, dnums))
+    self.assertEqual(res.shape, (8, 16))
+    self.assertEqual(res.dtype, jnp.bfloat16)
+    if expect_fast:
+      mock_fast.assert_called_once()
+      mock_slow.assert_not_called()
+    else:
+      mock_slow.assert_called_once()
+      mock_fast.assert_not_called()
+
 
 if __name__ == '__main__':
   absltest.main()
