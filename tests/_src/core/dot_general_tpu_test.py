@@ -218,6 +218,112 @@ class DotGeneralTest(parameterized.TestCase):
     self.assertLessEqual(fast_mae, 0.003)
     self.assertLessEqual(loop_mae, 0.003)
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='fp8_int4_fine_sc',
+          lhs_shape=(128, 512, 4),
+          lhs_tile_sizes=(1, 128, 1),
+          lhs_qtype=jnp.float8_e4m3fn,
+          rhs_shape=(512, 256, 4),
+          rhs_tile_sizes=(32, 1, 1),
+          rhs_qtype=jnp.int4,
+          dimension_numbers=(([1], [0]), ([2], [2])),
+          expected_mae=0.13,
+      ),
+      dict(
+          testcase_name='fp8_e5m2_int4_fine_sc',
+          lhs_shape=(128, 512, 4),
+          lhs_tile_sizes=(1, None, 1),
+          lhs_qtype=jnp.float8_e5m2,
+          rhs_shape=(512, 256, 4),
+          rhs_tile_sizes=(32, 1, 1),
+          rhs_qtype=jnp.int4,
+          dimension_numbers=(([1], [0]), ([2], [2])),
+          expected_mae=0.15,
+      ),
+      dict(
+          testcase_name='fp8_mxfp4_sc',
+          lhs_shape=(128, 512, 4),
+          lhs_tile_sizes=(1, 128, 1),
+          lhs_qtype=jnp.float8_e4m3fn,
+          rhs_shape=(512, 256, 4),
+          rhs_tile_sizes=(32, None, None),
+          rhs_qtype='mxfp4',
+          dimension_numbers=(([1], [0]), ([2], [2])),
+          expected_mae=0.15,
+      ),
+      dict(
+          testcase_name='fp8_nf4',
+          lhs_shape=(128, 512, 4),
+          lhs_tile_sizes=(1, 128, 1),
+          lhs_qtype=jnp.float8_e4m3fn,
+          rhs_shape=(512, 256, 4),
+          rhs_tile_sizes=(32, 1, 1),
+          rhs_qtype='nf4',
+          dimension_numbers=(([1], [0]), ([2], [2])),
+          expected_mae=0.12,
+      ),
+  )
+  def test_w4a8_fine_subchannel(
+      self,
+      *,
+      lhs_shape: tuple[int, ...],
+      lhs_qtype: jax.typing.DTypeLike,
+      lhs_tile_sizes: tuple[int | None, ...],
+      rhs_shape: tuple[int, ...],
+      rhs_qtype: jax.typing.DTypeLike,
+      rhs_tile_sizes: tuple[int | None, ...],
+      dimension_numbers: jax.lax.DotDimensionNumbers,
+      expected_mae: float,
+  ):
+    if jax.devices()[0].platform != 'tpu':
+      self.skipTest('Only run on TPU.')
+    lhs = self._make_array(lhs_shape)
+    rhs = self._make_array(rhs_shape)
+
+    lhs_how = qarray.HowToQuantize(
+        qtype=lhs_qtype,
+        channelwise_axes=(),
+        tiled_axes={a: s for a, s in enumerate(lhs_tile_sizes) if s},
+    )
+    q_lhs = qarray.quantize(lhs, lhs_how)
+
+    rhs_how = qarray.HowToQuantize(
+        qtype=rhs_qtype,
+        channelwise_axes=(),
+        tiled_axes={a: s for a, s in enumerate(rhs_tile_sizes) if s},
+    )
+    q_rhs = qarray.quantize(rhs, rhs_how)
+
+    @jax.jit
+    def _run_w4a8(lhs, rhs, fp_res):
+      slow_res = dot_general._slow_dot_general(lhs, rhs, dimension_numbers)
+      dg_res = dot_general.dot_general(lhs, rhs, dimension_numbers)
+      loop_res = dot_general.loop_dot_general(lhs, rhs, dimension_numbers)
+      return (
+          rel_mae(dg_res, fp_res),
+          rel_mae(loop_res, fp_res),
+          rel_mae(dg_res, slow_res),
+          rel_mae(dg_res, loop_res),
+      )
+
+    fp_res = jax.lax.dot_general(lhs, rhs, dimension_numbers)
+    dg_fp_mae, loop_fp_mae, dg_slow_mae, dg_loop_mae = _run_w4a8(
+        q_lhs, q_rhs, fp_res
+    )
+
+    logging.info(
+        'dg_fp_mae=%s loop_fp_mae=%s dg_slow_mae=%s dg_loop_mae=%s',
+        dg_fp_mae,
+        loop_fp_mae,
+        dg_slow_mae,
+        dg_loop_mae,
+    )
+    self.assertLessEqual(dg_fp_mae, expected_mae)
+    self.assertLessEqual(loop_fp_mae, expected_mae)
+    self.assertLessEqual(dg_slow_mae, 0.06)
+    self.assertLessEqual(dg_loop_mae, 0.003)
+
 
 if __name__ == '__main__':
   absltest.main()
