@@ -145,6 +145,28 @@ class DotGeneralTest(parameterized.TestCase):
           disable_fast_dot_general=True,
           disable_loop_dot_general=True,
       ),
+      dict(
+          testcase_name='w4a16_channelwise',
+          lhs_shape=(128, 512, 4),
+          lhs_tile_sizes=(1, None, 1),
+          lhs_qtype=None,
+          rhs_shape=(512, 256, 4),
+          rhs_tile_sizes=(None, 1, 1),
+          rhs_qtype=jnp.int4,
+          dimension_numbers=(([1], [0]), ([2], [2])),
+          expected_mae=0.14,
+      ),
+      dict(
+          testcase_name='w4a16_subchannel_256',
+          lhs_shape=(128, 512, 4),
+          lhs_tile_sizes=(1, None, 1),
+          lhs_qtype=None,
+          rhs_shape=(512, 256, 4),
+          rhs_tile_sizes=(256, 1, 1),
+          rhs_qtype=jnp.int4,
+          dimension_numbers=(([1], [0]), ([2], [2])),
+          expected_mae=0.13,
+      ),
   )
   def test_dot_general(
       self,
