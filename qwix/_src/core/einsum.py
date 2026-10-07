@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Quantized einsum with subchannel support."""
+
 # pylint: disable=line-too-long
 
-from typing import Any, Callable, Mapping
+import dataclasses
+from typing import Any, Callable, Mapping, cast
 
 import jax
 from jax import numpy as jnp
@@ -73,6 +75,16 @@ def get_how_to_quantize(
   else:
     if tile_size and last_contracting_axis is not None:
       tiled_axes[last_contracting_axis] = tile_size
+
+  sparsity_rule = kwargs.get('sparsity_rule')
+  if (
+      sparsity_rule is not None
+      and sparsity_rule.compress_weights
+      and last_contracting_axis is not None
+  ):
+    kwargs['sparsity_rule'] = dataclasses.replace(
+        sparsity_rule, sparse_axis=last_contracting_axis
+    )
 
   return qarray.HowToQuantize(
       channelwise_axes=channelwise_axes,
@@ -143,14 +155,23 @@ def einsum(
   # opt_einsum.contract_path casts dimension size to int effectively
   # immediately, which fails for jax symbolic dimensions that raise error on
   # __int__. We pass sanitized integer shapes instead.
-  sanitized_shapes = [einsum_info.sanitize_shape(op.shape) for op in operands]
-  _, contractions = opt_einsum.contract_path(
-      f'{input_subs}->{output_subs}',
-      *sanitized_shapes,
-      shapes=True,
-      einsum_call=True,  # This is necessary for opt_einsum to return the contraction list.
+  sanitized_shapes = [
+      einsum_info.sanitize_shape(
+          op.logical_shape if isinstance(op, qarray.QArray) else op.shape
+      )
+      for op in operands
+  ]
+  _, contractions = cast(
+      tuple[Any, list[Any]],
+      opt_einsum.contract_path(
+          f'{input_subs}->{output_subs}',
+          *sanitized_shapes,
+          shapes=True,
+          # This is necessary for opt_einsum to return the contraction list.
+          einsum_call=True,
+      ),
   )
-  for contraction in contractions:  # pytype: disable=attribute-error # pyrefly: ignore
+  for contraction in contractions:
     # operand_indices: (0, 1), einsum_str: "ij,jk->ik"
     operand_indices, _, einsum_str = contraction[:3]
     if len(operand_indices) == 1:

@@ -813,6 +813,34 @@ class DotGeneralQtTest(parameterized.TestCase):
         f'mxint4 drhs weight gradient SQNR {drhs_sqnr:.2f} dB is below 12 dB',
     )
 
+  def test_compressed_sparsity_rule_fwd_bwd(self):
+    """Verifies that 1:4 compressed sparsity works in dot_general_qt forward and backward passes."""
+    rule = sparsity.SparsityRule(
+        weight_sparsity_n=1,
+        weight_sparsity_m=4,
+        compress_weights=True,
+    )
+    config = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='float8_e4m3',
+        rhs_qtype='float8_e4m3',
+        dlhs_grad_qtype='float8_e5m2',
+        drhs_grad_qtype='float8_e5m2',
+        sparsity_rule=rule,
+    )
+    lhs = jax.random.normal(jax.random.key(0), (16, 64), jnp.float32)
+    rhs = jax.random.normal(jax.random.key(1), (64, 32), jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+
+    def loss_fn(l, r):
+      return jnp.sum(dot_general_qt.dot_general_qt(l, r, dnums, config=config))
+
+    out, (grad_lhs, grad_rhs) = jax.value_and_grad(loss_fn, argnums=(0, 1))(
+        lhs, rhs
+    )
+    self.assertEqual(out.shape, ())
+    self.assertEqual(grad_lhs.shape, lhs.shape)
+    self.assertEqual(grad_rhs.shape, rhs.shape)
+
 
 if __name__ == '__main__':
   absltest.main()

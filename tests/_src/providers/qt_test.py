@@ -297,6 +297,67 @@ class QtTest(parameterized.TestCase):
     grads = train_step(qt_linear, model_input)
     self.assertIsNotNone(grads)
 
+  def test_dot_general_with_compressed_sparsity(self):
+    lhs = jnp.ones((1, 4), dtype=jnp.bfloat16)
+    rhs = jnp.array([[1.0], [2.0], [3.0], [4.0]], dtype=jnp.bfloat16)
+
+    rule = qconfig.QuantizationRule(
+        weight_qtype=jnp.int8,
+        weight_sparsity_rule=sparsity.SparsityRule(
+            weight_sparsity_n=1,
+            weight_sparsity_m=4,
+            compress_weights=True,
+        ),
+    )
+    provider = qt.QtProvider([rule])
+
+    class TestModule(nn.Module):
+      provider: qt.QtProvider
+
+      def __call__(self, lhs, rhs):
+        dimension_numbers = (((1,), (0,)), ((), ()))
+        return self.provider.dot_general(lhs, rhs, dimension_numbers)
+
+    module = TestModule(provider)
+    out = module.apply({}, lhs, rhs)
+    # 1:4 sparsity keeps only the largest magnitude element (4.0).
+    self.assertTrue(
+        jnp.allclose(out, jnp.array([[4.0]], dtype=jnp.bfloat16), atol=0.1)
+    )
+
+  def test_nnx_qt_compressed_sparsity_fwd_bwd(self):
+    rule = qt.QtRule(
+        module_path=".*",
+        weight_qtype=jnp.float8_e4m3fn,
+        act_qtype=jnp.float8_e4m3fn,
+        bwd_qtype=jnp.float8_e5m2,
+        weight_sparsity_rule=sparsity.SparsityRule(
+            weight_sparsity_n=1,
+            weight_sparsity_m=4,
+            compress_weights=True,
+        ),
+    )
+    model_input = jax.random.normal(
+        jax.random.key(0), (8, 64), dtype=jnp.bfloat16
+    )
+    linear = nnx.Linear(64, 16, rngs=nnx.Rngs(0), param_dtype=jnp.bfloat16)
+    qt_linear = qwix_model.quantize_model(
+        linear,
+        qt.QtProvider([rule]),
+        model_input,
+    )
+
+    @nnx.jit
+    def train_step(model, x):
+      def loss_fn(model, x):
+        return jnp.sum(model(x))
+
+      return nnx.value_and_grad(loss_fn)(model, x)
+
+    loss, grads = train_step(qt_linear, model_input)
+    self.assertEqual(loss.shape, ())
+    self.assertEqual(grads.kernel.value.shape, (64, 16))
+
 
 if __name__ == "__main__":
   absltest.main()

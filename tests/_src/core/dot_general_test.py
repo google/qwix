@@ -20,6 +20,8 @@ from jax import numpy as jnp
 from qwix._src.core import dot_general
 from qwix._src.core import einsum
 from qwix._src.core import qarray
+from qwix._src.core import sparse_dot
+from qwix._src.core import sparsity
 
 
 class DotGeneralTest(parameterized.TestCase):
@@ -195,6 +197,98 @@ class DotGeneralTest(parameterized.TestCase):
     )
     # Contracting axes for RHS are 0 and 1. Axis 1 should be selected.
     self.assertEqual(how_rhs.tiled_axes, {1: 32})
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='f8e4m3_per_channel',
+          qtype=jnp.float8_e4m3fn,
+          tile_size=None,
+      ),
+      dict(
+          testcase_name='f8e5m2_subchannel',
+          qtype=jnp.float8_e5m2,
+          tile_size=32,
+      ),
+      dict(
+          testcase_name='int4_per_channel',
+          qtype=jnp.int4,
+          tile_size=None,
+      ),
+      dict(
+          testcase_name='int4_subchannel',
+          qtype=jnp.int4,
+          tile_size=32,
+      ),
+      dict(
+          testcase_name='mxfp8',
+          qtype='mxfp8',
+          tile_size=32,
+      ),
+  )
+  def test_sparse_dot_general_and_einsum(self, qtype, tile_size):
+    lhs = jax.random.normal(jax.random.key(0), (32, 256), jnp.bfloat16)
+    rhs_fp = jax.random.normal(jax.random.key(1), (256, 64), jnp.bfloat16)
+    dnums = (((1,), (0,)), ((), ()))
+    sparsity_rule = sparsity.SparsityRule(
+        weight_sparsity_n=1,
+        weight_sparsity_m=4,
+        compress_weights=True,
+    )
+    how_rhs = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=False,
+        qtype=qtype,
+        tile_size=tile_size,
+        sparsity_rule=sparsity_rule,
+    )
+    self.assertIsNotNone(how_rhs.sparsity_rule)
+    self.assertEqual(how_rhs.sparsity_rule.sparse_axis, 0)
+
+    rhs_q = qarray.quantize(rhs_fp, how_rhs)
+    self.assertEqual(rhs_q.shape, (64, 64))
+    self.assertEqual(rhs_q.logical_shape, (256, 64))
+
+    res_dot = dot_general.dot_general(lhs, rhs_q, dnums)
+    res_loop = dot_general.loop_dot_general(lhs, rhs_q, dnums)
+    res_einsum = einsum.einsum('mk,kn->mn', lhs, rhs_q)
+    expected = jax.lax.dot_general(lhs, qarray.dequantize(rhs_q), dnums)
+    expected_loop = dot_general.loop_dot_general(
+        lhs, sparse_dot.decompress_qarray(rhs_q), dnums
+    )
+
+    self.assertEqual(res_dot.shape, (32, 64))
+    self.assertTrue(jnp.allclose(res_dot, expected, atol=1e-2, rtol=1e-2))
+    self.assertTrue(jnp.array_equal(res_loop, expected_loop))
+    self.assertTrue(jnp.allclose(res_einsum, expected, atol=1e-2, rtol=1e-2))
+
+  def test_sparse_dot_capabilities_and_how_to_quantize(self):
+    lhs = jnp.ones((32, 256), jnp.float8_e4m3fn)
+    rhs_fp = jax.random.normal(jax.random.key(2), (256, 64), jnp.bfloat16)
+    dnums = (((1,), (0,)), ((), ()))
+    rule = sparsity.SparsityRule(
+        weight_sparsity_n=1, weight_sparsity_m=4, compress_weights=True
+    )
+    how_rhs = einsum.get_how_to_quantize(
+        einsum_str='mk,kn->mn',
+        ndims=(2, 2),
+        for_lhs=False,
+        qtype=jnp.int4,
+        tile_size=None,
+        sparsity_rule=rule,
+    )
+    self.assertEqual(how_rhs.sparsity_rule.sparse_axis, 0)
+    rhs_q = qarray.quantize(rhs_fp, how_rhs)
+    self.assertTrue(sparse_dot.can_use_sparse_dot(lhs, rhs_q, dnums))
+    self.assertTrue(sparse_dot.can_emit_native_sparse_dot(lhs, rhs_q, dnums))
+
+    # Non-multiple of 256 on K should not emit native sparse dot.
+    lhs_small = jnp.ones((32, 128), jnp.float8_e4m3fn)
+    rhs_small = qarray.quantize(rhs_fp[:128], how_rhs)
+    self.assertTrue(sparse_dot.can_use_sparse_dot(lhs_small, rhs_small, dnums))
+    self.assertFalse(
+        sparse_dot.can_emit_native_sparse_dot(lhs_small, rhs_small, dnums)
+    )
 
 
 if __name__ == '__main__':
