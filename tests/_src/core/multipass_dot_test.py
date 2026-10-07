@@ -1065,7 +1065,7 @@ class MultiPassDotTest(parameterized.TestCase):
         lhs,
         rhs,
         dnums,
-        multipass_mode='three_pass_fp8_fp4',
+        multipass_mode='three_pass_fp8_fp4/fp4_fp4/fp4',
     )
     snr_fp8_fp4 = float(compute_snr_db(ref_f32, res_fp8_fp4))
     err_fp8_fp4 = float(compute_relative_error(ref_f32, res_fp8_fp4))
@@ -1074,25 +1074,25 @@ class MultiPassDotTest(parameterized.TestCase):
         lhs,
         rhs,
         dnums,
-        multipass_mode='three_pass_fp8_int4',
+        multipass_mode='three_pass_fp8_int4/int4_int4/int4',
     )
     snr_fp8_int4 = float(compute_snr_db(ref_f32, res_fp8_int4))
     err_fp8_int4 = float(compute_relative_error(ref_f32, res_fp8_int4))
 
-    res_fp8_mixed4 = multipass_dot.multipass_dot_general(
+    res_fp8_int4_fp4 = multipass_dot.multipass_dot_general(
         lhs,
         rhs,
         dnums,
-        multipass_mode='three_pass_fp8_mixed4',
+        multipass_mode='three_pass_fp8_int4/fp4_fp4/int4',
     )
-    snr_fp8_mixed4 = float(compute_snr_db(ref_f32, res_fp8_mixed4))
-    err_fp8_mixed4 = float(compute_relative_error(ref_f32, res_fp8_mixed4))
+    snr_fp8_int4_fp4 = float(compute_snr_db(ref_f32, res_fp8_int4_fp4))
+    err_fp8_int4_fp4 = float(compute_relative_error(ref_f32, res_fp8_int4_fp4))
 
     print(f'Hybrid FP8+FP4: SNR={snr_fp8_fp4:.2f} dB, err={err_fp8_fp4:.4f}')
     print(f'Hybrid FP8+INT4: SNR={snr_fp8_int4:.2f} dB, err={err_fp8_int4:.4f}')
     print(
-        f'Hybrid FP8+Mixed4: SNR={snr_fp8_mixed4:.2f} dB,'
-        f' err={err_fp8_mixed4:.4f}'
+        f'Hybrid FP8+int4_fp4: SNR={snr_fp8_int4_fp4:.2f} dB,'
+        f' err={err_fp8_int4_fp4:.4f}'
     )
 
     fp8_fp4_target = 41.83 if is_ghostfish() else 43.75
@@ -1105,10 +1105,69 @@ class MultiPassDotTest(parameterized.TestCase):
     self.assertAlmostEqual(snr_fp8_int4, fp8_int4_target, delta=1.5)
     self.assertAlmostEqual(err_fp8_int4, err_fp8_int4_target, delta=0.002)
 
-    fp8_mixed4_target = 41.72 if is_ghostfish() else 43.58
-    err_fp8_mixed4_target = 0.0082 if is_ghostfish() else 0.0066
-    self.assertAlmostEqual(snr_fp8_mixed4, fp8_mixed4_target, delta=1.5)
-    self.assertAlmostEqual(err_fp8_mixed4, err_fp8_mixed4_target, delta=0.002)
+    fp8_int4_fp4_target = 41.72 if is_ghostfish() else 43.58
+    err_fp8_int4_fp4_target = 0.0082 if is_ghostfish() else 0.0066
+    self.assertAlmostEqual(snr_fp8_int4_fp4, fp8_int4_fp4_target, delta=1.5)
+    self.assertAlmostEqual(
+        err_fp8_int4_fp4, err_fp8_int4_fp4_target, delta=0.002
+    )
+
+    # 10. Microscaled Hybrid Strategies with Native Hardware FP8 Accumulation
+    res_mx_fp4 = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4',
+    )
+    snr_mx_fp4 = float(compute_snr_db(ref_f32, res_mx_fp4))
+    err_mx_fp4 = float(compute_relative_error(ref_f32, res_mx_fp4))
+
+    res_mx_int4 = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='three_pass_mxfp8_mxint4/mxint4_mxint4/mxint4',
+    )
+    snr_mx_int4 = float(compute_snr_db(ref_f32, res_mx_int4))
+    err_mx_int4 = float(compute_relative_error(ref_f32, res_mx_int4))
+
+    res_mx_int4_fp4 = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='three_pass_mxfp8_mxint4/mxfp4_mxfp4/mxint4',
+    )
+    snr_mx_int4_fp4 = float(compute_snr_db(ref_f32, res_mx_int4_fp4))
+    err_mx_int4_fp4 = float(compute_relative_error(ref_f32, res_mx_int4_fp4))
+
+    print(
+        f'Microscale MXFP8+MXFP4: SNR={snr_mx_fp4:.2f} dB, err={err_mx_fp4:.4f}'
+    )
+    print(
+        f'Microscale MXFP8+MXINT4: SNR={snr_mx_int4:.2f} dB,'
+        f' err={err_mx_int4:.4f}'
+    )
+    print(
+        f'Microscale MXFP8+MXint4_fp4: SNR={snr_mx_int4_fp4:.2f} dB,'
+        f' err={err_mx_int4_fp4:.4f}'
+    )
+
+    mx_fp4_target = 41.98 if is_ghostfish() else 43.98
+    err_mx_fp4_target = 0.0080 if is_ghostfish() else 0.0063
+    self.assertAlmostEqual(snr_mx_fp4, mx_fp4_target, delta=0.25)
+    self.assertAlmostEqual(err_mx_fp4, err_mx_fp4_target, delta=0.0005)
+
+    mx_int4_target = 40.61 if is_ghostfish() else 41.86
+    err_mx_int4_target = 0.0093 if is_ghostfish() else 0.0081
+    self.assertAlmostEqual(snr_mx_int4, mx_int4_target, delta=0.25)
+    self.assertAlmostEqual(err_mx_int4, err_mx_int4_target, delta=0.0005)
+
+    mx_int4_fp4_target = 41.50 if is_ghostfish() else 43.23
+    err_mx_int4_fp4_target = 0.0084 if is_ghostfish() else 0.0069
+    self.assertAlmostEqual(snr_mx_int4_fp4, mx_int4_fp4_target, delta=0.25)
+    self.assertAlmostEqual(
+        err_mx_int4_fp4, err_mx_int4_fp4_target, delta=0.0005
+    )
 
   def test_qtype_specified_with_multipass_mode_raises_error(self):
     """Verifies that passing lhs_qtype or rhs_qtype with multipass_mode raises ValueError."""
@@ -1694,9 +1753,9 @@ class MultiPassDotTest(parameterized.TestCase):
       self.assertIn(jnp.dtype(jnp.int4), casts)
 
   @parameterized.parameters(
-      'three_pass_fp8_fp4',
-      'three_pass_fp8_int4',
-      'three_pass_fp8_mixed4',
+      'three_pass_fp8_fp4/fp4_fp4/fp4',
+      'three_pass_fp8_int4/int4_int4/int4',
+      'three_pass_fp8_int4/fp4_fp4/int4',
   )
   def test_hybrid_fp8_4bit_multipass_dot(self, mode):
     """Verifies basic hybrid FP8 + 4-bit (FP4, INT4, Mixed) 3-pass matmuls."""
@@ -1720,37 +1779,9 @@ class MultiPassDotTest(parameterized.TestCase):
     self.assertGreater(snr, 38.0)
 
   @parameterized.parameters(
-      ('three_pass_fp8_fp4', 'three_pass_fp8_fp4/fp4_fp4/fp4'),
-      ('three_pass_fp8_int4', 'three_pass_fp8_int4/int4_int4/int4'),
-      ('three_pass_fp8_mixed4', 'three_pass_fp8_int4/fp4_fp4/int4'),
-  )
-  def test_hybrid_fp8_4bit_aliases(self, canonical_mode, alias_mode):
-    """Verifies that explicit slash-separated aliases match canonical modes exactly."""
-    k1, k2 = jax.random.split(self.rng)
-    lhs = jax.random.normal(k1, (16, 32), dtype=jnp.float32)
-    rhs = jax.random.normal(k2, (32, 16), dtype=jnp.float32)
-    dnums = (((1,), (0,)), ((), ()))
-
-    res_canonical = multipass_dot.multipass_dot_general(
-        lhs,
-        rhs,
-        dnums,
-        multipass_mode=canonical_mode,
-        tile_size=32,
-    )
-    res_alias = multipass_dot.multipass_dot_general(
-        lhs,
-        rhs,
-        dnums,
-        multipass_mode=alias_mode,
-        tile_size=32,
-    )
-    np.testing.assert_allclose(res_canonical, res_alias, rtol=1e-5, atol=1e-5)
-
-  @parameterized.parameters(
-      ('three_pass_fp8_fp4', 4, 0, 6),
-      ('three_pass_fp8_int4', 0, 4, 6),
-      ('three_pass_fp8_mixed4', 2, 2, 6),
+      ('three_pass_fp8_fp4/fp4_fp4/fp4', 4, 0, 6),
+      ('three_pass_fp8_int4/int4_int4/int4', 0, 4, 6),
+      ('three_pass_fp8_int4/fp4_fp4/int4', 2, 2, 6),
   )
   def test_hybrid_fp8_4bit_graph_mechanics_and_gemm_ops(
       self, mode, fp4_casts, int4_casts, fp8_casts
@@ -1778,16 +1809,16 @@ class MultiPassDotTest(parameterized.TestCase):
     # shift = 32.0, so -224.0 / 32 = -7.0, -320.0 / 32 = -10.0 (clips to -7.0)
     qval = jnp.array([-320.0, -224.0, 0.0, 224.0, 320.0], dtype=jnp.float32)
     scale = jnp.array([1.0], dtype=jnp.float32)
-    qarr = qarray.QArray(qvalue=qval, scale=scale, qtype=jnp.float8_e4m3fn)
+    operand = qarray.QArray(qvalue=qval, scale=scale, qtype=jnp.float8_e4m3fn)
 
-    down_int = multipass_dot._downcast_by_shift(qarr, 'mxint4')
+    down_int = multipass_dot._downcast_by_shift(operand, 'mxint4')
     self.assertEqual(down_int.qtype, jnp.int4)
     np.testing.assert_array_equal(
         down_int.qvalue, jnp.array([-7, -7, 0, 7, 7], dtype=jnp.int4)
     )
     np.testing.assert_allclose(down_int.scale, scale * 32.0)
 
-    down_int_dtype = multipass_dot._downcast_by_shift(qarr, jnp.int4)
+    down_int_dtype = multipass_dot._downcast_by_shift(operand, jnp.int4)
     self.assertEqual(down_int_dtype.qtype, jnp.int4)
     np.testing.assert_array_equal(
         down_int_dtype.qvalue, jnp.array([-7, -7, 0, 7, 7], dtype=jnp.int4)
@@ -1796,11 +1827,11 @@ class MultiPassDotTest(parameterized.TestCase):
     # Test MXFP4 downcasting with negative value clipping to -6.0
     # shift = 64.0, so -384.0 / 64 = -6.0, -500.0 / 64 = -7.8125 (clips to -6.0)
     qval_fp = jnp.array([-500.0, -384.0, 0.0, 384.0, 500.0], dtype=jnp.float32)
-    qarr_fp = qarray.QArray(
+    operand_fp = qarray.QArray(
         qvalue=qval_fp, scale=scale, qtype=jnp.float8_e4m3fn
     )
 
-    down_fp = multipass_dot._downcast_by_shift(qarr_fp, 'mxfp4')
+    down_fp = multipass_dot._downcast_by_shift(operand_fp, 'mxfp4')
     self.assertEqual(down_fp.qtype, jnp.float4_e2m1fn)
     np.testing.assert_array_equal(
         down_fp.qvalue,
@@ -1808,12 +1839,460 @@ class MultiPassDotTest(parameterized.TestCase):
     )
     np.testing.assert_allclose(down_fp.scale, scale * 64.0)
 
-    down_fp_dtype = multipass_dot._downcast_by_shift(qarr_fp, jnp.float4_e2m1fn)
+    down_fp_dtype = multipass_dot._downcast_by_shift(
+        operand_fp, jnp.float4_e2m1fn
+    )
     self.assertEqual(down_fp_dtype.qtype, jnp.float4_e2m1fn)
     np.testing.assert_array_equal(
         down_fp_dtype.qvalue,
         jnp.array([-6.0, -6.0, 0.0, 6.0, 6.0], dtype=jnp.float4_e2m1fn),
     )
+
+  @parameterized.parameters(
+      ('mxint4', jnp.float8_e4m3fn, 14),
+      ('mxint4', jnp.float8_e5m2, 28),
+      ('mxfp4', jnp.float8_e4m3fn, 14),
+      ('mxfp4', jnp.float8_e5m2, 28),
+      ('mxfp8', jnp.float8_e4m3fn, 0),
+  )
+  def test_pure_4bit_uniform_sampling(
+      self, input_type, target_dtype, max_range, seed=42
+  ):
+    """Verifies that 4-bit to FP8 conversion introduces zero noise across lossless dynamic range."""
+    block_size = 1024
+    sub_block_size = 32
+    num_sub_blocks = block_size // sub_block_size
+
+    if input_type in ('fp4', 'mxfp4'):
+      magnitudes = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+      valid_set = np.array(magnitudes + [-x for x in magnitudes if x != 0])
+      actual_qtype = jnp.float4_e2m1fn
+    elif input_type in ('int4', 'mxint4'):
+      valid_set = np.arange(-8, 8, dtype=np.float32)
+      actual_qtype = jnp.int4
+    elif input_type in ('fp8', 'mxfp8'):
+      valid_bytes = np.array(
+          [i for i in range(256) if i not in (0x7F, 0xFF)], dtype=np.uint8
+      )
+      valid_set = jax.lax.bitcast_convert_type(
+          jnp.array(valid_bytes), jnp.float8_e4m3fn
+      ).astype(np.float32)
+      actual_qtype = jnp.float8_e4m3fn
+    else:
+      raise ValueError(f'Unsupported input_type: {input_type}')
+
+    np.random.seed(seed)
+    elements = np.random.choice(valid_set, size=block_size).astype(np.float32)
+
+    # Sample scaling factors: 2^alpha for alpha in [1, max_range + 1]
+    # E5M2 supports up to 28 octaves; E4M3 supports up to 14 octaves.
+    alphas = np.random.randint(1, max_range + 2, size=num_sub_blocks)
+    microscales = np.power(2.0, alphas, dtype=np.float32)
+
+    # Construct QArray with sub-blocks along axis 1 (contracting dimension)
+    qval = elements.reshape((1, block_size)).astype(actual_qtype)
+    scale = microscales.reshape((1, num_sub_blocks))
+    operand = qarray.QArray(qvalue=qval, scale=scale, qtype=actual_qtype)
+
+    dnums = (((1,), (0,)), ((), ()))
+    fp8_array, fp8_block_scale = multipass_dot._block_shift_to_fp8(
+        operand, target_dtype, dimension_numbers=dnums, for_lhs=True
+    )
+
+    reconstructed = fp8_array.astype(np.float32) * fp8_block_scale
+    expected_values = qarray.dequantize(operand)
+
+    max_diff = float(np.max(np.abs(expected_values - reconstructed)))
+    if max_diff > 0:
+      diff = np.abs(expected_values - reconstructed)
+      idx = np.unravel_index(np.argmax(diff), diff.shape)
+      print(
+          f'FAIL input_type={input_type} target_dtype={target_dtype}'
+          f' max_range={max_range}'
+      )
+      print(
+          f'idx={idx} expected={expected_values[idx]}'
+          f' reconstructed={reconstructed[idx]} diff={max_diff}'
+      )
+      print(
+          f'qval={qval[idx]} fp8_array={fp8_array[idx]}'
+          f' fp8_block_scale={fp8_block_scale} scale={scale}'
+      )
+    self.assertEqual(max_diff, 0.0)
+
+  @parameterized.parameters(
+      # Transposed RHS M != N
+      (
+          'three_pass_fp8_fp4/fp4_fp4/fp4',
+          (16, 64),
+          (32, 64),
+          (((1,), (1,)), ((), ())),
+          (16, 32),
+      ),
+      (
+          'three_pass_fp8_int4/int4_int4/int4',
+          (16, 64),
+          (32, 64),
+          (((1,), (1,)), ((), ())),
+          (16, 32),
+      ),
+      (
+          'three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4',
+          (16, 64),
+          (32, 64),
+          (((1,), (1,)), ((), ())),
+          (16, 32),
+      ),
+      (
+          'three_pass_mxfp8_mxint4/mxint4_mxint4/mxint4',
+          (16, 64),
+          (32, 64),
+          (((1,), (1,)), ((), ())),
+          (16, 32),
+      ),
+      # Transposed RHS M == N (square)
+      (
+          'three_pass_fp8_fp4/fp4_fp4/fp4',
+          (32, 64),
+          (32, 64),
+          (((1,), (1,)), ((), ())),
+          (32, 32),
+      ),
+      (
+          'three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4',
+          (32, 64),
+          (32, 64),
+          (((1,), (1,)), ((), ())),
+          (32, 32),
+      ),
+      # LHS contracted on axis 0
+      (
+          'three_pass_fp8_fp4/fp4_fp4/fp4',
+          (64, 16),
+          (64, 32),
+          (((0,), (0,)), ((), ())),
+          (16, 32),
+      ),
+      (
+          'three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4',
+          (64, 16),
+          (64, 32),
+          (((0,), (0,)), ((), ())),
+          (16, 32),
+      ),
+      # Batched GEMM (leading batch)
+      (
+          'three_pass_fp8_fp4/fp4_fp4/fp4',
+          (2, 16, 64),
+          (2, 64, 32),
+          (((2,), (1,)), ((0,), (0,))),
+          (2, 16, 32),
+      ),
+      (
+          'three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4',
+          (2, 16, 64),
+          (2, 64, 32),
+          (((2,), (1,)), ((0,), (0,))),
+          (2, 16, 32),
+      ),
+      # Batched GEMM (non-leading batch)
+      (
+          'three_pass_fp8_fp4/fp4_fp4/fp4',
+          (16, 2, 64),
+          (2, 64, 32),
+          (((2,), (1,)), ((1,), (0,))),
+          (2, 16, 32),
+      ),
+      (
+          'three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4',
+          (16, 2, 64),
+          (2, 64, 32),
+          (((2,), (1,)), ((1,), (0,))),
+          (2, 16, 32),
+      ),
+      # Multi-axis contraction
+      (
+          'three_pass_fp8_fp4/fp4_fp4/fp4',
+          (8, 4, 16),
+          (4, 16, 8),
+          (((1, 2), (0, 1)), ((), ())),
+          (8, 8),
+      ),
+      (
+          'three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4',
+          (8, 4, 32),
+          (4, 32, 8),
+          (((1, 2), (0, 1)), ((), ())),
+          (8, 8),
+      ),
+  )
+  def test_hybrid_fp8_dimension_numbers_and_shapes(
+      self, mode, shape_l, shape_r, dnums, expected_shape
+  ):
+    """Verifies non-default dimension_numbers execute and match output shape."""
+    rng = np.random.default_rng(42)
+    lhs = jnp.array(rng.standard_normal(shape_l), dtype=jnp.float32)
+    rhs = jnp.array(rng.standard_normal(shape_r), dtype=jnp.float32)
+
+    res = multipass_dot.multipass_dot_general(
+        lhs, rhs, dimension_numbers=dnums, multipass_mode=mode
+    )
+    self.assertEqual(res.shape, expected_shape)
+
+    expected = jax.lax.dot_general(lhs, rhs, dimension_numbers=dnums)
+    snr = compute_snr_db(expected, res)
+    self.assertGreater(snr, 20.0)
+
+  @parameterized.parameters(
+      ('three_pass_fp8_fp4/fp4_fp4/fp4',),
+      ('three_pass_fp8_int4/int4_int4/int4',),
+      ('three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4',),
+      ('three_pass_mxfp8_mxint4/mxint4_mxint4/mxint4',),
+  )
+  def test_hybrid_fp8_square_asymmetric_scale_alignment(self, mode):
+    """Verifies scale alignment when M == N with asymmetric operand scales."""
+    rng = np.random.default_rng(123)
+    lhs = jnp.array(rng.standard_normal((32, 64)) * 100.0, dtype=jnp.float32)
+    rhs = jnp.array(rng.standard_normal((32, 64)) * 0.01, dtype=jnp.float32)
+    dnums = (((1,), (1,)), ((), ()))
+
+    res = multipass_dot.multipass_dot_general(
+        lhs, rhs, dimension_numbers=dnums, multipass_mode=mode
+    )
+    self.assertEqual(res.shape, (32, 32))
+
+    expected = jax.lax.dot_general(lhs, rhs, dimension_numbers=dnums)
+    snr = compute_snr_db(expected, res)
+    self.assertGreater(snr, 30.0)
+
+  @parameterized.parameters(
+      ('three_pass_fp8_fp4/fp4_fp4/fp4',),
+      ('three_pass_fp8_int4/int4_int4/int4',),
+      ('three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4',),
+      ('three_pass_mxfp8_mxint4/mxint4_mxint4/mxint4',),
+  )
+  def test_hybrid_fp8_dtype_preservation(self, mode):
+    """Verifies return dtype matches input dtype or preferred_element_type."""
+    lhs_bf16 = jnp.ones((16, 32), dtype=jnp.bfloat16)
+    rhs_bf16 = jnp.ones((32, 16), dtype=jnp.bfloat16)
+
+    res_bf16 = multipass_dot.multipass_dot_general(
+        lhs_bf16, rhs_bf16, multipass_mode=mode
+    )
+    self.assertEqual(res_bf16.dtype, jnp.bfloat16)
+
+    res_f32 = multipass_dot.multipass_dot_general(
+        lhs_bf16,
+        rhs_bf16,
+        multipass_mode=mode,
+        preferred_element_type=jnp.float32,
+    )
+    self.assertEqual(res_f32.dtype, jnp.float32)
+
+    lhs_f32 = jnp.ones((16, 32), dtype=jnp.float32)
+    rhs_f32 = jnp.ones((32, 16), dtype=jnp.float32)
+    res_f32_default = multipass_dot.multipass_dot_general(
+        lhs_f32, rhs_f32, multipass_mode=mode
+    )
+    self.assertEqual(res_f32_default.dtype, jnp.float32)
+
+  @parameterized.parameters(16, 64, 128)
+  def test_hybrid_fp8_block_sizes_other_than_32(self, tile_size):
+    """Verifies standard hybrid modes execute correctly with tile sizes other than 32."""
+    lhs = jnp.arange(16 * 128, dtype=jnp.float32).reshape((16, 128))
+    rhs = jnp.arange(128 * 32, dtype=jnp.float32).reshape((128, 32))
+    dnums = (((1,), (0,)), ((), ()))
+
+    res = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='three_pass_fp8_fp4/fp4_fp4/fp4',
+        tile_size=tile_size,
+    )
+    self.assertEqual(res.shape, (16, 32))
+    ref = jax.lax.dot_general(lhs, rhs, dnums)
+    snr = compute_snr_db(ref, res)
+    self.assertGreater(snr, 35.0)
+
+  def test_microscaled_hybrid_4step_flow_block32_inheritance(self):
+    """Verifies that microscaled hybrid mode follows the 4-step flow with Block-32 inheritance."""
+    lhs = jnp.arange(16 * 64, dtype=jnp.float32).reshape((16, 64))
+    rhs = jnp.arange(64 * 32, dtype=jnp.float32).reshape((64, 32))
+    dnums = (((1,), (0,)), ((), ()))
+
+    # Step 1: Input is quantized into mxfp8 with block size 32.
+    how_l = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(lhs.ndim, rhs.ndim),
+        for_lhs=True,
+        qtype='mxfp8',
+        tile_size=32,
+    )
+    a0 = qarray.quantize(lhs, how_l)
+    self.assertEqual(a0.qtype, 'mxfp8')
+    self.assertEqual(a0.scale.shape, (16, 2))
+
+    # Step 2: Pass 1 matmul coalesces block-32 scales via _block_shift_to_fp8
+    # into channel-wise scale (16, 1) and returns float8_e4m3fn for Ghostfish
+    # MXU.
+    a0_fp8, fp8_block_scale = multipass_dot._block_shift_to_fp8(
+        a0, dimension_numbers=dnums, for_lhs=True
+    )
+    self.assertEqual(a0_fp8.dtype, jnp.float8_e4m3fn)
+    self.assertEqual(fp8_block_scale.shape, (16, 1))
+
+    # Step 3: For cross passes, convert mxfp8 -> mxfp4 for each block size 32
+    # via _downcast_by_shift without a second reduction tree. Downcast coarse
+    # operand inherits the exact Block-32 scales (scale * shift).
+    a0_down = multipass_dot._downcast_by_shift(a0, 'mxfp4')
+    self.assertEqual(a0_down.scale.shape, (16, 2))
+    np.testing.assert_allclose(a0_down.scale, a0.scale * 64.0)
+
+    # Step 4: Cross-pass matmul for block-quantized 4-bit formats absorbs
+    # Block-32 scales into float8_e5m2 exponents for hardware FP8 execution.
+    a0_down_fp8, cross_block_scale = multipass_dot._block_shift_to_fp8(
+        a0_down, dimension_numbers=dnums, for_lhs=True
+    )
+    self.assertEqual(a0_down_fp8.dtype, jnp.float8_e5m2)
+    self.assertEqual(cross_block_scale.shape, (16, 1))
+
+    # End-to-end execution
+    res = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4',
+    )
+    self.assertEqual(res.shape, (16, 32))
+    ref = jax.lax.dot_general(lhs, rhs, dnums)
+    snr = compute_snr_db(ref, res)
+    self.assertGreater(snr, 35.0)
+
+  def test_block_shift_multi_axis_contraction_reduction(self):
+    """Verifies that _block_shift_to_fp8 reduces all contracting axes."""
+    val = jnp.ones((4, 8, 16), dtype=jnp.float8_e4m3fn)
+    scale = jnp.ones((4, 8, 16), dtype=jnp.float32)
+    operand = qarray.QArray(qvalue=val, scale=scale, qtype=jnp.float8_e4m3fn)
+    dnums = (((1, 2), (0, 1)), ((), ()))
+
+    _, fp8_block_scale = multipass_dot._block_shift_to_fp8(
+        operand, dimension_numbers=dnums, for_lhs=True
+    )
+    self.assertEqual(fp8_block_scale.shape, (4, 1, 1))
+
+  def test_microscaled_hybrid_coarse_tile_coalescing_and_underflows(self):
+    """Verifies that microscaled hybrid mode correctly coalesces tiles and allows underflows."""
+    lhs = jnp.arange(16 * 128, dtype=jnp.float32).reshape((16, 128))
+    rhs = jnp.arange(128 * 32, dtype=jnp.float32).reshape((128, 32))
+    dnums = (((1,), (0,)), ((), ()))
+
+    # Step 1: Input is quantized into mxfp8 with fine block size 32
+    # (4 fine blocks).
+    how_l = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(lhs.ndim, rhs.ndim),
+        for_lhs=True,
+        qtype='mxfp8',
+        tile_size=32,
+    )
+    a0 = qarray.quantize(lhs, how_l)
+    self.assertEqual(a0.scale.shape, (16, 4))
+
+    # Coalescing with tile_size=64: groups 4 fine blocks into 2 coarse tiles of
+    # size 64.
+    a0_fp8_64, scale_64 = multipass_dot._block_shift_to_fp8(
+        a0, dimension_numbers=dnums, for_lhs=True, tile_size=64
+    )
+    self.assertEqual(a0_fp8_64.dtype, jnp.float8_e4m3fn)
+    self.assertEqual(scale_64.shape, (16, 2))
+    # Coarse scale uses the largest scaling factor within each coarse tile.
+    expected_coarse_0 = jnp.maximum(a0.scale[:, 0], a0.scale[:, 1])
+    expected_coarse_1 = jnp.maximum(a0.scale[:, 2], a0.scale[:, 3])
+    np.testing.assert_allclose(scale_64[:, 0], expected_coarse_0)
+    np.testing.assert_allclose(scale_64[:, 1], expected_coarse_1)
+
+    # Coalescing with tile_size=None: coalesces all 4 fine blocks into
+    # channel-wise scale (16, 1).
+    _, scale_none = multipass_dot._block_shift_to_fp8(
+        a0, dimension_numbers=dnums, for_lhs=True, tile_size=None
+    )
+    self.assertEqual(scale_none.shape, (16, 1))
+    np.testing.assert_allclose(scale_none[:, 0], jnp.max(a0.scale, axis=1))
+
+    # Invalid tile sizes raise ValueError:
+    with self.assertRaisesRegex(ValueError, 'cannot be smaller than'):
+      multipass_dot._block_shift_to_fp8(
+          a0, dimension_numbers=dnums, for_lhs=True, tile_size=16
+      )
+    with self.assertRaisesRegex(ValueError, 'must be a multiple of'):
+      multipass_dot._block_shift_to_fp8(
+          a0, dimension_numbers=dnums, for_lhs=True, tile_size=48
+      )
+
+    # End-to-end execution with coarse tile_size=64:
+    res_64 = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4',
+        tile_size=64,
+    )
+    self.assertEqual(res_64.shape, (16, 32))
+    ref = jax.lax.dot_general(lhs, rhs, dnums)
+    snr_64 = compute_snr_db(ref, res_64)
+    self.assertGreater(snr_64, 35.0)
+
+    # End-to-end execution with tile_size=None (channel-wise):
+    res_none = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4',
+        tile_size=None,
+    )
+    self.assertEqual(res_none.shape, (16, 32))
+    snr_none = compute_snr_db(ref, res_none)
+    self.assertGreater(snr_none, 35.0)
+
+    # Verify in the JAXpr graph that all 3 GEMMs (Pass 1 + both cross passes)
+    # execute on FP8 hardware at the specified tile_size.
+    for tile_size, expected_ca_len, expected_num_tiles in (
+        (32, 32, 4),
+        (64, 64, 2),
+        (None, 128, None),
+    ):
+      fn = lambda x, y, ts=tile_size: multipass_dot.multipass_dot_general(
+          x,
+          y,
+          dnums,
+          multipass_mode='three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4',
+          tile_size=ts,
+      )
+      gemms, _ = get_graph_gemms_and_casts(fn, lhs, rhs)
+      self.assertLen(gemms, 3)
+
+      # Pass 1 uses float8_e4m3fn; Cross passes 2 & 3 use float8_e5m2.
+      expected_dtypes = [
+          [jnp.float8_e4m3fn, jnp.float8_e4m3fn],
+          [jnp.float8_e5m2, jnp.float8_e5m2],
+          [jnp.float8_e5m2, jnp.float8_e5m2],
+      ]
+      for g, exp_dtypes in zip(gemms, expected_dtypes):
+        in_dtypes = [getattr(v.aval, 'dtype', None) for v in g.invars[:2]]
+        self.assertEqual(in_dtypes, exp_dtypes)
+
+        (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = g.params['dimension_numbers']
+        lhs_shape = g.invars[0].aval.shape
+        rhs_shape = g.invars[1].aval.shape
+        self.assertEqual(lhs_shape[lhs_ca[0]], expected_ca_len)
+        self.assertEqual(rhs_shape[rhs_ca[0]], expected_ca_len)
+        if expected_num_tiles is not None:
+          self.assertEqual(lhs_shape[lhs_ba[-1]], expected_num_tiles)
+          self.assertEqual(rhs_shape[rhs_ba[-1]], expected_num_tiles)
+        else:
+          self.assertEmpty(lhs_ba)
+          self.assertEmpty(rhs_ba)
 
 
 if __name__ == '__main__':
