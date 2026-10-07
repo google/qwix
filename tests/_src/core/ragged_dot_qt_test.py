@@ -44,11 +44,13 @@ def ragged_dot_fq(
     config: ragged_dot_qt.RaggedDotQtConfig,
 ) -> jax.Array:
   """Ragged dot implemented with fake quantization for baseline comparison."""
-  lhs_how = qarray.HowToQuantize(qtype=config.lhs_qtype, channelwise_axes=[0])
-  rhs_how = qarray.HowToQuantize(qtype=config.rhs_qtype, channelwise_axes=[2])
-  lhs_fq = _fake_quant(lhs, lhs_how)
-  rhs_fq = _fake_quant(rhs, rhs_how)
-  return jax.lax.ragged_dot(lhs_fq, rhs_fq, group_sizes)
+  if config.lhs_qtype is not None:
+    lhs_how = qarray.HowToQuantize(qtype=config.lhs_qtype, channelwise_axes=[0])
+    lhs = _fake_quant(lhs, lhs_how)
+  if config.rhs_qtype is not None:
+    rhs_how = qarray.HowToQuantize(qtype=config.rhs_qtype, channelwise_axes=[2])
+    rhs = _fake_quant(rhs, rhs_how)
+  return jax.lax.ragged_dot(lhs, rhs, group_sizes)
 
 
 class RaggedDotQtTest(parameterized.TestCase):

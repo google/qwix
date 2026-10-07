@@ -108,7 +108,7 @@ class SqCalibrationProvider(calibration.SinglePassCalibrationProvider):
         assert module.scope is not None
         kernel = module.scope._collection("params")["kernel"]  # pylint: disable=protected-access
       else:
-        kernel = module.kernel.get_value()  # pyrefly: ignore[missing-attribute]
+        kernel = getattr(module, "kernel").get_value()
     except KeyError as exc:
       raise NotImplementedError(
           f"Failed to extract kernel from module {module}. Only "
@@ -116,8 +116,13 @@ class SqCalibrationProvider(calibration.SinglePassCalibrationProvider):
       ) from exc
 
     # Compute weight scales
+    if rule.weight_qtype is None:
+      raise ValueError(
+          f"Rule {rule} has no weight quantization type specified. Cannot"
+          " compute weight scales for SQ."
+      )
     how = qarray.HowToQuantize(
-        qtype=rule.weight_qtype,  # pyrefly: ignore[bad-argument-type]
+        qtype=rule.weight_qtype,
         channelwise_axes=(0,),
         calibration_method=rule.weight_calibration_method,
     )
@@ -134,10 +139,11 @@ class SqCalibrationProvider(calibration.SinglePassCalibrationProvider):
           f"Rule {rule} has no activation quantization type specified. Cannot"
           " compute activation scales for SQ."
       )
+    assert rule.act_calibration_method is not None
     how = qarray.HowToQuantize(
         qtype=rule.act_qtype,
         channelwise_axes=(0,),
-        calibration_method=rule.act_calibration_method,  # pyrefly: ignore[bad-argument-type]
+        calibration_method=rule.act_calibration_method,
     )
     calib = qarray.calibrate(lhs, how)
     act_scale, zero_point = qarray.compute_scale_zero_point(calib, how.qtype)
@@ -273,13 +279,14 @@ class SqInferenceProvider(ptq.PtqProvider):
       out_sharding: jax.sharding.NamedSharding | None = None,
   ) -> jax.Array:
     # Handle SQ-quantized weights with per-channel scale compensation.
+    qrhs: Any = rhs
     if isinstance(rhs, WithSqScale):
       lhs = self._apply_sq_scale(lhs, rhs.inv_sq_scale)
-      rhs = rhs.array  # pyrefly: ignore[bad-assignment]
+      qrhs = rhs.array
 
     return dot_general.dot_general(
         lhs,
-        rhs,  # pyrefly: ignore[bad-argument-type]
+        qrhs,
         dimension_numbers,
         precision=precision,
         preferred_element_type=preferred_element_type,

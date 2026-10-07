@@ -156,7 +156,7 @@ def fused_hadamard_quantize(
       None,
       row_sign_flip=False,
       col_sign_flip=False,
-      dtype=jnp.int8,  # pyrefly: ignore[bad-argument-type]
+      dtype=jnp.int8,
   )[
       0
   ]
@@ -181,7 +181,7 @@ def fused_hadamard_quantize(
   # Call the kernel
   xq, s = pl.kernel(
       kernel,
-      out_type=[xq_out_type, s_out_type],  # pyrefly: ignore
-      mesh=tc_mesh,  # pyrefly: ignore
+      out_type=[xq_out_type, s_out_type],
+      mesh=tc_mesh,
   )(x, had_mat)
   return xq, s.reshape(sm, sn)

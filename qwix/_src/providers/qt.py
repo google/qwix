@@ -15,7 +15,7 @@
 
 import dataclasses
 import functools
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Collection, Mapping, Sequence
 
 import jax
 from jax import numpy as jnp
@@ -93,7 +93,7 @@ class QtProvider(qconfig.QuantizationProvider):
           preferred_element_type=preferred_element_type,
           out_sharding=out_sharding,
       )
-    config = self._create_dot_general_qt_config(rule, op_id, lhs, rhs)  # pyrefly: ignore[bad-argument-type]
+    config = self._create_dot_general_qt_config(rule, op_id, lhs, rhs)
     return dot_general_qt.dot_general_qt(lhs, rhs, dimension_numbers, config)
 
   def einsum(
@@ -136,7 +136,7 @@ class QtProvider(qconfig.QuantizationProvider):
           dimension_numbers,
           # lhs and rhs might be flipped by einsum so we cannot use the operands
           # from the einsum call.
-          self._create_dot_general_qt_config(rule, op_id, lhs, rhs),  # pyrefly: ignore[bad-argument-type]
+          self._create_dot_general_qt_config(rule, op_id, lhs, rhs),
       )
 
     with jax.disable_jit():
@@ -183,7 +183,7 @@ class QtProvider(qconfig.QuantizationProvider):
       )
     if rule.tile_size:
       raise ValueError('subchannel is not supported for conv_general_dilated.')
-    config = self._create_conv_general_qt_config(rule, op_id, lhs, rhs)  # pyrefly: ignore[bad-argument-type]
+    config = self._create_conv_general_qt_config(rule, op_id, lhs, rhs)
     return conv_general_qt.conv_general_qt(
         lhs,
         rhs,
@@ -241,11 +241,12 @@ class QtProvider(qconfig.QuantizationProvider):
   def _update_and_get_quant_stat(
       self,
       name: str,
-      batch_axes: tuple[int, ...],
+      batch_axes: Collection[int],
       calibration: averaging.Calibration,
   ) -> averaging.Calibration:
     """Updates the running quantization statistics and returns the average."""
     # Calculate the mean over the batch axes.
+    batch_axes = tuple(batch_axes)
     calibration = jax.tree.map(
         lambda x: x.mean(axis=batch_axes, keepdims=True), calibration
     )
@@ -275,15 +276,16 @@ class QtProvider(qconfig.QuantizationProvider):
     lhs_collect_quant_stat = None
     if rule.act_qtype is not None and rule.act_static_scale:
       lhs_collect_quant_stat = functools.partial(
-          self._update_and_get_quant_stat, f'{op_id}_lhs', rule.act_batch_axes  # pyrefly: ignore[bad-argument-type]
+          self._update_and_get_quant_stat, f'{op_id}_lhs', rule.act_batch_axes
       )
     assert flax_util.find_param(rhs) is not None
 
+    assert rule.act_calibration_method is not None
     return conv_general_qt.ConvGeneralQtConfig(
         # fwd configs.
         lhs_qtype=rule.act_qtype,
         rhs_qtype=rule.weight_qtype,
-        lhs_calibration_method=rule.act_calibration_method,  # pyrefly: ignore[bad-argument-type]
+        lhs_calibration_method=rule.act_calibration_method,
         rhs_calibration_method=rule.weight_calibration_method,
         lhs_collect_quant_stat=lhs_collect_quant_stat,
         rhs_collect_quant_stat=None,
@@ -309,8 +311,8 @@ class QtProvider(qconfig.QuantizationProvider):
     assert isinstance(rule, QtRule), '_init_rule should have been called.'
 
     # LHS configs based on whether it's a weight or an activation.
-    lhs_qtype = None
-    lhs_calibration_method = None
+    lhs_qtype: jax.typing.DTypeLike | None = None
+    lhs_calibration_method: str = 'absmax'
     lhs_is_weight = flax_util.find_param(lhs) is not None
     lhs_collect_quant_stat = None
 
@@ -319,16 +321,17 @@ class QtProvider(qconfig.QuantizationProvider):
         lhs_qtype = rule.weight_qtype
         lhs_calibration_method = rule.weight_calibration_method
     elif rule.act_qtype is not None:
+      assert rule.act_calibration_method is not None
       lhs_qtype = rule.act_qtype
       lhs_calibration_method = rule.act_calibration_method
       if rule.act_static_scale:
         lhs_collect_quant_stat = functools.partial(
-            self._update_and_get_quant_stat, f'{op_id}_lhs', rule.act_batch_axes  # pyrefly: ignore[bad-argument-type]
+            self._update_and_get_quant_stat, f'{op_id}_lhs', rule.act_batch_axes
         )
 
     # RHS configs based on whether it's a weight or an activation.
-    rhs_qtype = None
-    rhs_calibration_method = None
+    rhs_qtype: jax.typing.DTypeLike | None = None
+    rhs_calibration_method: str = 'absmax'
     rhs_is_weight = flax_util.find_param(rhs) is not None
     rhs_collect_quant_stat = None
 
@@ -338,11 +341,12 @@ class QtProvider(qconfig.QuantizationProvider):
         rhs_qtype = rule.weight_qtype
         rhs_calibration_method = rule.weight_calibration_method
     elif rule.act_qtype is not None:
+      assert rule.act_calibration_method is not None
       rhs_qtype = rule.act_qtype
       rhs_calibration_method = rule.act_calibration_method
       if rule.act_static_scale:
         rhs_collect_quant_stat = functools.partial(
-            self._update_and_get_quant_stat, f'{op_id}_rhs', rule.act_batch_axes  # pyrefly: ignore[bad-argument-type]
+            self._update_and_get_quant_stat, f'{op_id}_rhs', rule.act_batch_axes
         )
 
     # bwd config, which is only enabled when bwd_qtype is set.
@@ -367,11 +371,11 @@ class QtProvider(qconfig.QuantizationProvider):
 
     qt_config = dot_general_qt.DotGeneralQtConfig(
         # fwd configs.
-        lhs_qtype=lhs_qtype,  # pyrefly: ignore[bad-argument-type]
-        rhs_qtype=rhs_qtype,  # pyrefly: ignore[bad-argument-type]
+        lhs_qtype=lhs_qtype,
+        rhs_qtype=rhs_qtype,
         tile_size=rule.tile_size,
-        lhs_calibration_method=lhs_calibration_method,  # pyrefly: ignore[bad-argument-type]
-        rhs_calibration_method=rhs_calibration_method,  # pyrefly: ignore[bad-argument-type]
+        lhs_calibration_method=lhs_calibration_method,
+        rhs_calibration_method=rhs_calibration_method,
         lhs_collect_quant_stat=lhs_collect_quant_stat,
         rhs_collect_quant_stat=rhs_collect_quant_stat,
         lhs_disable_channelwise_axes=rule.disable_channelwise_axes,
@@ -380,14 +384,14 @@ class QtProvider(qconfig.QuantizationProvider):
         dlhs_grad_qtype=rule.bwd_qtype,
         dlhs_grad_calibration_method=rule.bwd_calibration_method,
         dlhs_tile_size=dlhs_tile_size,
-        dlhs_stochastic_rounding_noise_fn=bwd_stochastic_rounding_noise_fn,  # pyrefly: ignore[bad-argument-type]
+        dlhs_stochastic_rounding_noise_fn=bwd_stochastic_rounding_noise_fn,
         dlhs_grad_disable_channelwise_axes=rule.disable_channelwise_axes,
         # drhs configs.
         use_original_residuals=fwd_quantized and not bwd_quantized,
         drhs_grad_qtype=rule.bwd_qtype,
         drhs_grad_calibration_method=rule.bwd_calibration_method,
         drhs_tile_size=drhs_tile_size,
-        drhs_stochastic_rounding_noise_fn=bwd_stochastic_rounding_noise_fn,  # pyrefly: ignore[bad-argument-type]
+        drhs_stochastic_rounding_noise_fn=bwd_stochastic_rounding_noise_fn,
         drhs_grad_disable_channelwise_axes=rule.disable_channelwise_axes,
     )
 
@@ -404,8 +408,8 @@ class QtProvider(qconfig.QuantizationProvider):
     # Assume LHS is an activation and RHS is a weight.
     return ragged_dot_qt.RaggedDotQtConfig(
         # fwd configs.
-        lhs_qtype=rule.act_qtype,  # pyrefly: ignore[bad-argument-type]
-        rhs_qtype=rule.weight_qtype,  # pyrefly: ignore[bad-argument-type]
+        lhs_qtype=rule.act_qtype,
+        rhs_qtype=rule.weight_qtype,
         # bwd configs.
         dlhs_grad_qtype=rule.bwd_qtype,
         drhs_grad_qtype=rule.bwd_qtype,
