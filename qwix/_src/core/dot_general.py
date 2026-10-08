@@ -404,6 +404,45 @@ def loop_dot_general(
 MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT = 128
 
 
+def _can_dequant_on_output(
+    operand: qarray.QArray,
+    contracting_axes: Sequence[int],
+    other_operand: qarray.MaybeQArray,
+) -> bool:
+  """Returns whether the operand's scales can be applied on the output.
+
+  Args:
+    operand: A quantized operand of dot_general.
+    contracting_axes: The contracting axes of the operand.
+    other_operand: The other operand of dot_general.
+  """
+  qarray.validate_qarray(operand)
+  # qtypes like nf4 cannot be dequantized on output.
+  if not numerics.can_dequant_on_output(operand.qtype):
+    return False
+  # Tile sizes of the contracting axes with more than one scale (subchannel).
+  tile_sizes = [
+      operand.qvalue.shape[axis] // operand.scale.shape[axis]
+      for axis in contracting_axes
+      if operand.scale.shape[axis] > 1
+  ]
+  # The other operand is a raw array in a dtype that Qwix would quantize
+  # (bf16/f16/f32/f64). Raw low-precision arrays (e.g. fp8, int8) are treated as
+  # quantized with an implicit scale of 1.
+  is_other_unquantized = not isinstance(
+      other_operand, qarray.QArray
+  ) and numerics.should_quantize(other_operand.dtype)
+  if is_other_unquantized:
+    # The matmul runs in floating point either way, so only dequantize on
+    # output if it adds no work: zero_point needs an extra matmul and tiled
+    # contracting axes need per-tile rescaling. This passes the raw quantized
+    # values to XLA, e.g. for int4 nibble loading on newer TPUs.
+    return operand.zero_point is None and not tile_sizes
+  # Both operands are quantized. Small tiles make the tiled matmul inefficient,
+  # e.g. tile_size=1 when a contracting axis is channelwise quantized.
+  return all(size >= MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT for size in tile_sizes)
+
+
 def dot_general(
     lhs: qarray.MaybeQArray,
     rhs: qarray.MaybeQArray,
@@ -455,38 +494,18 @@ def dot_general(
 
   # We need to choose between slow_dot_general, which dequantizes first and
   # then computes in floating-point types, and fast_dot_general, which
-  # computes in quantized types first and then dequantize.
-  use_fast_dot_general = True
-  for operand, ca in zip((lhs, rhs), dimension_numbers[0]):
-    if not isinstance(operand, qarray.QArray):
-      if numerics.should_quantize(operand.dtype):
-        # Always dequantize on inputs if any of the operands is in bf16/fp32,
-        # because XLA is able to fuse the dequantize and the matmul. The slow
-        # path is usually not slower than the fast path, since both use fp
-        # matmul, and will be significantly faster when subchannel or zero_point
-        # is used.
-        use_fast_dot_general = False
-        break
-      # For raw arrays in lower precision, e.g. fp8, int4, bool, using fast path
-      # may be beneficial.
-      continue
-
-    qarray.validate_qarray(operand)
-
-    # qtypes like nf4 cannot be dequantized on output.
-    if not numerics.can_dequant_on_output(operand.qtype):
-      use_fast_dot_general = False
-      break
-
-    # If a contracting dimension is tiled too small, tiled dot general will
-    # be inefficient and we should dequantize the input first. This is critical
-    # when a contracting dimension is channelwise quantized, e.g. tile_size=1.
-    for axis in ca:
-      if operand.scale.shape[axis] > 1:
-        tile_size = operand.qvalue.shape[axis] // operand.scale.shape[axis]
-        if tile_size < MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT:
-          use_fast_dot_general = False
-          break
+  # computes in quantized types first and then dequantize. Without a QArray
+  # there is nothing to dequantize, so use a plain dot_general.
+  lhs_ca, rhs_ca = dimension_numbers[0]
+  qarray_operands = [
+      (operand, ca, other)
+      for operand, ca, other in ((lhs, lhs_ca, rhs), (rhs, rhs_ca, lhs))
+      if isinstance(operand, qarray.QArray)
+  ]
+  use_fast_dot_general = bool(qarray_operands) and all(
+      _can_dequant_on_output(operand, ca, other)
+      for operand, ca, other in qarray_operands
+  )
 
   if use_fast_dot_general:
     return _fast_dot_general(
