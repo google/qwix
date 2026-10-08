@@ -196,6 +196,206 @@ class DotGeneralTest(parameterized.TestCase):
     # Contracting axes for RHS are 0 and 1. Axis 1 should be selected.
     self.assertEqual(how_rhs.tiled_axes, {1: 32})
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='w8a16_channelwise_fast',
+          lhs_how=None,
+          rhs_how=qarray.HowToQuantize(
+              qtype=jnp.int8, channelwise_axes=(1,), tiled_axes={}
+          ),
+          expect_fast=True,
+      ),
+      dict(
+          testcase_name='w4a16_channelwise_fast',
+          lhs_how=None,
+          rhs_how=qarray.HowToQuantize(
+              qtype=jnp.int4, channelwise_axes=(1,), tiled_axes={}
+          ),
+          expect_fast=True,
+      ),
+      dict(
+          testcase_name='w4a16_per_tensor_fast',
+          lhs_how=None,
+          rhs_how=qarray.HowToQuantize(
+              qtype=jnp.int4, channelwise_axes=(), tiled_axes={}
+          ),
+          expect_fast=True,
+      ),
+      dict(
+          testcase_name='w4a16_subchannel_slow',
+          lhs_how=None,
+          rhs_how=qarray.HowToQuantize(
+              qtype=jnp.int4, channelwise_axes=(1,), tiled_axes={0: 128}
+          ),
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='w8a16_zero_point_slow',
+          lhs_how=None,
+          rhs_how=qarray.HowToQuantize(
+              qtype=jnp.int8,
+              channelwise_axes=(1,),
+              tiled_axes={},
+              calibration_method='minmax',
+          ),
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='w4a16_contracting_channelwise_slow',
+          lhs_how=None,
+          rhs_how=qarray.HowToQuantize(
+              qtype=jnp.int4, channelwise_axes=(0, 1), tiled_axes={}
+          ),
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='nf4a16_slow',
+          lhs_how=None,
+          rhs_how=qarray.HowToQuantize(
+              qtype='nf4', channelwise_axes=(1,), tiled_axes={}
+          ),
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='a16_unquantized_slow',
+          lhs_how=None,
+          rhs_how=None,
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='w8a8_subchannel_fast',
+          lhs_how=qarray.HowToQuantize(
+              qtype=jnp.int8, channelwise_axes=(0,), tiled_axes={1: 128}
+          ),
+          rhs_how=qarray.HowToQuantize(
+              qtype=jnp.int8, channelwise_axes=(1,), tiled_axes={0: 128}
+          ),
+          expect_fast=True,
+      ),
+      dict(
+          testcase_name='w8a8_small_tile_slow',
+          lhs_how=qarray.HowToQuantize(
+              qtype=jnp.int8, channelwise_axes=(0,), tiled_axes={1: 64}
+          ),
+          rhs_how=qarray.HowToQuantize(
+              qtype=jnp.int8, channelwise_axes=(1,), tiled_axes={0: 64}
+          ),
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='w8a8_channelwise_fast',
+          lhs_how=qarray.HowToQuantize(
+              qtype=jnp.int8, channelwise_axes=(0,), tiled_axes={}
+          ),
+          rhs_how=qarray.HowToQuantize(
+              qtype=jnp.int8, channelwise_axes=(1,), tiled_axes={}
+          ),
+          expect_fast=True,
+      ),
+      dict(
+          testcase_name='w8a8_act_zero_point_fast',
+          lhs_how=qarray.HowToQuantize(
+              qtype=jnp.int8,
+              channelwise_axes=(0,),
+              tiled_axes={},
+              calibration_method='minmax',
+          ),
+          rhs_how=qarray.HowToQuantize(
+              qtype=jnp.int8, channelwise_axes=(1,), tiled_axes={}
+          ),
+          expect_fast=True,
+      ),
+      dict(
+          testcase_name='raw_int8_x_raw_int8_slow',
+          lhs_how=None,
+          rhs_how=None,
+          lhs_dtype=jnp.int8,
+          rhs_dtype=jnp.int8,
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='raw_fp8_x_w4_subchannel_fast',
+          lhs_how=None,
+          rhs_how=qarray.HowToQuantize(
+              qtype=jnp.int4, channelwise_axes=(1,), tiled_axes={0: 128}
+          ),
+          lhs_dtype=jnp.float8_e4m3fn,
+          expect_fast=True,
+      ),
+  )
+  @mock.patch.object(dot_general, '_slow_dot_general', autospec=True)
+  @mock.patch.object(dot_general, '_fast_dot_general', autospec=True)
+  def test_dot_general_implementation(
+      self,
+      mock_fast,
+      mock_slow,
+      *,
+      lhs_how: qarray.HowToQuantize | None,
+      rhs_how: qarray.HowToQuantize | None,
+      expect_fast: bool,
+      lhs_dtype: jax.typing.DTypeLike = jnp.bfloat16,
+      rhs_dtype: jax.typing.DTypeLike = jnp.bfloat16,
+  ):
+    mock_fast.return_value = jnp.ones((16, 64), jnp.bfloat16)
+    mock_slow.return_value = jnp.ones((16, 64), jnp.bfloat16)
+
+    lhs = jax.random.normal(jax.random.key(0), (16, 256), jnp.bfloat16)
+    rhs = jax.random.normal(jax.random.key(1), (256, 64), jnp.bfloat16)
+    q_lhs = qarray.quantize(lhs, lhs_how) if lhs_how else lhs.astype(lhs_dtype)
+    q_rhs = qarray.quantize(rhs, rhs_how) if rhs_how else rhs.astype(rhs_dtype)
+
+    dot_general.dot_general(q_lhs, q_rhs, (((1,), (0,)), ((), ())))
+    if expect_fast:
+      mock_fast.assert_called_once()
+      mock_slow.assert_not_called()
+    else:
+      mock_fast.assert_not_called()
+      mock_slow.assert_called_once()
+
+  @parameterized.product(
+      lhs_dtype=(jnp.bfloat16, jnp.float32),
+      rhs_qtype=(jnp.int8, jnp.int4),
+      rhs_scale_dtype=(jnp.bfloat16, jnp.float32),
+  )
+  def test_unquantized_x_channelwise_fast_matches_slow(
+      self, lhs_dtype, rhs_qtype, rhs_scale_dtype
+  ):
+    lhs = jax.random.normal(jax.random.key(0), (16, 256), lhs_dtype)
+    rhs = jax.random.normal(jax.random.key(1), (256, 64), rhs_scale_dtype)
+    q_rhs = qarray.quantize(
+        rhs,
+        qarray.HowToQuantize(
+            qtype=rhs_qtype, channelwise_axes=(1,), tiled_axes={}
+        ),
+    )
+    dimension_numbers = (((1,), (0,)), ((), ()))
+
+    out = jax.jit(dot_general.dot_general, static_argnums=2)(
+        lhs, q_rhs, dimension_numbers
+    )
+    slow_out = jax.jit(dot_general._slow_dot_general, static_argnums=2)(
+        lhs, q_rhs, dimension_numbers
+    )
+    # Exact reference: f32 matmul on the f32-dequantized weight.
+    ref = jnp.dot(
+        lhs.astype(jnp.float32),
+        q_rhs.qvalue.astype(jnp.float32) * q_rhs.scale.astype(jnp.float32),
+    )
+
+    def rel_err(x):
+      return jnp.mean(jnp.abs(x.astype(jnp.float32) - ref)) / jnp.mean(
+          jnp.abs(ref)
+      )
+
+    self.assertEqual(out.dtype, slow_out.dtype)
+    self.assertEqual(out.shape, slow_out.shape)
+    # The fast path applies the scale after accumulation instead of rounding
+    # each dequantized weight, so results are not bit-identical to the slow
+    # path, but should be at least as accurate.
+    fast_err, slow_err = float(rel_err(out)), float(rel_err(slow_out))
+    self.assertLess(fast_err, 1e-2)
+    self.assertLessEqual(fast_err, slow_err * 1.5 + 1e-6)
+
 
 if __name__ == '__main__':
   absltest.main()
