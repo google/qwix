@@ -399,9 +399,46 @@ def loop_dot_general(
   return acc.astype(result_type)
 
 
-# If a contracting dimension has a tile size smaller than this threshold, tiled
-# dot general will be inefficient and we should dequantize the input first.
-MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT = 128
+# Default minimum tile size for architectures without a specific entry (128).
+_DEFAULT_MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT = 128
+
+# Hardware-specific minimum contracting tile sizes for output dequantization.
+_MIN_TILE_SIZE_BY_DEVICE_KIND: dict[str, int] = {
+    'TPU v6 lite': 256,
+    'TPU v6e': 256,
+    'TPU7': 512,
+    'TPU7x': 512,
+    # TODO: b/556893676 - The TPU8i/TPU8t values are provisional and may change
+    # once they are benchmarked.
+    'TPU8i': 256,
+    'TPU8t': 256,
+}
+
+
+def _get_device_kind() -> str:
+  """Returns the abstract mesh's device kind, else the default backend's.
+
+  Note: Ahead-of-time / compile-only tracing without an active abstract mesh
+  falls back to the default backend device (e.g. host CPU), which may differ
+  from the target topology.
+  """
+  if (ad := jax.sharding.get_abstract_mesh().abstract_device) is not None:
+    return ad.device_kind
+  # Uses the default backend's first device; does not honor jax.default_device.
+  return jax.devices()[0].device_kind
+
+
+def get_min_tile_size_to_dequant_on_output() -> int:
+  """Returns the minimum contracting tile size for output dequantization.
+
+  Returns:
+    The minimum contracting tile size based on active device kind, falling
+    back to 128 for unrecognized architectures.
+  """
+  kind = _get_device_kind().split('\n', 1)[0]
+  return _MIN_TILE_SIZE_BY_DEVICE_KIND.get(
+      kind, _DEFAULT_MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT
+  )
 
 
 def dot_general(
@@ -457,6 +494,7 @@ def dot_general(
   # then computes in floating-point types, and fast_dot_general, which
   # computes in quantized types first and then dequantize.
   use_fast_dot_general = True
+  min_tile_size = get_min_tile_size_to_dequant_on_output()
   for operand, ca in zip((lhs, rhs), dimension_numbers[0]):
     if not isinstance(operand, qarray.QArray):
       if numerics.should_quantize(operand.dtype):
@@ -484,7 +522,7 @@ def dot_general(
     for axis in ca:
       if operand.scale.shape[axis] > 1:
         tile_size = operand.qvalue.shape[axis] // operand.scale.shape[axis]
-        if tile_size < MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT:
+        if tile_size < min_tile_size:
           use_fast_dot_general = False
           break
 
