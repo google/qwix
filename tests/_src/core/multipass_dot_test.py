@@ -1088,11 +1088,24 @@ class MultiPassDotTest(parameterized.TestCase):
     snr_fp8_int4_fp4 = float(compute_snr_db(ref_f32, res_fp8_int4_fp4))
     err_fp8_int4_fp4 = float(compute_relative_error(ref_f32, res_fp8_int4_fp4))
 
+    res_fp8_fp4_int4 = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='three_pass_fp8_fp4/int4_int4/fp4',
+    )
+    snr_fp8_fp4_int4 = float(compute_snr_db(ref_f32, res_fp8_fp4_int4))
+    err_fp8_fp4_int4 = float(compute_relative_error(ref_f32, res_fp8_fp4_int4))
+
     print(f'Hybrid FP8+FP4: SNR={snr_fp8_fp4:.2f} dB, err={err_fp8_fp4:.4f}')
     print(f'Hybrid FP8+INT4: SNR={snr_fp8_int4:.2f} dB, err={err_fp8_int4:.4f}')
     print(
         f'Hybrid FP8+int4_fp4: SNR={snr_fp8_int4_fp4:.2f} dB,'
         f' err={err_fp8_int4_fp4:.4f}'
+    )
+    print(
+        f'Hybrid FP8+fp4_int4: SNR={snr_fp8_fp4_int4:.2f} dB,'
+        f' err={err_fp8_fp4_int4:.4f}'
     )
 
     fp8_fp4_target = 41.83 if is_ghostfish() else 43.75
@@ -1100,16 +1113,23 @@ class MultiPassDotTest(parameterized.TestCase):
     self.assertAlmostEqual(snr_fp8_fp4, fp8_fp4_target, delta=1.5)
     self.assertAlmostEqual(err_fp8_fp4, err_fp8_fp4_target, delta=0.002)
 
-    fp8_int4_target = 41.27 if is_ghostfish() else 42.95
-    err_fp8_int4_target = 0.0086 if is_ghostfish() else 0.0071
+    fp8_int4_target = 41.58 if is_ghostfish() else 43.38
+    err_fp8_int4_target = 0.0083 if is_ghostfish() else 0.0068
     self.assertAlmostEqual(snr_fp8_int4, fp8_int4_target, delta=1.5)
     self.assertAlmostEqual(err_fp8_int4, err_fp8_int4_target, delta=0.002)
 
-    fp8_int4_fp4_target = 41.72 if is_ghostfish() else 43.58
+    fp8_int4_fp4_target = 41.73 if is_ghostfish() else 43.59
     err_fp8_int4_fp4_target = 0.0082 if is_ghostfish() else 0.0066
     self.assertAlmostEqual(snr_fp8_int4_fp4, fp8_int4_fp4_target, delta=1.5)
     self.assertAlmostEqual(
         err_fp8_int4_fp4, err_fp8_int4_fp4_target, delta=0.002
+    )
+
+    fp8_fp4_int4_target = 41.45 if is_ghostfish() else 43.16
+    err_fp8_fp4_int4_target = 0.0085 if is_ghostfish() else 0.0070
+    self.assertAlmostEqual(snr_fp8_fp4_int4, fp8_fp4_int4_target, delta=1.5)
+    self.assertAlmostEqual(
+        err_fp8_fp4_int4, err_fp8_fp4_int4_target, delta=0.002
     )
 
     # 10. Microscaled Hybrid Strategies with Native Hardware FP8 Accumulation
@@ -1140,6 +1160,15 @@ class MultiPassDotTest(parameterized.TestCase):
     snr_mx_int4_fp4 = float(compute_snr_db(ref_f32, res_mx_int4_fp4))
     err_mx_int4_fp4 = float(compute_relative_error(ref_f32, res_mx_int4_fp4))
 
+    res_mx_fp4_int4 = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='three_pass_mxfp8_mxfp4/mxint4_mxint4/mxfp4',
+    )
+    snr_mx_fp4_int4 = float(compute_snr_db(ref_f32, res_mx_fp4_int4))
+    err_mx_fp4_int4 = float(compute_relative_error(ref_f32, res_mx_fp4_int4))
+
     print(
         f'Microscale MXFP8+MXFP4: SNR={snr_mx_fp4:.2f} dB, err={err_mx_fp4:.4f}'
     )
@@ -1151,14 +1180,18 @@ class MultiPassDotTest(parameterized.TestCase):
         f'Microscale MXFP8+MXint4_fp4: SNR={snr_mx_int4_fp4:.2f} dB,'
         f' err={err_mx_int4_fp4:.4f}'
     )
+    print(
+        f'Microscale MXFP8+MXfp4_int4: SNR={snr_mx_fp4_int4:.2f} dB,'
+        f' err={err_mx_fp4_int4:.4f}'
+    )
 
     mx_fp4_target = 41.98 if is_ghostfish() else 43.98
     err_mx_fp4_target = 0.0080 if is_ghostfish() else 0.0063
     self.assertAlmostEqual(snr_mx_fp4, mx_fp4_target, delta=0.25)
     self.assertAlmostEqual(err_mx_fp4, err_mx_fp4_target, delta=0.0005)
 
-    mx_int4_target = 40.61 if is_ghostfish() else 41.86
-    err_mx_int4_target = 0.0093 if is_ghostfish() else 0.0081
+    mx_int4_target = 41.59 if is_ghostfish() else 43.02
+    err_mx_int4_target = 0.0083 if is_ghostfish() else 0.0071
     self.assertAlmostEqual(snr_mx_int4, mx_int4_target, delta=0.25)
     self.assertAlmostEqual(err_mx_int4, err_mx_int4_target, delta=0.0005)
 
@@ -1167,6 +1200,13 @@ class MultiPassDotTest(parameterized.TestCase):
     self.assertAlmostEqual(snr_mx_int4_fp4, mx_int4_fp4_target, delta=0.25)
     self.assertAlmostEqual(
         err_mx_int4_fp4, err_mx_int4_fp4_target, delta=0.0005
+    )
+
+    mx_fp4_int4_target = 42.02 if is_ghostfish() else 43.67
+    err_mx_fp4_int4_target = 0.0079 if is_ghostfish() else 0.0066
+    self.assertAlmostEqual(snr_mx_fp4_int4, mx_fp4_int4_target, delta=0.25)
+    self.assertAlmostEqual(
+        err_mx_fp4_int4, err_mx_fp4_int4_target, delta=0.0005
     )
 
   def test_qtype_specified_with_multipass_mode_raises_error(self):
@@ -1756,6 +1796,7 @@ class MultiPassDotTest(parameterized.TestCase):
       'three_pass_fp8_fp4/fp4_fp4/fp4',
       'three_pass_fp8_int4/int4_int4/int4',
       'three_pass_fp8_int4/fp4_fp4/int4',
+      'three_pass_fp8_fp4/int4_int4/fp4',
   )
   def test_hybrid_fp8_4bit_multipass_dot(self, mode):
     """Verifies basic hybrid FP8 + 4-bit (FP4, INT4, Mixed) 3-pass matmuls."""
@@ -1782,6 +1823,7 @@ class MultiPassDotTest(parameterized.TestCase):
       ('three_pass_fp8_fp4/fp4_fp4/fp4', 4, 0, 6),
       ('three_pass_fp8_int4/int4_int4/int4', 0, 4, 6),
       ('three_pass_fp8_int4/fp4_fp4/int4', 2, 2, 6),
+      ('three_pass_fp8_fp4/int4_int4/fp4', 2, 2, 6),
   )
   def test_hybrid_fp8_4bit_graph_mechanics_and_gemm_ops(
       self, mode, fp4_casts, int4_casts, fp8_casts
@@ -1805,8 +1847,8 @@ class MultiPassDotTest(parameterized.TestCase):
 
   def test_downcast_by_shift(self):
     """Tests _downcast_by_shift scaling, clipping bounds, and target types."""
-    # Test MXINT4 downcasting with negative value that clips to -7.0
-    # shift = 32.0, so -224.0 / 32 = -7.0, -320.0 / 32 = -10.0 (clips to -7.0)
+    # Test MXINT4 downcasting with negative value that clips to -8.0
+    # shift = 32.0, so -224.0 / 32 = -7.0, -320.0 / 32 = -10.0 (clips to -8.0)
     qval = jnp.array([-320.0, -224.0, 0.0, 224.0, 320.0], dtype=jnp.float32)
     scale = jnp.array([1.0], dtype=jnp.float32)
     operand = qarray.QArray(qvalue=qval, scale=scale, qtype=jnp.float8_e4m3fn)
@@ -1814,14 +1856,14 @@ class MultiPassDotTest(parameterized.TestCase):
     down_int = multipass_dot._downcast_by_shift(operand, 'mxint4')
     self.assertEqual(down_int.qtype, jnp.int4)
     np.testing.assert_array_equal(
-        down_int.qvalue, jnp.array([-7, -7, 0, 7, 7], dtype=jnp.int4)
+        down_int.qvalue, jnp.array([-8, -7, 0, 7, 7], dtype=jnp.int4)
     )
     np.testing.assert_allclose(down_int.scale, scale * 32.0)
 
     down_int_dtype = multipass_dot._downcast_by_shift(operand, jnp.int4)
     self.assertEqual(down_int_dtype.qtype, jnp.int4)
     np.testing.assert_array_equal(
-        down_int_dtype.qvalue, jnp.array([-7, -7, 0, 7, 7], dtype=jnp.int4)
+        down_int_dtype.qvalue, jnp.array([-8, -7, 0, 7, 7], dtype=jnp.int4)
     )
 
     # Test MXFP4 downcasting with negative value clipping to -6.0
@@ -2046,8 +2088,10 @@ class MultiPassDotTest(parameterized.TestCase):
   @parameterized.parameters(
       ('three_pass_fp8_fp4/fp4_fp4/fp4',),
       ('three_pass_fp8_int4/int4_int4/int4',),
+      ('three_pass_fp8_fp4/int4_int4/fp4',),
       ('three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4',),
       ('three_pass_mxfp8_mxint4/mxint4_mxint4/mxint4',),
+      ('three_pass_mxfp8_mxfp4/mxint4_mxint4/mxfp4',),
   )
   def test_hybrid_fp8_square_asymmetric_scale_alignment(self, mode):
     """Verifies scale alignment when M == N with asymmetric operand scales."""
@@ -2068,8 +2112,10 @@ class MultiPassDotTest(parameterized.TestCase):
   @parameterized.parameters(
       ('three_pass_fp8_fp4/fp4_fp4/fp4',),
       ('three_pass_fp8_int4/int4_int4/int4',),
+      ('three_pass_fp8_fp4/int4_int4/fp4',),
       ('three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4',),
       ('three_pass_mxfp8_mxint4/mxint4_mxint4/mxint4',),
+      ('three_pass_mxfp8_mxfp4/mxint4_mxint4/mxfp4',),
   )
   def test_hybrid_fp8_dtype_preservation(self, mode):
     """Verifies return dtype matches input dtype or preferred_element_type."""
@@ -2293,6 +2339,263 @@ class MultiPassDotTest(parameterized.TestCase):
         else:
           self.assertEmpty(lhs_ba)
           self.assertEmpty(rhs_ba)
+
+  def test_aligned_int4_residual_block_scale_and_bins(self):
+    """Verifies _quantize_fp8_for_int4_residual equalizes all 16 bins and removes bias."""
+    dnums = (((1,), (0,)), ((), ()))
+    x = jnp.linspace(-10.0, 10.0, 128, dtype=jnp.float32).reshape((2, 64))
+    how = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=True,
+        qtype='mxfp8',
+        tile_size=32,
+        calibration_method=f'absmax,{448.0 / 256.0}',
+    )
+    a0 = multipass_dot._quantize_fp8_for_int4_residual(x, how)
+    r = x - qarray.dequantize(a0)
+    how_res = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=True,
+        qtype='mxint4',
+        tile_size=32,
+        calibration_method=f'absmax,{7.5 / 8.5}',
+    )
+    a1 = qarray.quantize(r, how_res)
+    self.assertEqual(a1.qtype, 'mxint4')
+    self.assertEqual(a1.qvalue.dtype, jnp.int4)
+    self.assertEqual(a1.scale.shape, (2, 2))
+    self.assertEqual(a1.scale.shape, a0.scale.shape)
+
+    # 1. Exact Zero (0.0) & Sparse/Zero-Tile Preservation:
+    # Verify both an all-zero Block-32 tile (row 0, cols 0..31) and isolated 0.0
+    # elements inside a non-zero tile (row 0, col 32) produce exact 0.0 in a0,
+    # r, a1, and x_hat.
+    x_sparse = x.at[0, :32].set(0.0).at[0, 32].set(0.0)
+    zero_mask = x_sparse == 0.0
+    a0_sparse = multipass_dot._quantize_fp8_for_int4_residual(x_sparse, how)
+    r_sparse = x_sparse - qarray.dequantize(a0_sparse)
+    a1_sparse = qarray.quantize(r_sparse, how_res)
+    x_hat_sparse = qarray.dequantize(a0_sparse) + qarray.dequantize(a1_sparse)
+    np.testing.assert_array_equal(
+        np.array(qarray.dequantize(a0_sparse)[zero_mask]), 0.0
+    )
+    np.testing.assert_array_equal(np.array(r_sparse[zero_mask]), 0.0)
+    np.testing.assert_array_equal(
+        np.array(a1_sparse.qvalue.astype(jnp.int32)[zero_mask]), 0
+    )
+    np.testing.assert_array_equal(np.array(x_hat_sparse[zero_mask]), 0.0)
+
+    # 2. Base FP8 E4M3 Anchor Invariance (positive & negative anchors):
+    # Shifting by +0.5 * s_res (+1/32 * Delta) must never perturb an exact FP8
+    # anchor to a neighboring anchor, keeping r == 0.0 and q1 == 0 bit-exactly.
+    anchors = jnp.array(
+        [
+            -2.0,
+            -1.875,
+            -1.75,
+            -1.625,
+            -1.5,
+            -1.375,
+            -1.25,
+            -1.125,
+            -1.0,
+            -0.5,
+            0.0,
+            0.5,
+            1.0,
+            1.125,
+            1.25,
+            1.375,
+            1.5,
+            1.625,
+            1.75,
+            1.875,
+            2.0,
+        ],
+        dtype=jnp.float32,
+    ).reshape((1, -1))
+    how_anchor_fp8 = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=True,
+        qtype=jnp.float8_e4m3fn,
+        tile_size=None,
+        calibration_method='fixed,448',
+    )
+    how_anchor_res = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=True,
+        qtype=jnp.int4,
+        tile_size=None,
+        calibration_method=f'absmax,{7.5 / 8.5}',
+    )
+    a0_anch = multipass_dot._quantize_fp8_for_int4_residual(
+        anchors, how_anchor_fp8
+    )
+    r_anch = anchors - qarray.dequantize(a0_anch)
+    a1_anch = qarray.quantize(r_anch, how_anchor_res)
+    np.testing.assert_array_equal(
+        np.array(qarray.dequantize(a0_anch)), np.array(anchors)
+    )
+    np.testing.assert_array_equal(np.array(r_anch), 0.0)
+    np.testing.assert_array_equal(np.array(a1_anch.qvalue.astype(jnp.int32)), 0)
+
+    # 3. Verify all 16 INT4 bins [-8, 7] are uniformly populated (6.25% each)
+    # and quantization bias is eliminated across both positive and negative
+    # top binades, as well as across all 3 Pass 1 calibration branches
+    # ('fixed,448' on [1, 2], 'absmax' on [256, 448], and
+    # f'absmax,{448.0 / 256.0}' on [128, 256]).
+    u_grid = (
+        ((jnp.arange(16384, dtype=jnp.float32) + 0.5) / 16384.0)
+        .reshape((32, -1))
+        .T.reshape((1, -1))
+    )
+    for sign in (1.0, -1.0):
+      for fp8_qtype, res_qtype, ts, fp8_cal, res_cal, lo, hi in (
+          (
+              jnp.float8_e4m3fn,
+              jnp.int4,
+              None,
+              'fixed,448',
+              f'absmax,{7.5 / 8.5}',
+              1.0,
+              2.0,
+          ),
+          (
+              'mxfp8',
+              'mxint4',
+              32,
+              'fixed,448',
+              f'absmax,{7.5 / 8.5}',
+              1.0,
+              2.0,
+          ),
+          (
+              jnp.float8_e4m3fn,
+              jnp.int4,
+              None,
+              'absmax',
+              f'absmax,{7.5 / 8.5}',
+              256.0,
+              448.0,
+          ),
+          (
+              jnp.float8_e4m3fn,
+              jnp.int4,
+              None,
+              f'absmax,{448.0 / 256.0}',
+              f'absmax,{7.5 / 8.5}',
+              128.0,
+              256.0,
+          ),
+          (
+              'mxfp8',
+              'mxint4',
+              32,
+              f'absmax,{448.0 / 256.0}',
+              f'absmax,{7.5 / 8.5}',
+              128.0,
+              256.0,
+          ),
+      ):
+        x_in = sign * (lo + (hi - lo) * u_grid)
+        how_fp8_cal = dot_general.get_how_to_quantize(
+            dimension_numbers=dnums,
+            ndims=(2, 2),
+            for_lhs=True,
+            qtype=fp8_qtype,
+            tile_size=ts,
+            calibration_method=fp8_cal,
+        )
+        a0_binade = multipass_dot._quantize_fp8_for_int4_residual(
+            x_in, how_fp8_cal
+        )
+        r_binade = x_in - qarray.dequantize(a0_binade)
+        how_bin = dot_general.get_how_to_quantize(
+            dimension_numbers=dnums,
+            ndims=(2, 2),
+            for_lhs=True,
+            qtype=res_qtype,
+            tile_size=ts,
+            calibration_method=res_cal,
+        )
+        a1_binade = qarray.quantize(r_binade, how_bin)
+        q_vals = np.array(a1_binade.qvalue.astype(jnp.int32)).flatten()
+        unique_bins = np.unique(q_vals)
+        np.testing.assert_array_equal(
+            unique_bins, np.arange(-8, 8, dtype=np.int32)
+        )
+        for b in range(-8, 8):
+          occ = float(np.mean(q_vals == b))
+          self.assertAlmostEqual(occ, 1.0 / 16.0, delta=1e-3)
+        x_hat = qarray.dequantize(a0_binade) + qarray.dequantize(a1_binade)
+        bias = float(jnp.mean(x_hat - x_in)) / (hi - lo)
+        tol = 1e-6 if fp8_qtype == 'mxfp8' else 3e-5
+        self.assertAlmostEqual(bias, 0.0, delta=tol)
+
+    # 4. Non-Negative Attention P @ V Bias Removal & End-to-End Verification:
+    # When P = softmax(logits) >= 0 (rows sum to 1.0), quantization bias on V
+    # does not cancel across the inner product. Verify that offset-aligned FP8
+    # reduces P @ V output bias by >20x compared to un-offset symmetric FP8.
+    k_p, k_v = jax.random.split(jax.random.key(7))
+    p_attn = jax.nn.softmax(
+        jax.random.normal(k_p, (64, 128), dtype=jnp.float32), axis=-1
+    )
+    v_pos = 1.0 + jax.random.uniform(k_v, (128, 64), dtype=jnp.float32)
+    pv_ref = jnp.matmul(p_attn, v_pos)
+
+    dnums_rhs = (((1,), (0,)), ((), ()))
+    how_v_fp8 = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums_rhs,
+        ndims=(2, 2),
+        for_lhs=False,
+        qtype='mxfp8',
+        tile_size=32,
+        calibration_method='fixed,448',
+    )
+    how_v_res = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums_rhs,
+        ndims=(2, 2),
+        for_lhs=False,
+        qtype='mxint4',
+        tile_size=32,
+        calibration_method=f'absmax,{7.5 / 8.5}',
+    )
+    # Un-offset V reconstruction
+    v0_un = qarray.quantize(v_pos, how_v_fp8)
+    vr_un = v_pos - qarray.dequantize(v0_un)
+    v1_un = qarray.quantize(vr_un, how_v_res)
+    v_hat_un = qarray.dequantize(v0_un) + qarray.dequantize(v1_un)
+    bias_pv_un = float(jnp.mean(jnp.matmul(p_attn, v_hat_un) - pv_ref))
+
+    # Offset-aligned V reconstruction
+    v0_off = multipass_dot._quantize_fp8_for_int4_residual(v_pos, how_v_fp8)
+    vr_off = v_pos - qarray.dequantize(v0_off)
+    v1_off = qarray.quantize(vr_off, how_v_res)
+    v_hat_off = qarray.dequantize(v0_off) + qarray.dequantize(v1_off)
+    bias_pv_off = float(jnp.mean(jnp.matmul(p_attn, v_hat_off) - pv_ref))
+
+    self.assertGreater(abs(bias_pv_un), 1e-4)
+    self.assertLess(abs(bias_pv_off), 1e-5)
+    self.assertLess(abs(bias_pv_off), abs(bias_pv_un) / 20.0)
+    self.assertGreater(
+        compute_snr_db(pv_ref, jnp.matmul(p_attn, v_hat_off)),
+        compute_snr_db(pv_ref, jnp.matmul(p_attn, v_hat_un)) + 0.5,
+    )
+
+    for mode in (
+        'three_pass_fp8_int4/int4_int4/int4',
+        'three_pass_fp8_fp4/int4_int4/fp4',
+        'three_pass_mxfp8_mxint4/mxint4_mxint4/mxint4',
+        'three_pass_mxfp8_mxfp4/mxint4_mxint4/mxfp4',
+    ):
+      pv_out = multipass_dot.multipass_dot_general(
+          p_attn, v_pos, dnums_rhs, multipass_mode=mode
+      )
+      self.assertGreater(compute_snr_db(pv_ref, pv_out), 45.0)
 
 
 if __name__ == '__main__':
