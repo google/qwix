@@ -339,6 +339,16 @@ class PallasTest(parameterized.TestCase):
           rhs_scale_shape=(4, 2),
           dimension_numbers=(([2], [0]), ([], [])),
       ),
+      dict(
+          testcase_name="w4a8_fine_subchannel",
+          lhs_shape=(8, 16, 512),
+          lhs_dtype=jnp.float8_e4m3fn,
+          lhs_scale_shape=(8, 16, 4),
+          rhs_shape=(512, 256),
+          rhs_dtype=jnp.int4,
+          rhs_scale_shape=(8, 256),
+          dimension_numbers=(([2], [0]), ([], [])),
+      ),
   )
   def test_pallas_dot_general(
       self,
