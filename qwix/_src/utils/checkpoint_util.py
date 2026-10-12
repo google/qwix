@@ -152,6 +152,31 @@ def _sharding_from_template_metadata(
   return jax.sharding.NamedSharding(concrete_mesh, spec)
 
 
+def _resolve_template_sharding(
+    boxed_template_value: Any,
+    path: tuple[str, ...],
+) -> jax.sharding.Sharding | None:
+  """Resolves the sharding for placing a checkpoint value like its template.
+
+  Uses the sharding of the unboxed template array, resolving abstract meshes
+  against the active mesh. If the template array has no sharding, falls back to
+  the partitioning metadata of the boxed template leaf.
+
+  Args:
+    boxed_template_value: The template leaf before `flax_util.unbox`.
+    path: The parameter path for error messages.
+
+  Returns:
+    A concrete `jax.sharding.Sharding`, or `None` if neither the template array
+    nor its partitioning metadata provides one.
+  """
+  template_value = flax_util.unbox(boxed_template_value)
+  sharding = _get_sharding(getattr(template_value, 'sharding', None), path)
+  if sharding is None:
+    sharding = _sharding_from_template_metadata(boxed_template_value)
+  return sharding
+
+
 def _apply_sharding_and_dtype(
     checkpoint_value: Any,
     template_value: Any,
@@ -194,9 +219,7 @@ def _apply_sharding_and_dtype(
   if use_checkpoint_sharding:
     sharding = _get_sharding(getattr(checkpoint_value, 'sharding', None), path)
   else:
-    sharding = _get_sharding(getattr(template_value, 'sharding', None), path)
-    if sharding is None:
-      sharding = _sharding_from_template_metadata(boxed_template_value)
+    sharding = _resolve_template_sharding(boxed_template_value, path)
 
   # Handle sharding.
   if sharding is not None:
@@ -451,12 +474,9 @@ def _requantize_quantized_param(
   if use_checkpoint_sharding:
     sharding = _get_sharding(getattr(ckpt_qvalue, 'sharding', None), path)
   else:
-    template_qvalue = _get_template_field(template_param, 'qvalue')
-    sharding = _get_sharding(
-        getattr(flax_util.unbox(template_qvalue), 'sharding', None), path
+    sharding = _resolve_template_sharding(
+        _get_template_field(template_param, 'qvalue'), path
     )
-    if sharding is None:
-      sharding = _sharding_from_template_metadata(template_qvalue)
 
   ckpt_qarray_leaf = _place_quantized_leaves(
       ckpt_qvalue, ckpt_scale, ckpt_zero_point, sharding
@@ -520,7 +540,7 @@ def _dequantize_quantized_param(
   if use_checkpoint_sharding:
     sharding = _get_sharding(getattr(ckpt_qvalue, 'sharding', None), path)
   else:
-    sharding = _get_sharding(getattr(template_param, 'sharding', None), path)
+    sharding = _resolve_template_sharding(template_param, path)
 
   ckpt_qarray_leaf = _place_quantized_leaves(
       ckpt_qvalue, ckpt_scale, ckpt_zero_point, sharding
