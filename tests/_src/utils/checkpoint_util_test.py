@@ -18,6 +18,7 @@ from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
+import flax
 from flax import linen as nn
 from flax import nnx
 import jax
@@ -26,6 +27,7 @@ import numpy as np
 from qwix._src import model as qwix_model
 from qwix._src import qconfig
 from qwix._src.core import qarray
+from qwix._src.providers import boxed_param
 from qwix._src.providers import ptq
 from qwix._src.providers import qt
 from qwix._src.utils import checkpoint_util
@@ -52,6 +54,13 @@ def _get_canonical_named_sharding(x: jax.Array) -> jax.sharding.Sharding:
 
 
 def _to_orbax_payload(tree: Any) -> Any:
+  if isinstance(tree, boxed_param.WithAux):
+    return {"array": _to_orbax_payload(tree.array)}
+  if isinstance(tree, qarray.QArray):
+    payload = {"qvalue": tree.qvalue, "scale": tree.scale}
+    if tree.zero_point is not None:
+      payload["zero_point"] = tree.zero_point
+    return _to_orbax_payload(payload)
   if isinstance(tree, dict):
     return {key: _to_orbax_payload(value) for key, value in tree.items()}
   if isinstance(tree, (list, tuple)):
@@ -120,6 +129,79 @@ def _build_sharded_einsum_reference(
   orig_params = nnx.to_pure_dict(nnx.state(fp_einsum, nnx.Param))
   reference_params = ptq.quantize_params(orig_params, abs_ptq_einsum)
   return abs_ptq_einsum, orig_params, reference_params
+
+
+def _build_metadata_only_param(
+    shape: tuple[int, ...],
+    dtype: jax.typing.DTypeLike,
+    out_sharding: tuple[str | None, ...],
+) -> nnx.Param:
+  # eager_sharding=False keeps the ShapeDtypeStruct unsharded instead of
+  # resolving out_sharding against a mesh at construction time.
+  return nnx.Param(
+      jax.ShapeDtypeStruct(shape, dtype),
+      eager_sharding=False,
+      out_sharding=out_sharding,
+  )
+
+
+def _build_linen_reference(
+    fp_model: nn.Module,
+    q_rules: list[qconfig.QuantizationRule],
+    model_input: jax.Array,
+) -> tuple[nn.Module, dict[str, Any], dict[str, Any], dict[str, Any]]:
+  quantized_model = qwix_model.quantize_model(
+      fp_model, ptq.PtqProvider(q_rules)
+  )
+  abs_quantized_params = jax.eval_shape(
+      quantized_model.init, jax.random.key(0), model_input
+  )["params"]
+  orig_params = nn.unbox(
+      fp_model.init(jax.random.key(0), model_input)["params"]
+  )
+  reference_params = ptq.quantize_params(orig_params, abs_quantized_params)
+  return quantized_model, abs_quantized_params, orig_params, reference_params
+
+
+class _PartitionedLinenMlp(nn.Module):
+
+  @nn.compact
+  def __call__(self, x):
+    x = nn.Dense(
+        12,
+        kernel_init=nn.with_partitioning(
+            nn.initializers.lecun_normal(), ("fsdp", "tp")
+        ),
+        name="partitioned",
+    )(x)
+    return nn.Dense(
+        6,
+        kernel_init=nn.with_logical_partitioning(
+            nn.initializers.lecun_normal(), ("embed", "mlp")
+        ),
+        name="logically_partitioned",
+    )(x)
+
+
+class _LinenBlock(nn.Module):
+
+  @nn.compact
+  def __call__(self, carry, _):
+    return nn.Dense(16, name="dense")(carry), None
+
+
+class _ScannedLinenModel(nn.Module):
+
+  @nn.compact
+  def __call__(self, x):
+    blocks = nn.scan(
+        _LinenBlock,
+        variable_axes={"params": 0},
+        split_rngs={"params": True},
+        length=3,
+    )
+    x, _ = blocks(name="layers")(x, None)
+    return x
 
 
 class PrequantizedPtqTest(parameterized.TestCase):
@@ -616,16 +698,13 @@ class PrequantizedPtqTest(parameterized.TestCase):
     self.assertIn("kernel", processed_params)
     self.assertNotIn("bias", processed_params)
 
-  def test_process_prequantized_params_rejects_linen_template(self):
-    dense = nn.Dense(features=5)
+  def test_process_prequantized_params_rejects_nnx_state_template(self):
     q_rules = [qconfig.QuantizationRule(weight_qtype=jnp.int8)]
-    ptq_dense = qwix_model.quantize_model(dense, ptq.PtqProvider(q_rules))
-    abs_ptq_params = jax.eval_shape(
-        ptq_dense.init, jax.random.key(0), jnp.ones((10, 12))
-    )["params"]
+    model_input = jnp.ones((10, 12))
+    abs_ptq_linear, _, _ = _build_linear_reference(q_rules, model_input)
 
-    with self.assertRaisesRegex(TypeError, "NNX models"):
-      checkpoint_util.process_prequantized_params({}, abs_ptq_params)
+    with self.assertRaisesRegex(TypeError, "NNX model or a Linen params dict"):
+      checkpoint_util.process_prequantized_params({}, nnx.state(abs_ptq_linear))
 
   def test_process_prequantized_params_with_lists(self):
     class ListModel(nnx.Module):
@@ -692,6 +771,60 @@ class PrequantizedPtqTest(parameterized.TestCase):
 
     _assert_trees_allclose(self, processed_params, reference_params)
     nnx.update(template_model, processed_params)
+
+  def test_process_prequantized_params_requantized_sharding_from_metadata(self):
+    mesh = jax.make_mesh(
+        (2, 2),
+        ("fsdp", "tp"),
+        axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
+    )
+    template_model = nnx.Linear(12, 6, rngs=nnx.Rngs(0))
+    template_model.kernel = {
+        "array": {
+            "qvalue": _build_metadata_only_param(
+                (12, 6), jnp.int4, ("fsdp", "tp")
+            ),
+            "scale": _build_metadata_only_param(
+                (3, 6), jnp.float32, (None, "tp")
+            ),
+        }
+    }
+    dummy_payload = {
+        "kernel": {
+            "array": {
+                "qvalue": np.ones((12, 6), dtype=np.int8),
+                "scale": np.ones((3, 6), dtype=np.float32),
+            }
+        }
+    }
+
+    with (
+        jax.set_mesh(mesh),
+        mock.patch.object(
+            qarray, "dequantize", wraps=qarray.dequantize
+        ) as mock_dequantize,
+    ):
+      processed_params = checkpoint_util.process_prequantized_params(
+          dummy_payload, template_model
+      )
+
+    # The checkpoint qvalue is placed onto the sharding recovered from the
+    # template metadata before it is dequantized and requantized.
+    mock_dequantize.assert_called_once()
+    self.assertEqual(
+        mock_dequantize.call_args.args[0].qvalue.sharding,
+        jax.sharding.NamedSharding(
+            mesh, jax.sharding.PartitionSpec("fsdp", "tp")
+        ),
+    )
+    processed_kernel = processed_params["kernel"]["array"]
+    self.assertEqual(processed_kernel["qvalue"].dtype, jnp.int4)
+    self.assertEqual(
+        processed_kernel["scale"].sharding,
+        jax.sharding.NamedSharding(
+            mesh, jax.sharding.PartitionSpec(None, "tp")
+        ),
+    )
 
 
 class PrequantizedQtTest(parameterized.TestCase):
@@ -1033,6 +1166,56 @@ class PrequantizedQtTest(parameterized.TestCase):
     self.assertEqual(kernel_array.sharding.mesh, mesh)
     self.assertEqual(bias_array.sharding.mesh, mesh)
 
+  def test_multi_device_sharding_from_metadata(self):
+    mesh = jax.make_mesh(
+        (2, 2),
+        ("fsdp", "tp"),
+        axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
+    )
+    template_model = nnx.Linear(12, 6, rngs=nnx.Rngs(0))
+    template_model.kernel = _build_metadata_only_param(
+        (12, 6), jnp.float32, ("fsdp", "tp")
+    )
+    template_model.bias = _build_metadata_only_param((6,), jnp.float32, ("tp",))
+    dummy_payload = {
+        "kernel": {
+            "array": {
+                "qvalue": np.ones((12, 6), dtype=np.int8),
+                "scale": np.ones((3, 6), dtype=np.float32),
+            }
+        },
+        "bias": np.zeros((6,), dtype=np.float32),
+    }
+
+    with (
+        jax.set_mesh(mesh),
+        mock.patch.object(
+            qarray, "dequantize", wraps=qarray.dequantize
+        ) as mock_dequantize,
+    ):
+      processed_params = checkpoint_util.process_prequantized_params(
+          dummy_payload, template_model
+      )
+
+    kernel_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("fsdp", "tp")
+    )
+    # The checkpoint qvalue is placed onto the sharding recovered from the
+    # template metadata before it is dequantized, rather than replicated.
+    mock_dequantize.assert_called_once()
+    self.assertEqual(
+        mock_dequantize.call_args.args[0].qvalue.sharding, kernel_sharding
+    )
+    self.assertEqual(processed_params["kernel"].sharding, kernel_sharding)
+    self.assertEqual(
+        processed_params["bias"].sharding,
+        jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("tp")),
+    )
+    np.testing.assert_array_equal(
+        jax.device_get(processed_params["kernel"]),
+        np.ones((12, 6), dtype=np.float32),
+    )
+
   def test_single_device_sharding(self):
     device = jax.devices()[1]
     sharding = jax.sharding.SingleDeviceSharding(device)
@@ -1141,6 +1324,314 @@ class PrequantizedQtTest(parameterized.TestCase):
 
     self.assertEqual(list(kernel_array.devices()), [jax.devices()[0]])
     self.assertEqual(list(bias_array.devices()), [jax.devices()[0]])
+
+
+class PrequantizedLinenTest(parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      dict(testcase_name="symmetric", calibration_method="absmax"),
+      dict(testcase_name="asymmetric", calibration_method="minmax"),
+  )
+  def test_process_prequantized_params_linen(self, calibration_method):
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*",
+            weight_qtype=jnp.int8,
+            weight_calibration_method=calibration_method,
+            tile_size=4,
+        ),
+    ]
+    model_input = jnp.ones((10, 12))
+    ptq_model, abs_ptq_params, _, reference_params = _build_linen_reference(
+        nn.Dense(features=6), q_rules, model_input
+    )
+
+    orbax_payload = _to_orbax_payload(reference_params)
+    processed_params = checkpoint_util.process_prequantized_params(
+        orbax_payload, abs_ptq_params
+    )
+
+    # Linen consumes params as given, so the processed kernel keeps the
+    # template's WithAux and QArray containers.
+    self.assertIsInstance(processed_params["kernel"], boxed_param.WithAux)
+    _assert_trees_allclose(self, processed_params, reference_params)
+    ptq_model.apply({"params": processed_params}, model_input)
+
+  def test_process_prequantized_params_linen_dequantized(self):
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*", weight_qtype=jnp.int8, tile_size=4
+        ),
+    ]
+    model_input = jnp.ones((10, 12), dtype=jnp.bfloat16)
+    fp_dense = nn.Dense(features=6, param_dtype=jnp.bfloat16)
+    _, _, orig_params, ref_params_ptq = _build_linen_reference(
+        fp_dense, q_rules, model_input
+    )
+    abs_fp_params = jax.eval_shape(
+        fp_dense.init, jax.random.key(0), model_input
+    )["params"]
+
+    orbax_payload = _to_orbax_payload(ref_params_ptq)
+    processed_params = checkpoint_util.process_prequantized_params(
+        orbax_payload, abs_fp_params
+    )
+
+    expected_kernel = qarray.dequantize(ref_params_ptq["kernel"].array)
+    self.assertEqual(processed_params["kernel"].dtype, jnp.bfloat16)
+    self.assertEqual(processed_params["bias"].dtype, jnp.bfloat16)
+    _assert_trees_allclose(self, processed_params["kernel"], expected_kernel)
+    _assert_trees_allclose(self, processed_params["bias"], orig_params["bias"])
+    fp_dense.apply({"params": processed_params}, model_input)
+
+  def test_process_prequantized_params_linen_partitioned(self):
+    mesh = jax.make_mesh(
+        (2, 2),
+        ("fsdp", "tp"),
+        axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
+    )
+    q_rules = [
+        qconfig.QuantizationRule(module_path=".*", weight_qtype=jnp.int8),
+    ]
+    model_input = jnp.ones((10, 12))
+    ptq_mlp, abs_ptq_params, _, reference_params = _build_linen_reference(
+        _PartitionedLinenMlp(), q_rules, model_input
+    )
+    # The template boxes each QArray field with its partitioning metadata.
+    self.assertIsInstance(
+        abs_ptq_params["partitioned"]["kernel"].array.qvalue, nn.Partitioned
+    )
+    self.assertIsInstance(
+        abs_ptq_params["logically_partitioned"]["kernel"].array.qvalue,
+        nn.LogicallyPartitioned,
+    )
+
+    orbax_payload = _to_orbax_payload(reference_params)
+    with (
+        jax.set_mesh(mesh),
+        nn.logical_axis_rules((("embed", "fsdp"), ("mlp", "tp"))),
+    ):
+      processed_params = checkpoint_util.process_prequantized_params(
+          orbax_payload, abs_ptq_params
+      )
+
+    # Each QArray field is sharded by its own metadata, which replicates the
+    # size-1 axis of the channelwise scale.
+    qvalue_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("fsdp", "tp")
+    )
+    scale_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec(None, "tp")
+    )
+    for layer in ("partitioned", "logically_partitioned"):
+      kernel = processed_params[layer]["kernel"].array
+      self.assertEqual(kernel.qvalue.sharding, qvalue_sharding)
+      self.assertEqual(kernel.scale.sharding, scale_sharding)
+    # The processed params are unboxed, like the ptq.quantize_params reference.
+    _assert_trees_allclose(self, processed_params, reference_params)
+    ptq_mlp.apply({"params": processed_params}, model_input)
+
+  def test_process_prequantized_params_linen_sharding_without_context(self):
+    box_mesh = jax.make_mesh(
+        (2, 2),
+        ("fsdp", "tp"),
+        axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
+    )
+    abstract_array = jax.ShapeDtypeStruct((8, 4), jnp.float32)
+    abs_params = {
+        # Resolved with its own mesh and rules.
+        "own_mesh_and_rules": nn.LogicallyPartitioned(
+            abstract_array,
+            ("embed", "mlp"),
+            mesh=box_mesh,
+            rules=(("embed", "fsdp"), ("mlp", "tp")),
+        ),
+        # Replicated by its rules.
+        "replicated": nn.LogicallyPartitioned(
+            abstract_array,
+            ("embed", "mlp"),
+            rules=(("embed", None), ("mlp", None)),
+        ),
+        # Placed with the sharding of its array instead of the metadata.
+        "concrete": nn.Partitioned(jnp.zeros((8, 4)), ("fsdp", "tp")),
+        # Unresolved without a mesh.
+        "mesh_axes": nn.Partitioned(abstract_array, ("fsdp", "tp")),
+        # Unresolved without logical axis rules.
+        "logical_axes": nn.LogicallyPartitioned(
+            abstract_array, ("embed", "mlp")
+        ),
+    }
+    payload = {name: np.ones((8, 4), dtype=np.float32) for name in abs_params}
+
+    with self.assertLogs(level="WARNING") as logs:
+      processed_params = checkpoint_util.process_prequantized_params(
+          payload, abs_params
+      )
+
+    # A single warning lists the unresolved params.
+    self.assertLen(logs.output, 1)
+    self.assertIn(str([("mesh_axes",), ("logical_axes",)]), logs.output[0])
+    self.assertEqual(
+        processed_params["own_mesh_and_rules"].sharding,
+        jax.sharding.NamedSharding(
+            box_mesh, jax.sharding.PartitionSpec("fsdp", "tp")
+        ),
+    )
+    # The replicated and unresolved params are placed unsharded.
+    for name in ("replicated", "mesh_axes", "logical_axes"):
+      self.assertEqual(
+          list(processed_params[name].devices()), [jax.devices()[0]]
+      )
+    # The metadata is not used with the checkpoint's sharding.
+    with self.assertNoLogs(level="WARNING"):
+      checkpoint_util.process_prequantized_params(
+          payload, abs_params, use_checkpoint_sharding=True
+      )
+
+  def test_process_prequantized_params_linen_manual_dict_template(self):
+    # The non-intercepted but pre-quantized kernel is overridden with the
+    # manual quantized dictionary structure.
+    abs_params = {
+        "kernel": {
+            "array": {
+                "qvalue": jax.ShapeDtypeStruct((12, 6), jnp.int8),
+                "scale": jax.ShapeDtypeStruct((1, 6), jnp.float32),
+                "zero_point": jax.ShapeDtypeStruct((1, 6), jnp.int8),
+            }
+        },
+        "bias": jax.ShapeDtypeStruct((6,), jnp.float32),
+    }
+    reference_params = {
+        "kernel": {
+            "array": {
+                "qvalue": jnp.ones((12, 6), dtype=jnp.int8),
+                "scale": jnp.ones((1, 6), dtype=jnp.float32),
+                "zero_point": jnp.zeros((1, 6), dtype=jnp.int8),
+            }
+        },
+        "bias": jnp.zeros((6,), dtype=jnp.float32),
+    }
+    orbax_payload = _to_orbax_payload(reference_params)
+
+    processed_params = checkpoint_util.process_prequantized_params(
+        orbax_payload, abs_params
+    )
+
+    _assert_trees_allclose(self, processed_params, reference_params)
+
+  def test_process_prequantized_params_linen_scan_requantized(self):
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*", weight_qtype=jnp.int4, tile_size=8
+        )
+    ]
+    model_input = jnp.ones((4, 16))
+    fp_model = _ScannedLinenModel()
+    ptq_model = qwix_model.quantize_model(fp_model, ptq.PtqProvider(q_rules))
+    abs_ptq_params = jax.eval_shape(
+        ptq_model.init, jax.random.key(0), model_input
+    )["params"]
+    fp_params = fp_model.init(jax.random.key(0), model_input)["params"]
+    fp_dense = fp_params["layers"]["dense"]
+    # ptq.quantize_params can't apply the per-layer WithAux.how to the stacked
+    # (3, 16, 16) kernel, so quantize it with the stacked equivalent: the layer
+    # axis is channelwise and the per-layer axes shift by one.
+    source_kernel = qarray.quantize(
+        fp_dense["kernel"],
+        qarray.HowToQuantize(
+            qtype=jnp.int8, channelwise_axes=(0, 2), tiled_axes={1: 4}
+        ),
+    )
+    orbax_payload = _to_orbax_payload({
+        "layers": {
+            "dense": {
+                "kernel": {"array": source_kernel},
+                "bias": fp_dense["bias"],
+            }
+        }
+    })
+
+    processed_params = checkpoint_util.process_prequantized_params(
+        orbax_payload, abs_ptq_params
+    )
+
+    processed_kernel = processed_params["layers"]["dense"]["kernel"]
+    expected_kernel = qarray.quantize(
+        qarray.dequantize(source_kernel),
+        qarray.HowToQuantize(
+            qtype=jnp.int4, channelwise_axes=(0, 2), tiled_axes={1: 8}
+        ),
+    )
+    # WithAux.how keeps the per-layer quantization of the template.
+    self.assertEqual(
+        processed_kernel.how, abs_ptq_params["layers"]["dense"]["kernel"].how
+    )
+    _assert_trees_allclose(self, processed_kernel.array, expected_kernel)
+    ptq_model.apply({"params": processed_params}, model_input)
+
+  def test_process_prequantized_params_linen_static_act_scale(self):
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*",
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+            act_static_scale=True,
+            act_calibration_method="minmax",
+        ),
+    ]
+    model_input = jax.random.normal(jax.random.key(1), (10, 12))
+    fp_dense = nn.Dense(features=6)
+    qt_dense = qwix_model.quantize_model(fp_dense, qt.QtProvider(q_rules))
+    qt_variables = qt_dense.init(jax.random.key(0), model_input)
+    _, new_vars = qt_dense.apply(
+        qt_variables, model_input, mutable="quant_stats"
+    )
+    ptq_dense = qwix_model.quantize_model(fp_dense, ptq.PtqProvider(q_rules))
+    abs_ptq_params = jax.eval_shape(
+        ptq_dense.init, jax.random.key(0), model_input
+    )["params"]
+    reference_params = ptq.quantize_params(
+        qt_variables["params"], abs_ptq_params, new_vars["quant_stats"]
+    )
+
+    orbax_payload = _to_orbax_payload(reference_params)
+    processed_params = checkpoint_util.process_prequantized_params(
+        orbax_payload, abs_ptq_params
+    )
+
+    # The static activation scale is a WithAux around a full-precision array.
+    self.assertIsInstance(
+        processed_params["dot_general0_lhs_scale"], boxed_param.WithAux
+    )
+    _assert_trees_allclose(self, processed_params, reference_params)
+    ptq_dense.apply({"params": processed_params}, model_input)
+
+  def test_process_prequantized_params_linen_frozen_dict(self):
+    q_rules = [qconfig.QuantizationRule(weight_qtype=jnp.int8, tile_size=4)]
+    model_input = jnp.ones((10, 12))
+    _, abs_ptq_params, _, reference_params = _build_linen_reference(
+        nn.Dense(features=6), q_rules, model_input
+    )
+
+    processed_params = checkpoint_util.process_prequantized_params(
+        flax.core.freeze(_to_orbax_payload(reference_params)),
+        flax.core.freeze(abs_ptq_params),
+    )
+
+    _assert_trees_allclose(self, processed_params, reference_params)
+
+  def test_process_prequantized_params_linen_variables_template(self):
+    q_rules = [qconfig.QuantizationRule(weight_qtype=jnp.int8, tile_size=4)]
+    model_input = jnp.ones((10, 12))
+    _, abs_ptq_params, _, reference_params = _build_linen_reference(
+        nn.Dense(features=6), q_rules, model_input
+    )
+    orbax_payload = _to_orbax_payload(reference_params)
+
+    with self.assertRaisesRegex(ValueError, r"variables\['params'\]"):
+      checkpoint_util.process_prequantized_params(
+          orbax_payload, {"params": abs_ptq_params}
+      )
 
 
 class RestoreQuantizationRulesTest(parameterized.TestCase):
@@ -1380,6 +1871,36 @@ class RestoreQuantizationRulesTest(parameterized.TestCase):
         )
     ]
     self.assertEqual(rules, expected_rules)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="dict", container=dict),
+      dict(testcase_name="frozen_dict", container=flax.core.freeze),
+  )
+  def test_restore_rules_linen(self, container):
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*", weight_qtype=jnp.int8, tile_size=4
+        )
+    ]
+    model_input = jnp.ones((10, 12))
+    _, _, _, reference_params = _build_linen_reference(
+        _PartitionedLinenMlp(), q_rules, model_input
+    )
+    orbax_payload = container(_to_orbax_payload(reference_params))
+
+    rules = checkpoint_util.restore_quantization_rules(
+        orbax_payload, qconfig.QuantizationRule, tile_size=4, act_qtype=None
+    )
+
+    self.assertCountEqual(
+        [rule.module_path for rule in rules],
+        ["partitioned", "logically_partitioned"],
+    )
+    # The restored module paths match the Linen module paths.
+    provider = ptq.PtqProvider(rules)
+    ptq_mlp = qwix_model.quantize_model(_PartitionedLinenMlp(), provider)
+    jax.eval_shape(ptq_mlp.init, jax.random.key(0), model_input)
+    self.assertEmpty(provider.get_unused_rules())
 
 
 if __name__ == "__main__":
