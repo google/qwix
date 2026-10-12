@@ -122,6 +122,20 @@ def _build_sharded_einsum_reference(
   return abs_ptq_einsum, orig_params, reference_params
 
 
+def _build_metadata_only_param(
+    shape: tuple[int, ...],
+    dtype: jax.typing.DTypeLike,
+    out_sharding: tuple[str | None, ...],
+) -> nnx.Param:
+  # eager_sharding=False keeps the ShapeDtypeStruct unsharded instead of
+  # resolving out_sharding against a mesh at construction time.
+  return nnx.Param(
+      jax.ShapeDtypeStruct(shape, dtype),
+      eager_sharding=False,
+      out_sharding=out_sharding,
+  )
+
+
 class PrequantizedPtqTest(parameterized.TestCase):
 
   def test_process_prequantized_params_nnx(self):
@@ -693,6 +707,60 @@ class PrequantizedPtqTest(parameterized.TestCase):
     _assert_trees_allclose(self, processed_params, reference_params)
     nnx.update(template_model, processed_params)
 
+  def test_process_prequantized_params_requantized_sharding_from_metadata(self):
+    mesh = jax.make_mesh(
+        (2, 2),
+        ("fsdp", "tp"),
+        axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
+    )
+    template_model = nnx.Linear(12, 6, rngs=nnx.Rngs(0))
+    template_model.kernel = {
+        "array": {
+            "qvalue": _build_metadata_only_param(
+                (12, 6), jnp.int4, ("fsdp", "tp")
+            ),
+            "scale": _build_metadata_only_param(
+                (3, 6), jnp.float32, (None, "tp")
+            ),
+        }
+    }
+    dummy_payload = {
+        "kernel": {
+            "array": {
+                "qvalue": np.ones((12, 6), dtype=np.int8),
+                "scale": np.ones((3, 6), dtype=np.float32),
+            }
+        }
+    }
+
+    with (
+        jax.set_mesh(mesh),
+        mock.patch.object(
+            qarray, "dequantize", wraps=qarray.dequantize
+        ) as mock_dequantize,
+    ):
+      processed_params = checkpoint_util.process_prequantized_params(
+          dummy_payload, template_model
+      )
+
+    # The checkpoint qvalue is placed onto the sharding recovered from the
+    # template metadata before it is dequantized and requantized.
+    mock_dequantize.assert_called_once()
+    self.assertEqual(
+        mock_dequantize.call_args.args[0].qvalue.sharding,
+        jax.sharding.NamedSharding(
+            mesh, jax.sharding.PartitionSpec("fsdp", "tp")
+        ),
+    )
+    processed_kernel = processed_params["kernel"]["array"]
+    self.assertEqual(processed_kernel["qvalue"].dtype, jnp.int4)
+    self.assertEqual(
+        processed_kernel["scale"].sharding,
+        jax.sharding.NamedSharding(
+            mesh, jax.sharding.PartitionSpec(None, "tp")
+        ),
+    )
+
 
 class PrequantizedQtTest(parameterized.TestCase):
 
@@ -1032,6 +1100,56 @@ class PrequantizedQtTest(parameterized.TestCase):
 
     self.assertEqual(kernel_array.sharding.mesh, mesh)
     self.assertEqual(bias_array.sharding.mesh, mesh)
+
+  def test_multi_device_sharding_from_metadata(self):
+    mesh = jax.make_mesh(
+        (2, 2),
+        ("fsdp", "tp"),
+        axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
+    )
+    template_model = nnx.Linear(12, 6, rngs=nnx.Rngs(0))
+    template_model.kernel = _build_metadata_only_param(
+        (12, 6), jnp.float32, ("fsdp", "tp")
+    )
+    template_model.bias = _build_metadata_only_param((6,), jnp.float32, ("tp",))
+    dummy_payload = {
+        "kernel": {
+            "array": {
+                "qvalue": np.ones((12, 6), dtype=np.int8),
+                "scale": np.ones((3, 6), dtype=np.float32),
+            }
+        },
+        "bias": np.zeros((6,), dtype=np.float32),
+    }
+
+    with (
+        jax.set_mesh(mesh),
+        mock.patch.object(
+            qarray, "dequantize", wraps=qarray.dequantize
+        ) as mock_dequantize,
+    ):
+      processed_params = checkpoint_util.process_prequantized_params(
+          dummy_payload, template_model
+      )
+
+    kernel_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("fsdp", "tp")
+    )
+    # The checkpoint qvalue is placed onto the sharding recovered from the
+    # template metadata before it is dequantized, rather than replicated.
+    mock_dequantize.assert_called_once()
+    self.assertEqual(
+        mock_dequantize.call_args.args[0].qvalue.sharding, kernel_sharding
+    )
+    self.assertEqual(processed_params["kernel"].sharding, kernel_sharding)
+    self.assertEqual(
+        processed_params["bias"].sharding,
+        jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("tp")),
+    )
+    np.testing.assert_array_equal(
+        jax.device_get(processed_params["kernel"]),
+        np.ones((12, 6), dtype=np.float32),
+    )
 
   def test_single_device_sharding(self):
     device = jax.devices()[1]
