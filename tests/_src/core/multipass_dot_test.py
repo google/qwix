@@ -578,8 +578,10 @@ class MultiPassDotTest(parameterized.TestCase):
       self.assertEqual(eqn.invars[0].aval.dtype, jnp.float8_e4m3fn)
       self.assertEqual(eqn.invars[1].aval.dtype, jnp.float8_e4m3fn)
 
-    # 2. Multi-pass with FP8 and subchannel tile_size=256 (>= 128 threshold):
-    # Also preserves hardware FP8 dot_general.
+    # 2. Multi-pass with FP8 and subchannel tile_size=256:
+    # Since K == tile_size (single tile along the contracting dimension), the
+    # minimum contracting tile size check does not apply, preserving hardware
+    # FP8 dot_general.
     jaxpr_mp_fp8_subchan = jax.make_jaxpr(
         lambda a, b: multipass_dot.multipass_dot_general(
             a,

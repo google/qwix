@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest import mock
 from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -215,8 +216,110 @@ class DotGeneralTest(parameterized.TestCase):
     self.assertLessEqual(fp_mae, expected_mae)
     # The error between slow vs fast, or slow vs loop should be purely due to
     # floating point imprecision, and should be small.
-    self.assertLessEqual(fast_mae, 0.003)
-    self.assertLessEqual(loop_mae, 0.003)
+    # On TPU7 / TPU7x, native FP8 matmuls (specifically
+    # test_dot_general_fp8_tiled_ra) have slightly different intermediate
+    # rounding compared to the bf16 slow path (fast_mae ≈ 0.0045), requiring a
+    # 0.006 tolerance on TPU7/TPU7x for FP8 cases while keeping 0.003 for
+    # integer cases and other device kinds.
+    device_kind = jax.devices()[0].device_kind.split('\n', 1)[0]
+    fp8_types = (
+        jnp.float8_e4m3fn,
+        jnp.float8_e5m2,
+        jnp.float8_e4m3b11fnuz,
+        jnp.float8_e4m3fnuz,
+        jnp.float8_e5m2fnuz,
+    )
+    is_fp8_case = lhs_qtype in fp8_types or rhs_qtype in fp8_types
+    max_tolerance = 0.006 if ('TPU7' in device_kind and is_fp8_case) else 0.003
+    self.assertLessEqual(fast_mae, max_tolerance)
+    self.assertLessEqual(loop_mae, max_tolerance)
+
+  @parameterized.parameters(128, 256, 512)
+  def test_dot_general_subchannel_tile_sizes(self, tile_size: int):
+    if jax.devices()[0].platform != 'tpu':
+      self.skipTest('Only run on TPU.')
+    lhs = self._make_array((128, 1024))
+    rhs = self._make_array((1024, 256))
+    q_lhs = qarray.quantize(
+        lhs,
+        qarray.HowToQuantize(
+            qtype=jnp.int8,
+            channelwise_axes=(0,),
+            tiled_axes={1: tile_size},
+        ),
+    )
+    q_rhs = qarray.quantize(
+        rhs,
+        qarray.HowToQuantize(
+            qtype=jnp.int4,
+            channelwise_axes=(1,),
+            tiled_axes={0: tile_size},
+        ),
+    )
+    dnums = (((1,), (0,)), ((), ()))
+    fp_res = jax.lax.dot_general(lhs, rhs, dnums)
+    res = jax.jit(dot_general.dot_general, static_argnums=(2,))(
+        q_lhs, q_rhs, dnums
+    )
+    slow_res = jax.jit(dot_general._slow_dot_general, static_argnums=(2,))(
+        q_lhs, q_rhs, dnums
+    )
+    self.assertLessEqual(rel_mae(slow_res, fp_res), 0.13)
+    self.assertLessEqual(rel_mae(slow_res, res), 0.003)
+
+  def test_get_min_tile_size_to_dequant_on_output_live_tpu(self):
+    if jax.devices()[0].platform != 'tpu':
+      self.skipTest('Only run on TPU.')
+    expected_by_kind = {
+        'TPU v5 lite': 128,
+        'TPU v5p': 128,
+        'TPU v6 lite': 256,
+        'TPU v6e': 256,
+        'TPU7': 512,
+        'TPU7x': 512,
+        'TPU8i': 256,
+        'TPU8t': 256,
+    }
+    device_kind = jax.devices()[0].device_kind.split('\n', 1)[0]
+    self.assertIn(device_kind, expected_by_kind)
+    expected_threshold = expected_by_kind[device_kind]
+    self.assertEqual(
+        dot_general.get_min_tile_size_to_dequant_on_output(),
+        expected_threshold,
+    )
+
+    k = 1024
+    dnums = (([1], [0]), ([], []))
+    for tile_size in (128, 256, 512):
+      num_tiles = k // tile_size
+      lhs = qarray.QArray(
+          jnp.ones((16, k), jnp.int8),
+          jnp.ones((16, num_tiles), jnp.bfloat16),
+      )
+      rhs = qarray.QArray(
+          jnp.ones((k, 16), jnp.int4),
+          jnp.ones((num_tiles, 16), jnp.bfloat16),
+      )
+      with (
+          mock.patch.object(
+              dot_general,
+              '_fast_dot_general',
+              wraps=dot_general._fast_dot_general,
+          ) as mock_fast,
+          mock.patch.object(
+              dot_general,
+              '_slow_dot_general',
+              wraps=dot_general._slow_dot_general,
+          ) as mock_slow,
+      ):
+        res = dot_general.dot_general(lhs, rhs, dnums)
+        self.assertEqual(res.shape, (16, 16))
+        if tile_size >= expected_threshold:
+          mock_fast.assert_called_once()
+          mock_slow.assert_not_called()
+        else:
+          mock_slow.assert_called_once()
+          mock_fast.assert_not_called()
 
 
 if __name__ == '__main__':
