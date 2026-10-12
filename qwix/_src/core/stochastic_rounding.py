@@ -13,7 +13,7 @@
 # limitations under the License.
 """Stochastic rounding utilities."""
 
-from typing import Callable, Sequence
+from typing import Sequence
 import flax.struct
 import jax
 import jax.numpy as jnp
@@ -106,7 +106,7 @@ def get_noise_fn(
     method: str,
     key: jax.Array,
     channelwise_noise_axes: Sequence[int] = (0,),
-) -> Callable[[tuple[int, ...]], jax.Array]:
+) -> NoiseFn:
   """Returns a noise function for stochastic rounding.
 
   Args:

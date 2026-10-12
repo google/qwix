@@ -38,7 +38,7 @@ class SparsityModule(nnx.Module):
   """
 
   step: nnx.BatchStat
-  mask: nnx.BatchStat
+  mask: nnx.BatchStat | None
 
   def __init__(
       self,
@@ -58,6 +58,7 @@ class SparsityModule(nnx.Module):
       step: jax.Array,
   ) -> jax.Array:
     """Updates the sparsity mask based on the current step and config."""
+    assert self.mask is not None
     mask_val = self.mask.value
     if mask_val.shape != weight.shape:
       mask_val = mask_val[tuple(slice(0, s) for s in weight.shape)]
@@ -121,7 +122,7 @@ class SparsityModule(nnx.Module):
       )
     if self.sparsity_rule.weight_sparsity_m != 0:
       if self.mask is None:
-        self.mask = nnx.BatchStat(jnp.ones(weight.shape, jnp.bool_))  # pyrefly: ignore
+        self.mask = nnx.BatchStat(jnp.ones(weight.shape, jnp.bool_))
 
       # Only update if not in eval mode
       if not self.sparsity_rule.eval_mode:

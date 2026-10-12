@@ -99,7 +99,7 @@ def quantize_params(
       # The param might not be in the shape needed for compute, in case the
       # module reshapes before compute. Abstract param has the compute shape.
       param = param.reshape(abs_param.shape)
-      param = abs_param.replace(  # pyrefly: ignore[missing-attribute]
+      param = abs_param.replace(
           array=_qarray_module.quantize(param, abs_param.how)
       )
     quantized_params[path] = param
@@ -126,7 +126,7 @@ def quantize_params(
     scale, zero_point = _qarray_module.compute_scale_zero_point(
         calibration, act_qtype
     )
-    quantized_params[scale_path] = abs_scale.replace(array=scale)  # pyrefly: ignore[missing-attribute]
+    quantized_params[scale_path] = abs_scale.replace(array=scale)
     if zero_point is not None:
       quantized_params[(*path[:-1], path[-1] + '_zero_point')] = zero_point
 

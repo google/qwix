@@ -325,6 +325,43 @@ class FlaxUtilTest(parameterized.TestCase):
 
     nnx.jit(MyModule())()
 
+  def test_get_value_from_path(self):
+    class Dummy:
+
+      def __init__(self):
+        self.child = 42
+
+    data = {
+        "a": {
+            "b": [10, 20, 30],
+            "c": Dummy(),
+        },
+        "nnx_list": nnx.List([100, 200]),
+    }
+
+    # Dict and list indexing
+    self.assertEqual(flax_util.get_value_from_path(data, ("a", "b", 1)), 20)
+    # Attribute access
+    self.assertEqual(
+        flax_util.get_value_from_path(data, ("a", "c", "child")), 42
+    )
+    # nnx.List indexing
+    self.assertEqual(flax_util.get_value_from_path(data, ("nnx_list", 0)), 100)
+    # Out-of-bounds list index
+    self.assertIsNone(flax_util.get_value_from_path(data, ("a", "b", 5)))
+    self.assertIsNone(flax_util.get_value_from_path(data, ("a", "b", -1)))
+    # Missing key / attribute
+    self.assertIsNone(flax_util.get_value_from_path(data, ("a", "nonexistent")))
+    self.assertIsNone(
+        flax_util.get_value_from_path(data, ("a", "c", "nonexistent"))
+    )
+    # None obj
+    self.assertIsNone(flax_util.get_value_from_path(None, ("a", "b")))
+    # Non-string key on custom object or non-indexable primitive
+    self.assertIsNone(flax_util.get_value_from_path(Dummy(), (0,)))
+    self.assertIsNone(flax_util.get_value_from_path(12345, (0,)))
+    self.assertIsNone(flax_util.get_value_from_path(data, ("a", "c", 0)))
+
 
 if __name__ == "__main__":
   absltest.main()

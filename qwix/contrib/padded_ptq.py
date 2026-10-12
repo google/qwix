@@ -122,14 +122,14 @@ def quantize(array: jax.Array, how: HowToQuantize) -> PaddedQArray:
   original_shape = array.shape
   array = pad_to_shape(array, get_padded_shape(array.shape, how.tiled_axes))
   padded_shape = array.shape
-  array = qarray.quantize(array, how)  # pyrefly: ignore[bad-assignment]
+  q_array = qarray.quantize(array, how)
   if not QARRAY_KEEP_PADDED_SHAPE:
-    array = dataclasses.replace(  # pyrefly: ignore[bad-specialization]
-        array,
-        qvalue=array.qvalue[tuple(slice(0, dim) for dim in original_shape)],  # pyrefly: ignore[missing-attribute]
+    q_array = dataclasses.replace(
+        q_array,
+        qvalue=q_array.qvalue[tuple(slice(0, dim) for dim in original_shape)],
     )
   return PaddedQArray(
-      **dataclasses.asdict(array),  # pyrefly: ignore[bad-argument-type]
+      **{f.name: getattr(q_array, f.name) for f in dataclasses.fields(q_array)},
       padded_shape=padded_shape,
       original_shape=original_shape,
   )
@@ -191,16 +191,18 @@ def dot_general(
   (lhs_contract, rhs_contract), _ = dimension_numbers
 
   if not isinstance(rhs, PaddedQArray):
+    assert isinstance(rhs, jax.Array)
     target_shape = list(rhs.shape)
     for rhs_axis, lhs_axis in zip(rhs_contract, lhs_contract):
       target_shape[rhs_axis] = lhs.shape[lhs_axis]
-    rhs = pad_to_shape(rhs, tuple(target_shape))  # pyrefly: ignore[bad-argument-type]
+    rhs = pad_to_shape(rhs, tuple(target_shape))
 
   if not isinstance(lhs, PaddedQArray):
+    assert isinstance(lhs, jax.Array)
     target_shape = list(lhs.shape)
     for lhs_axis, rhs_axis in zip(lhs_contract, rhs_contract):
       target_shape[lhs_axis] = rhs.shape[rhs_axis]
-    lhs = pad_to_shape(lhs, tuple(target_shape))  # pyrefly: ignore[bad-argument-type]
+    lhs = pad_to_shape(lhs, tuple(target_shape))
 
   return core_dot_general.dot_general(
       lhs,
@@ -246,20 +248,22 @@ def einsum(
       einsum_str, ndims=(lhs.ndim, rhs.ndim)
   )
   if not isinstance(rhs, PaddedQArray):
+    assert isinstance(rhs, jax.Array)
     target_shape = list(rhs.shape)
     for axis, name in enumerate(info.rhs):
       if name in info.contract_chars:
         lhs_axis = info.lhs.index(name)
         target_shape[axis] = lhs.shape[lhs_axis]
-    rhs = pad_to_shape(rhs, tuple(target_shape))  # pyrefly: ignore[bad-argument-type]
+    rhs = pad_to_shape(rhs, tuple(target_shape))
 
   if not isinstance(lhs, PaddedQArray):
+    assert isinstance(lhs, jax.Array)
     target_shape = list(lhs.shape)
     for axis, name in enumerate(info.lhs):
       if name in info.contract_chars:
         rhs_axis = info.rhs.index(name)
         target_shape[axis] = rhs.shape[rhs_axis]
-    lhs = pad_to_shape(lhs, tuple(target_shape))  # pyrefly: ignore[bad-argument-type]
+    lhs = pad_to_shape(lhs, tuple(target_shape))
 
   return core_einsum.einsum(
       einsum_str,
@@ -274,11 +278,11 @@ def quantize_act(
     array: jax.Array,
     how: HowToQuantize,
     rule,
-    act_name: str | None,
+    act_name: str | None = None,
 ):
   """Wrapper to reuse PTQ.quantize_act with this module as qarray backend."""
   return _boxed_param.quantize_act(
-      array, how, rule, act_name, _qarray_module=sys.modules[__name__]  # pyrefly: ignore[bad-argument-type]
+      array, how, rule, act_name, _qarray_module=sys.modules[__name__]
   )
 
 

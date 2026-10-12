@@ -256,6 +256,57 @@ class PaddedPtqTest(parameterized.TestCase):
 
     assert jnp.allclose(result_pad, result_ptq, atol=1e-3)
 
+  def test_dot_general_lhs_padded_qarray_rhs_array(self):
+    tile_size = 32
+    x = jax.random.normal(jax.random.key(0), (T, D), dtype=jnp.float32)
+    w = jax.random.normal(jax.random.key(1), (E, D, F), dtype=jnp.float32)
+
+    rule = qconfig.QuantizationRule(
+        module_path='.*',
+        weight_qtype='float4_e2m1fn',
+        act_qtype=None,
+        tile_size=tile_size,
+    )
+
+    dimension_numbers = (([1], [1]), ([], []))
+    how = core_dot.get_how_to_quantize(
+        dimension_numbers=dimension_numbers,
+        ndims=(3, 2),
+        for_lhs=True,
+        qtype=rule.weight_qtype,
+        tile_size=tile_size,
+        calibration_method='absmax',
+    )
+
+    w_qarray_pad = padded_ptq.quantize_act(w, how, rule, None)
+    result = padded_ptq.dot_general(w_qarray_pad, x, dimension_numbers)
+    self.assertEqual(result.shape, (E, F, T))
+
+  def test_einsum_lhs_padded_qarray_rhs_array(self):
+    tile_size = 32
+    x = jax.random.normal(jax.random.key(0), (T, D), dtype=jnp.float32)
+    w = jax.random.normal(jax.random.key(1), (E, D, F), dtype=jnp.float32)
+
+    rule = qconfig.QuantizationRule(
+        module_path='.*',
+        weight_qtype='float4_e2m1fn',
+        act_qtype=None,
+        tile_size=tile_size,
+    )
+
+    how = core_einsum.get_how_to_quantize(
+        einsum_str='edf,td->tef',
+        ndims=(3, 2),
+        for_lhs=True,
+        qtype=rule.weight_qtype,
+        tile_size=tile_size,
+        calibration_method='absmax',
+    )
+
+    w_qarray_pad = padded_ptq.quantize_act(w, how, rule, None)
+    result = padded_ptq.einsum('edf,td->tef', w_qarray_pad, x)
+    self.assertEqual(result.shape, (T, E, F))
+
 
 if __name__ == '__main__':
   absltest.main()

@@ -27,8 +27,8 @@ class RaggedDotQtConfig:
   """Configuration for ragged_dot_qt."""
 
   # Forward pass settings
-  lhs_qtype: jax.typing.DTypeLike
-  rhs_qtype: jax.typing.DTypeLike
+  lhs_qtype: jax.typing.DTypeLike | None = None
+  rhs_qtype: jax.typing.DTypeLike | None = None
 
   # Backward pass settings
   dlhs_grad_qtype: jax.typing.DTypeLike | None = None
@@ -47,12 +47,16 @@ def ragged_dot_qt_fwd(
 ):
   """Forward pass for ragged_dot_qt custom VJP."""
   # lhs shape [M, K]: contracting axis=1, channelwise axis=0
-  lhs_how = qarray.HowToQuantize(qtype=config.lhs_qtype, channelwise_axes=[0])
-  qlhs = qarray.quantize(lhs, lhs_how)
+  qlhs: qarray.MaybeQArray = lhs
+  if config.lhs_qtype is not None:
+    lhs_how = qarray.HowToQuantize(qtype=config.lhs_qtype, channelwise_axes=[0])
+    qlhs = qarray.quantize(lhs, lhs_how)
 
   # rhs shape [G, K, N]: contracting axis=1, channelwise axes=2
-  rhs_how = qarray.HowToQuantize(qtype=config.rhs_qtype, channelwise_axes=[2])
-  qrhs = qarray.quantize(rhs, rhs_how)
+  qrhs: qarray.MaybeQArray = rhs
+  if config.rhs_qtype is not None:
+    rhs_how = qarray.HowToQuantize(qtype=config.rhs_qtype, channelwise_axes=[2])
+    qrhs = qarray.quantize(rhs, rhs_how)
   primal_out = ragged_dot.ragged_dot(
       qlhs, qrhs, group_sizes, precision, preferred_element_type, group_offset
   )
@@ -87,9 +91,11 @@ def ragged_dot_qt_bwd(
         qtype=config.dlhs_grad_qtype,
         channelwise_axes=[0],  # [M, N]
     )
-    g_for_dlhs = qarray.quantize(g_for_dlhs, g_how)
+    qg_for_dlhs: qarray.MaybeQArray = qarray.quantize(g_for_dlhs, g_how)
+  else:
+    qg_for_dlhs = g_for_dlhs
   dlhs = ragged_dot.ragged_dot(
-      g_for_dlhs,
+      qg_for_dlhs,
       rhs,
       group_sizes,
       precision=precision,
@@ -114,10 +120,12 @@ def ragged_dot_qt_bwd(
         qtype=config.drhs_grad_qtype,
         channelwise_axes=[1],  # [M, N]
     )
-    g_for_drhs = qarray.quantize(g_for_drhs, g_how)
+    qg_for_drhs: qarray.MaybeQArray = qarray.quantize(g_for_drhs, g_how)
+  else:
+    qg_for_drhs = g_for_drhs
   drhs = ragged_dot.ragged_dot_general(
       lhs,
-      g_for_drhs,
+      qg_for_drhs,
       group_sizes,
       dimension_numbers=drhs_dnums,
       precision=precision,

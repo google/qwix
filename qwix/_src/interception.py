@@ -107,7 +107,7 @@ def _preprocess_interceptor(
       new_path = target_path + "._fun"
       interceptor_mapping[new_path] = interceptor_mapping.pop(target_path)
       target_path = new_path
-      function_to_modify = function_to_modify._fun  # pylint: disable=protected-access  # pyrefly: ignore[missing-attribute]
+      function_to_modify = getattr(function_to_modify, "_fun")
 
     # 2. Rewrite `Function` to its code object for bytecode patching.
     if (
@@ -169,7 +169,7 @@ def wrap_func_intercepted(
     interception_manager.activate_interceptor(interceptor)
     context_manager = (
         jax.disable_jit()
-        if (not jax.config.jax_disable_jit and disable_jit)  # pyrefly: ignore[missing-attribute]
+        if (not getattr(jax.config, "jax_disable_jit") and disable_jit)
         else contextlib.nullcontext()
     )
     try:
@@ -323,7 +323,7 @@ class _InterceptionManager:
     )
     if attr == "__code__":  # special handling for code objects.
       # Check if we accidentally register different aliases for the same object.
-      if aux_data.get(obj.__code__, "fn", None) is not None:  # pytype: disable=attribute-error
+      if aux_data.get(obj.__code__, "fn", None) is not None:
         raise ValueError(f"Intercept aliases for the same object: {name}.")
       # _copy_fn is needed because obj will be modified below.
       self._original_fns[name] = _copy_fn(obj)
@@ -425,7 +425,9 @@ def _fn_to_code(fn: Function) -> types.CodeType:
     import inspect  # pylint: disable=g-import-not-at-top,redefined-outer-name,reimported
     from qwix._src import aux_data  # pylint: disable=g-import-not-at-top,redefined-outer-name,reimported
 
-    fn = aux_data.get(inspect.currentframe().f_code, "fn")  # pytype: disable=attribute-error # pyrefly: ignore
+    frame = inspect.currentframe()
+    assert frame is not None
+    fn = aux_data.get(frame.f_code, "fn")
     return fn(*args, **kwargs)
 
   code = wrapper.__code__.replace()  # this creates a new code object

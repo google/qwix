@@ -200,7 +200,7 @@ _LINEAR_ARITHMETIC_PRIMITIVES = {
 }
 
 
-GetRuleAndOpIdFn = Callable[[str], tuple[qconfig.QuantizationRule, str]]
+GetRuleAndOpIdFn = Callable[[str], tuple[qconfig.QuantizationRule | None, str]]
 FakeQuantFn = Callable[[jax.Array, qarray.HowToQuantize, str | None], jax.Array]
 
 
@@ -305,10 +305,10 @@ class QuantizedOp:
   def _call_original_op(self, *args, **kwargs) -> Any:
     """Get the original function from op_full_name."""
     name_parts = self._op_full_name.split('.')
-    obj = sys.modules[name_parts[0]]
+    obj: Any = sys.modules[name_parts[0]]
     for attr in name_parts[1:]:
       obj = getattr(obj, attr)
-    return obj(*args, **kwargs)  # pyrefly: ignore[not-callable]
+    return obj(*args, **kwargs)
 
   def _fake_quant_inputs(
       self,
@@ -367,6 +367,7 @@ class QuantizedOp:
     # rule.weight_qtype means this op will use rule.weight_qtype as weights.
     if aux_data.get(array, AuxDataKey.WEIGHT_NAME, None) is not None:
       if rule and rule.weight_qtype:
+        assert rule.act_calibration_method is not None
         # If there is a rule for weights, quantize the weights.
         how = qarray.HowToQuantize(
             qtype=rule.weight_qtype,
@@ -374,7 +375,7 @@ class QuantizedOp:
             tiled_axes={},
             # Use act_calibration_method because it is more like an activation,
             # i.e., asymmetric rather than symmetric.
-            calibration_method=rule.act_calibration_method,  # pyrefly: ignore[bad-argument-type]
+            calibration_method=rule.act_calibration_method,
         )
         fq_array = self._fake_quant_fn(array, how, None)
         aux_data.set(array, AuxDataKey.FQ_ARRAY, fq_array)
@@ -425,13 +426,14 @@ class QuantizedOp:
       # _fake_quant_fn directly.
       return array
 
+    assert effective_rule.act_calibration_method is not None
     how = qarray.HowToQuantize(
         qtype=effective_rule.act_qtype,
         tiled_axes={},
         # Use per-channel scales for batch axes, which will be reduced later
         # in _update_and_get_quant_stat.
         channelwise_axes=effective_rule.act_batch_axes,
-        calibration_method=effective_rule.act_calibration_method,  # pyrefly: ignore[bad-argument-type]
+        calibration_method=effective_rule.act_calibration_method,
     )
 
     fq_array = self._fake_quant_fn(array, how, quant_stat_name)
@@ -682,7 +684,7 @@ class PrimitiveBindOp(QuantizedOp):
   def __init__(self, **kwargs):
     super().__init__(
         op_full_name=interception.PRIMITIVE_BIND_KEY,
-        get_rule_and_op_id_fn=lambda x: (None, ''),  # pyrefly: ignore[bad-argument-type]
+        get_rule_and_op_id_fn=lambda x: (None, ''),
         fake_quant_fn=lambda x, y, z: x,
         **kwargs,
     )
@@ -936,10 +938,11 @@ class DotEinsumConv(QuantizedOp):
         lhs_is_activation and rhs_is_weight  # DRQ only supports act x weight.
     ):
       # Handle DRQ, which allows per-channel quantization for activations.
+      assert rule.act_calibration_method is not None
       lhs_how = self._get_how_to_quantize(
           for_lhs=True,
           qtype=rule.act_qtype,
-          calibration_method=rule.act_calibration_method,  # pyrefly: ignore[bad-argument-type]
+          calibration_method=rule.act_calibration_method,
           args=args,
           kwargs=kwargs,
       )
