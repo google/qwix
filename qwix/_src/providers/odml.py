@@ -15,6 +15,7 @@
 
 import dataclasses
 import functools
+import math
 from typing import Any, Callable, Sequence, Type
 
 import flax
@@ -161,6 +162,16 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
     aux_data.clear(weight)
     # weight_name is used to distinguish weights from activations.
     aux_data.set(weight, odml_ops.AuxDataKey.WEIGHT_NAME, name)
+    # Record where the parameter actually lives, taken from the module that
+    # owns it rather than from whichever module happens to be current when the
+    # consuming op is intercepted. The two differ whenever a layer delegates
+    # its arithmetic to a child module (Praxis routes every matmul through a
+    # child `EinsumOp`, for example).
+    aux_data.set(
+        weight,
+        odml_ops.AuxDataKey.WEIGHT_PATH,
+        tuple(module.path) + (name,),
+    )
     # This identifies the direct parameter API result, before any intercepted
     # model transform. Consumers must separately verify that a conversion-time
     # static parameter has a compatible shape and layout.
@@ -246,6 +257,10 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
           aux_data.clear(weight)
           # weight_name is used to distinguish weights from activations.
           aux_data.set(weight, odml_ops.AuxDataKey.WEIGHT_NAME, path[-1])
+          # The full path is already known here, so record it directly. See the
+          # Linen counterpart in `nn_param` for why the name alone is not
+          # enough to locate the weight at conversion time.
+          aux_data.set(weight, odml_ops.AuxDataKey.WEIGHT_PATH, tuple(path))
           # This is the direct parameter state before the model executes any
           # intercepted transforms. Static tree compatibility remains a
           # separate conversion-time check.
@@ -357,6 +372,52 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
     return aggregator.get_calibration(quant_stat.value, calibration)
 
 
+def _rerank_per_tensor_scale(
+    scale: jax.Array,
+    zp: jax.Array | None,
+    ndim: int,
+    quant_stat_name: str,
+) -> tuple[jax.Array, jax.Array | None]:
+  """Reshapes a per-tensor activation scale to the rank of its tensor.
+
+  `_update_and_get_quant_stat` reduces every static-range activation
+  calibration to a single element via `x.mean(keepdims=True)`, so the stored
+  statistic carries the rank the tensor happened to have during QAT. The
+  downstream element-wise divide in `qarray.quantize_with_scale_zero_point`
+  goes through `qarray.call_with_generic_broadcast`, which asserts equal ranks
+  rather than relying on numpy broadcasting.
+
+  Those two ranks are not always the same. A model is calibrated on training
+  batches but converted against whatever shapes the serving signature declares,
+  and an exported signature may legitimately carry an extra leading axis (a
+  sampling or classifier-free-guidance dimension, say) or have one fewer.
+  Because the statistic is per-tensor, the rank it was recorded at carries no
+  information, so re-ranking it is a pure no-op numerically.
+
+  Args:
+    scale: The statically computed scale.
+    zp: The statically computed zero point, if the quantization is asymmetric.
+    ndim: The rank of the tensor about to be quantized.
+    quant_stat_name: Name of the statistic, used only for error reporting.
+
+  Returns:
+    The scale and zero point, reshaped to `(1,) * ndim`.
+  """
+  if scale.ndim == ndim:
+    return scale, zp
+  if scale.size != 1:
+    raise ValueError(
+        f'Static-range activation scale for {quant_stat_name!r} has shape '
+        f'{scale.shape} but the tensor being quantized has rank {ndim}. Only '
+        'per-tensor activation scales can be re-ranked, so this mismatch '
+        'cannot be resolved automatically. It usually means the quant_stats '
+        'were gathered for a differently shaped model than the one being '
+        'converted.'
+    )
+  new_shape = (1,) * ndim
+  return scale.reshape(new_shape), None if zp is None else zp.reshape(new_shape)
+
+
 class OdmlConversionProvider(OdmlQatProvider):
   """Quantization provider for ODML conversion.
 
@@ -410,6 +471,27 @@ class OdmlConversionProvider(OdmlQatProvider):
         )
       self._flatten_params[path] = param
     self._quant_stats = quant_stats
+
+  def _static_weight_path(
+      self, array: jax.Array, weight_name: str
+  ) -> tuple[str, ...]:
+    """Returns the key of a runtime weight in the static parameter tree.
+
+    Args:
+      array: The runtime weight array, carrying the aux data attached when the
+        parameter was read.
+      weight_name: The weight's leaf name, used only by the fallback.
+
+    Returns:
+      The path into the flattened parameter tree.
+    """
+    path = aux_data.get(array, odml_ops.AuxDataKey.WEIGHT_PATH, None)
+    if path is not None:
+      return tuple(path)
+    # Fall back to assuming the op was intercepted inside the module that owns
+    # the weight. That holds for models whose layers do their own arithmetic,
+    # and is the only option for arrays tagged with WEIGHT_NAME by hand.
+    return flax_util.get_current_module_path() + (weight_name,)
 
   def get_intercept_map(self):
     intercept_map = super().get_intercept_map()
@@ -611,8 +693,9 @@ class OdmlConversionProvider(OdmlQatProvider):
     # local parameter API read. Lifted transforms such as nn.vmap can still add
     # axes to the stored parameter tree, so independently require the static
     # calibration source to match this runtime RHS before recording a replay.
-    mdl_path = flax_util.get_current_module_path()
-    static_weight = self._flatten_params.get(mdl_path + (weight_name,))
+    static_weight = self._flatten_params.get(
+        self._static_weight_path(rhs, weight_name)
+    )
     if static_weight is None:
       return _einsum(*args, **kwargs)
     static_weight = flax_util.unbox(static_weight)
@@ -641,8 +724,15 @@ class OdmlConversionProvider(OdmlQatProvider):
       weight_name = aux_data.get(array, odml_ops.AuxDataKey.WEIGHT_NAME, None)
       if weight_name is not None:  # Weights.
         assert quant_stat_name is None
-        mdl_path = flax_util.get_current_module_path()
-        weight = self._flatten_params[mdl_path + (weight_name,)]
+        weight_path = self._static_weight_path(array, weight_name)
+        if weight_path not in self._flatten_params:
+          raise KeyError(
+              f'Weight {"/".join(weight_path)!r} was read during conversion '
+              'but is absent from the static parameter tree. The tree passed '
+              'to OdmlConversionProvider must be rooted at the same module '
+              '`apply` is called on.'
+          )
+        weight = self._flatten_params[weight_path]
         # _flatten_einsum path: replay the RHS transpose+reshape on the
         # stored parameter so calibration uses the same tensor layout.
         flattened_rhs_perm = aux_data.get(
@@ -659,11 +749,22 @@ class OdmlConversionProvider(OdmlQatProvider):
               jax.lax.transpose(weight, flattened_rhs_perm), array.shape
           )
         elif weight.shape != array.shape:  # when _flatten_dot_general is used.
+          if weight.size != math.prod(array.shape):
+            raise ValueError(
+                f'Static weight {"/".join(weight_path)!r} has shape '
+                f'{weight.shape} but the runtime array it should calibrate '
+                f'has shape {array.shape}. The parameter tree passed to '
+                'OdmlConversionProvider does not describe the model being '
+                'converted.'
+            )
           weight = weight.reshape(array.shape)
         calibration = qarray.calibrate(weight, how)
         scale, zp = qarray.compute_scale_zero_point(calibration, how.qtype)
       elif quant_stat_name is not None:  # Static-range activations.
         scale, zp = self._compute_static_scale_zero_point(how, quant_stat_name)
+        scale, zp = _rerank_per_tensor_scale(
+            scale, zp, array.ndim, quant_stat_name
+        )
       else:  # Dynamic-range activations.
         scale, zp = None, None
 
