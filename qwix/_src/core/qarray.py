@@ -853,5 +853,10 @@ def get_accumulator_and_result_type(
   accumulator_type = result_type
   if all('int' in t.name for t in qvalue_dtypes):
     accumulator_type = jnp.int32
+  elif jnp.dtype(accumulator_type) == jnp.float16:
+    # Callers apply the scales after the dot, so the unscaled product can be
+    # much larger than the result (by 1 / scale) and overflow f16's small range
+    # (max 65504). Accumulate in f32 instead; the result type is unchanged.
+    accumulator_type = jnp.float32
 
   return accumulator_type, result_type

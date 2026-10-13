@@ -376,6 +376,41 @@ class DotGeneralTest(parameterized.TestCase):
         mock_slow.assert_called_once()
         mock_fast.assert_not_called()
 
+  def test_fast_dot_general_f16_does_not_overflow(self):
+    # The fast path applies the scale after the dot. The unscaled product
+    # x @ qvalue is ~1/scale times larger than the result and exceeds the f16
+    # range (65504) here, so it must not accumulate in f16.
+    k, n = 1024, 64
+    lhs = (jax.random.normal(jax.random.key(0), (16, k)) * 30).astype(
+        jnp.float16
+    )
+    w = jax.random.normal(jax.random.key(1), (k, n)) / k**0.5
+    q = qarray.quantize(
+        w,
+        qarray.HowToQuantize(
+            qtype=jnp.int8, channelwise_axes=(1,), tiled_axes={}
+        ),
+    )
+    q_rhs = qarray.QArray(
+        qvalue=q.qvalue, scale=q.scale.astype(jnp.float16), qtype=q.qtype
+    )
+    dimension_numbers = (((1,), (0,)), ((), ()))
+    ref = jnp.dot(
+        lhs.astype(jnp.float32),
+        q_rhs.qvalue.astype(jnp.float32) * q_rhs.scale.astype(jnp.float32),
+    )
+    self.assertGreater(float(jnp.max(jnp.abs(ref / q_rhs.scale))), 65504)
+
+    out = jax.jit(dot_general._fast_dot_general, static_argnums=2)(
+        lhs, q_rhs, dimension_numbers
+    )
+    self.assertEqual(out.dtype, jnp.float16)
+    self.assertTrue(bool(jnp.all(jnp.isfinite(out))))
+    rel_err = jnp.mean(jnp.abs(out.astype(jnp.float32) - ref)) / jnp.mean(
+        jnp.abs(ref)
+    )
+    self.assertLess(float(rel_err), 1e-2)
+
 
 if __name__ == '__main__':
   absltest.main()

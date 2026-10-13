@@ -695,6 +695,51 @@ class QArrayTest(parameterized.TestCase):
         sqnr, 15.0, f'mxint4 SQNR {sqnr:.2f} dB is below expected 15 dB'
     )
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='bf16_x_int8_bf16_scale',
+          lhs_dtype=jnp.bfloat16,
+          scale_dtype=jnp.bfloat16,
+          preferred_element_type=None,
+          expected=(jnp.bfloat16, jnp.bfloat16),
+      ),
+      dict(
+          testcase_name='f16_x_int8_f16_scale',
+          lhs_dtype=jnp.float16,
+          scale_dtype=jnp.float16,
+          preferred_element_type=None,
+          expected=(jnp.float32, jnp.float16),
+      ),
+      dict(
+          testcase_name='preferred_f16',
+          lhs_dtype=jnp.bfloat16,
+          scale_dtype=jnp.bfloat16,
+          preferred_element_type=jnp.float16,
+          expected=(jnp.float32, jnp.float16),
+      ),
+      dict(
+          testcase_name='int8_x_int8',
+          lhs_dtype=jnp.int8,
+          scale_dtype=jnp.float16,
+          preferred_element_type=None,
+          expected=(jnp.int32, jnp.float16),
+      ),
+  )
+  def test_get_accumulator_and_result_type(
+      self, lhs_dtype, scale_dtype, preferred_element_type, expected
+  ):
+    lhs = jnp.ones((4, 8), lhs_dtype)
+    rhs = qarray.QArray(
+        qvalue=jnp.ones((8, 4), jnp.int8),
+        scale=jnp.ones((1, 4), scale_dtype),
+        qtype=jnp.int8,
+    )
+    accumulator_type, result_type = qarray.get_accumulator_and_result_type(
+        lhs, rhs, preferred_element_type=preferred_element_type
+    )
+    self.assertEqual(jnp.dtype(accumulator_type), jnp.dtype(expected[0]))
+    self.assertEqual(jnp.dtype(result_type), jnp.dtype(expected[1]))
+
 
 if __name__ == '__main__':
   absltest.main()
