@@ -34,20 +34,24 @@ _HLO_INSTRUCTION = re.compile(
     r'^\s*(?:ROOT )?%([\w.-]+) = (\w+)\[([\d,]*)\]\S* ([\w-]+)\(([^)]*)\)(.*)$'
 )
 _INT_DTYPES = ('s4', 's8', 'u4', 'u8')
+_FLOAT_DTYPES = ('bf16', 'f16', 'f32')
 
 
-def matmul_weight_feed(hlo: str, weight_shape: tuple[int, ...]) -> str:
-  """Returns how an integer weight of `weight_shape` reaches the matmul.
+def parse_hlo(
+    hlo: str,
+) -> tuple[
+    dict[str, tuple[str, str, str, list[str], str | None]],
+    dict[str, list[str]],
+]:
+  """Parses the instructions and computations of an HLO text.
 
   Args:
     hlo: The compiled (optimized) HLO text.
-    weight_shape: The shape of the weight operand of the matmul.
 
   Returns:
-    'int' if the matmul consumes the integer weight directly (XLA upcasts it
-    inside the matmul), 'convert' if the weight is only converted (and possibly
-    bitcast or copied) from an integer array before the matmul, or 'other' if
-    other ops are applied to it, e.g. multiplying it by the scale.
+    A tuple of instructions, a dict from instruction name to (dtype, shape, op,
+    operand names, called computation name), and computations, a dict from
+    computation name to the names of its instructions.
   """
   instructions = {}  # name -> (dtype, shape, op, operands, calls)
   computations = {}  # name -> [instruction names]
@@ -66,15 +70,36 @@ def matmul_weight_feed(hlo: str, weight_shape: tuple[int, ...]) -> str:
           calls and calls.group(1),
       )
       computation.append(name)
+  return instructions, computations
 
-  shape = ','.join(map(str, weight_shape))
+
+def _is_permutation_of(shape: str, dims: tuple[int, ...]) -> bool:
+  """Returns whether the HLO shape string has the given dims in any order."""
+  return sorted(int(d) for d in shape.split(',') if d) == sorted(dims)
+
+
+def matmul_weight_feed(hlo: str, weight_shape: tuple[int, ...]) -> str:
+  """Returns how an integer weight of `weight_shape` reaches the matmul.
+
+  Args:
+    hlo: The compiled (optimized) HLO text.
+    weight_shape: The shape of the weight operand of the matmul. The matmul may
+      consume it with its axes in any order, e.g. after relayouting batch axes.
+
+  Returns:
+    'int' if the matmul consumes the integer weight directly (XLA upcasts it
+    inside the matmul), 'convert' if the weight is only converted (and possibly
+    bitcast or copied) from an integer array before the matmul, or 'other' if
+    other ops are applied to it, e.g. multiplying it by the scale.
+  """
+  instructions, computations = parse_hlo(hlo)
   feeds = set()
   for _, _, op, operands, _ in instructions.values():
     if op not in ('convolution', 'dot'):
       continue
     for operand in operands:
       w_dtype, w_shape, w_op, _, w_calls = instructions[operand]
-      if w_shape != shape:
+      if not _is_permutation_of(w_shape, weight_shape):
         continue
       if w_dtype in _INT_DTYPES:
         feeds.add('int')
@@ -94,6 +119,31 @@ def matmul_weight_feed(hlo: str, weight_shape: tuple[int, ...]) -> str:
   if len(feeds) != 1:
     raise ValueError(f'Expected one matmul weight feed, got {feeds}.')
   return feeds.pop()
+
+
+def dequantized_copies(hlo: str, shape: tuple[int, ...]) -> list[str]:
+  """Returns the floating-point `multiply` instructions with `shape`.
+
+  Dequantizing a QArray multiplies its (converted) qvalue by the scale, so a
+  float multiply whose shape has the same dims as the QArray in any order is a
+  dequantized copy of it, whether XLA fuses it into the matmul or materializes
+  it.
+
+  Args:
+    hlo: The compiled (optimized) HLO text.
+    shape: The shape of the QArray.
+
+  Returns:
+    The names of the matching instructions.
+  """
+  instructions, _ = parse_hlo(hlo)
+  return [
+      name
+      for name, (dtype, i_shape, op, _, _) in instructions.items()
+      if op == 'multiply'
+      and dtype in _FLOAT_DTYPES
+      and _is_permutation_of(i_shape, shape)
+  ]
 
 
 class DotGeneralTest(parameterized.TestCase):
@@ -409,6 +459,94 @@ class DotGeneralTest(parameterized.TestCase):
     self.assertIn(weight_feed(dot_general.dot_general), ('int', 'convert'))
     # Sanity check: the slow path multiplies the weight by the scale first.
     self.assertEqual(weight_feed(dot_general._slow_dot_general), 'other')
+
+  @parameterized.named_parameters(
+      dict(testcase_name='int8', qtype=jnp.int8),
+      dict(testcase_name='int4', qtype=jnp.int4),
+  )
+  def test_unquantized_x_contracting_channelwise_folds_scale(self, qtype):
+    """Checks that the fold path never dequantizes the QArray in XLA."""
+    # Attention P[b,k,g,t,s] . V[b,s,k,d] at decode (t=1) with per-token,
+    # per-head scales [b,s,k,1], which vary along the contracting axis s.
+    b, s, k, g, d = 32, 2048, 8, 4, 128
+    p = jax.nn.softmax(self._make_array((b, k, g, 1, s)) * 30, axis=-1).astype(
+        jnp.bfloat16
+    )
+    v = self._make_array((b, s, k, d)).astype(jnp.bfloat16)
+    q_v = qarray.quantize(
+        v,
+        qarray.HowToQuantize(
+            qtype=qtype, channelwise_axes=(0, 1, 2), tiled_axes={}
+        ),
+    )
+    dimension_numbers = (((4,), (1,)), ((0, 1), (0, 2)))
+
+    with mock.patch.object(
+        dot_general,
+        '_fold_scale_dot_general',
+        wraps=dot_general._fold_scale_dot_general,
+    ) as mock_fold:
+      res = jax.jit(dot_general.dot_general, static_argnums=2)(
+          p, q_v, dimension_numbers
+      )
+    mock_fold.assert_called_once()
+    slow_res = jax.jit(dot_general._slow_dot_general, static_argnums=2)(
+        p, q_v, dimension_numbers
+    )
+    fp_res = jax.lax.dot_general(
+        p.astype(jnp.float32),
+        qarray.dequantize(q_v.astype(jnp.float32)),
+        dimension_numbers,
+        precision=jax.lax.Precision.HIGHEST,
+    )
+    slow_mae = rel_mae(slow_res, res)
+    fp_mae = rel_mae(fp_res, res.astype(jnp.float32))
+    logging.info('slow_mae=%s fp_mae=%s', slow_mae, fp_mae)
+    self.assertEqual(res.dtype, slow_res.dtype)
+    # The fold path rounds P * scale instead of each dequantized value of V,
+    # so it differs from the slow path by bf16 rounding only.
+    self.assertLessEqual(slow_mae, 0.006)
+    self.assertLessEqual(fp_mae, 0.006)
+
+    if jax.devices()[0].platform != 'tpu':
+      return  # The HLO checks below are TPU-specific.
+
+    def compile_fn(fn):
+      return (
+          jax.jit(fn, static_argnums=2)
+          .lower(p, q_v, dimension_numbers)
+          .compile()
+      )
+
+    compiled = compile_fn(dot_general.dot_general)
+    hlo = compiled.as_text()
+    slow_compiled = compile_fn(dot_general._slow_dot_general)
+    slow_hlo = slow_compiled.as_text()
+    # The matmul consumes the int values of V directly or via a plain convert,
+    # and no dequantized copy of V exists, fused or not: the scale went to P.
+    feed = matmul_weight_feed(hlo, (b, s, k, d))
+    self.assertIn(feed, ('int', 'convert'))
+    self.assertEmpty(dequantized_copies(hlo, (b, s, k, d)))
+    # Sanity check: the slow path dequantizes V before the matmul.
+    self.assertEqual(matmul_weight_feed(slow_hlo, (b, s, k, d)), 'other')
+    self.assertNotEmpty(dequantized_copies(slow_hlo, (b, s, k, d)))
+    # V in this layout is relayouted for the matmul. XLA fuses the relayout of
+    # the int values into the matmul but not the dequantization, so for KV
+    # caches of this size the slow path materializes the dequantized V in HBM
+    # (temp_size_in_bytes == bf16 size of V on TPU v5e/v6e/v7x), while the fold
+    # path needs no large temporary.
+    v_bf16_bytes = v.size * 2
+    temp_bytes = compiled.memory_analysis().temp_size_in_bytes
+    slow_temp_bytes = slow_compiled.memory_analysis().temp_size_in_bytes
+    logging.info(
+        'feed=%s temp_bytes=%s slow_temp_bytes=%s v_bf16_bytes=%s',
+        feed,
+        temp_bytes,
+        slow_temp_bytes,
+        v_bf16_bytes,
+    )
+    if feed == 'int':
+      self.assertLess(temp_bytes, v_bf16_bytes // 4)
 
 
 if __name__ == '__main__':
