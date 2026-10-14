@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
 from unittest import mock
+
 from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -25,6 +27,73 @@ from qwix._src.core import qarray
 def rel_mae(x, y):
   assert x.dtype == y.dtype and x.shape == y.shape
   return jnp.abs(x - y).mean() / jnp.abs(x).mean()
+
+
+_HLO_COMPUTATION = re.compile(r'^(?:ENTRY )?%([\w.-]+) .*\{$')
+_HLO_INSTRUCTION = re.compile(
+    r'^\s*(?:ROOT )?%([\w.-]+) = (\w+)\[([\d,]*)\]\S* ([\w-]+)\(([^)]*)\)(.*)$'
+)
+_INT_DTYPES = ('s4', 's8', 'u4', 'u8')
+
+
+def matmul_weight_feed(hlo: str, weight_shape: tuple[int, ...]) -> str:
+  """Returns how an integer weight of `weight_shape` reaches the matmul.
+
+  Args:
+    hlo: The compiled (optimized) HLO text.
+    weight_shape: The shape of the weight operand of the matmul.
+
+  Returns:
+    'int' if the matmul consumes the integer weight directly (XLA upcasts it
+    inside the matmul), 'convert' if the weight is only converted (and possibly
+    bitcast or copied) from an integer array before the matmul, or 'other' if
+    other ops are applied to it, e.g. multiplying it by the scale.
+  """
+  instructions = {}  # name -> (dtype, shape, op, operands, calls)
+  computations = {}  # name -> [instruction names]
+  computation = None
+  for line in hlo.splitlines():
+    if m := _HLO_COMPUTATION.match(line):
+      computation = computations.setdefault(m.group(1), [])
+    elif m := _HLO_INSTRUCTION.match(line):
+      name, dtype, shape, op, operands, rest = m.groups()
+      calls = re.search(r'calls=%([\w.-]+)', rest)
+      instructions[name] = (
+          dtype,
+          shape,
+          op,
+          re.findall(r'%([\w.-]+)', operands),
+          calls and calls.group(1),
+      )
+      computation.append(name)
+
+  shape = ','.join(map(str, weight_shape))
+  feeds = set()
+  for _, _, op, operands, _ in instructions.values():
+    if op not in ('convolution', 'dot'):
+      continue
+    for operand in operands:
+      w_dtype, w_shape, w_op, _, w_calls = instructions[operand]
+      if w_shape != shape:
+        continue
+      if w_dtype in _INT_DTYPES:
+        feeds.add('int')
+        continue
+      body = [instructions[i] for i in computations.get(w_calls, ())]
+      ops = {i[2] for i in body} - {'parameter'}
+      params = [i[0] for i in body if i[2] == 'parameter']
+      if (
+          w_op == 'fusion'
+          and ops <= {'convert', 'bitcast', 'copy'}
+          and params
+          and all(p in _INT_DTYPES for p in params)
+      ):
+        feeds.add('convert')
+      else:
+        feeds.add('other')
+  if len(feeds) != 1:
+    raise ValueError(f'Expected one matmul weight feed, got {feeds}.')
+  return feeds.pop()
 
 
 class DotGeneralTest(parameterized.TestCase):
@@ -62,6 +131,9 @@ class DotGeneralTest(parameterized.TestCase):
           rhs_qtype=jnp.float8_e4m3fn,
           dimension_numbers=(([2], [0]), ([], [])),
           expected_mae=0.04,
+          # fast/loop vs. slow is ~0.0045 on TPUs with native fp8 matmuls (e.g.
+          # TPU7x), ~0.0025 on TPU v5e/v6e.
+          max_impl_mae=0.005,
       ),
       dict(
           testcase_name='nf4',
@@ -160,6 +232,7 @@ class DotGeneralTest(parameterized.TestCase):
       rhs_asymmetric: bool = False,
       dimension_numbers: jax.lax.DotDimensionNumbers,
       expected_mae: float,
+      max_impl_mae: float = 0.003,
       disable_fast_dot_general: bool = False,
       disable_loop_dot_general: bool = False,
   ):
@@ -216,23 +289,8 @@ class DotGeneralTest(parameterized.TestCase):
     self.assertLessEqual(fp_mae, expected_mae)
     # The error between slow vs fast, or slow vs loop should be purely due to
     # floating point imprecision, and should be small.
-    # On TPU7 / TPU7x, native FP8 matmuls (specifically
-    # test_dot_general_fp8_tiled_ra) have slightly different intermediate
-    # rounding compared to the bf16 slow path (fast_mae ≈ 0.0045), requiring a
-    # 0.006 tolerance on TPU7/TPU7x for FP8 cases while keeping 0.003 for
-    # integer cases and other device kinds.
-    device_kind = jax.devices()[0].device_kind.split('\n', 1)[0]
-    fp8_types = (
-        jnp.float8_e4m3fn,
-        jnp.float8_e5m2,
-        jnp.float8_e4m3b11fnuz,
-        jnp.float8_e4m3fnuz,
-        jnp.float8_e5m2fnuz,
-    )
-    is_fp8_case = lhs_qtype in fp8_types or rhs_qtype in fp8_types
-    max_tolerance = 0.006 if ('TPU7' in device_kind and is_fp8_case) else 0.003
-    self.assertLessEqual(fast_mae, max_tolerance)
-    self.assertLessEqual(loop_mae, max_tolerance)
+    self.assertLessEqual(fast_mae, max_impl_mae)
+    self.assertLessEqual(loop_mae, max_impl_mae)
 
   @parameterized.parameters(128, 256, 512)
   def test_dot_general_subchannel_tile_sizes(self, tile_size: int):
@@ -320,6 +378,37 @@ class DotGeneralTest(parameterized.TestCase):
         else:
           mock_slow.assert_called_once()
           mock_fast.assert_not_called()
+
+  @parameterized.named_parameters(
+      dict(testcase_name='int8', qtype=jnp.int8),
+      dict(testcase_name='int4', qtype=jnp.int4),
+  )
+  def test_unquantized_x_channelwise_upcasts_weight_in_xla(self, qtype):
+    """Checks that XLA, not Qwix, upcasts the int weight for the matmul."""
+    if jax.devices()[0].platform != 'tpu':
+      self.skipTest('Only run on TPU.')
+    m, k, n = 128, 1024, 512
+    lhs = jnp.zeros((m, k), jnp.bfloat16)
+    q_rhs = qarray.quantize(
+        jnp.ones((k, n), jnp.bfloat16),
+        qarray.HowToQuantize(qtype=qtype, channelwise_axes=(1,), tiled_axes={}),
+    )
+    dimension_numbers = (((1,), (0,)), ((), ()))
+
+    def weight_feed(fn):
+      hlo = (
+          jax.jit(fn, static_argnums=2)
+          .lower(lhs, q_rhs, dimension_numbers)
+          .compile()
+          .as_text()
+      )
+      return matmul_weight_feed(hlo, (k, n))
+
+    # The matmul either takes the int weight directly (e.g. TPU v5e/v6e) or a
+    # plain convert of it (e.g. int4 on TPU7x), with the scale on the output.
+    self.assertIn(weight_feed(dot_general.dot_general), ('int', 'convert'))
+    # Sanity check: the slow path multiplies the weight by the scale first.
+    self.assertEqual(weight_feed(dot_general._slow_dot_general), 'other')
 
 
 if __name__ == '__main__':

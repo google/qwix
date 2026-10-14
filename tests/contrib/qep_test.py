@@ -130,7 +130,11 @@ class QepLinenTest(parameterized.TestCase):
     exact_y = result.model.apply({'params': result.params}, x)
     ref_y = self._manual_two_stage_reference(model, variables, x)
 
-    self.assertLess(_mae(exact_y, ref_y), 1e-6)
+    # QEP's stage replay runs on dequantized float weights, while the manual
+    # reference computes the stage-1 inputs with QArray weights, where
+    # dot_general applies the scale on the output. Both are exact up to float
+    # rounding (~1.3e-5 on ARM CPU).
+    self.assertLess(_mae(exact_y, ref_y), 1e-4)
 
   def test_infers_shared_input_branch_stage(self):
     model = self._make_branch_model()

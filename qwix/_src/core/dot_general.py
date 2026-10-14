@@ -441,6 +441,75 @@ def get_min_tile_size_to_dequant_on_output() -> int:
   )
 
 
+def _should_use_fast_dot_general(
+    lhs: qarray.MaybeQArray,
+    rhs: qarray.MaybeQArray,
+    dimension_numbers: jax.lax.DotDimensionNumbers,
+) -> bool:
+  """Returns whether dot_general should use the fast path.
+
+  The fast path computes in quantized types and applies the scales of the
+  QArray operands on the output, instead of dequantizing them first.
+
+  Args:
+    lhs: The left-hand side of dot_general.
+    rhs: The right-hand side of dot_general.
+    dimension_numbers: The dimension numbers of dot_general.
+
+  Returns:
+    True if at least one operand is a QArray and it is beneficial to apply the
+    scales of every QArray operand on the output. Without a QArray operand there
+    is nothing to dequantize, so this returns False.
+  """
+  # Without a QArray operand there is nothing to dequantize, so fall back to
+  # jax.lax.dot_general (slow path) and follow JAX's default dtype rules.
+  if not isinstance(lhs, qarray.QArray) and not isinstance(rhs, qarray.QArray):
+    return False
+  for operand, contracting_axes, other_operand in zip(
+      (lhs, rhs), dimension_numbers[0], (rhs, lhs)
+  ):
+    # Only QArray operands have scales to check. A jax.Array operand is
+    # handled when checking the other operand, the QArray.
+    if not isinstance(operand, qarray.QArray):
+      continue
+    qarray.validate_qarray(operand)
+    # qtypes like nf4 cannot be dequantized on output.
+    if not numerics.can_dequant_on_output(operand.qtype):
+      return False
+    # Tile sizes of the contracting axes with more than one scale (subchannel).
+    tile_sizes = [
+        operand.qvalue.shape[axis] // operand.scale.shape[axis]
+        for axis in contracting_axes
+        if operand.scale.shape[axis] > 1
+    ]
+    # The other operand is a jax.Array in a dtype that Qwix would quantize
+    # (bf16/f16/f32/f64). Raw low-precision arrays (e.g. fp8, int8) are treated
+    # as quantized with an implicit scale of 1.
+    is_other_operand_unquantized = not isinstance(
+        other_operand, qarray.QArray
+    ) and numerics.should_quantize(other_operand.dtype)
+    # With an unquantized other operand, the matmul runs in floating point
+    # either way, so only dequantize on output if it adds no work: zero_point
+    # needs an extra matmul and tiled contracting axes need per-tile rescaling.
+    # Otherwise, this passes the raw quantized values to XLA, e.g. for int4
+    # nibble loading on newer TPUs.
+    # TODO: b/570154253 - Unquantized x sub-channel QArray could also use the
+    # fast path for small M (decode); this needs an M-aware heuristic or a
+    # kernel.
+    if is_other_operand_unquantized and (
+        operand.zero_point is not None or tile_sizes
+    ):
+      return False
+    # Small tiles make the tiled matmul inefficient, e.g. tile_size=1 when a
+    # contracting axis is channelwise quantized. The threshold is device
+    # dependent.
+    if tile_sizes and (
+        min(tile_sizes) < get_min_tile_size_to_dequant_on_output()
+    ):
+      return False
+  return True
+
+
 def dot_general(
     lhs: qarray.MaybeQArray,
     rhs: qarray.MaybeQArray,
@@ -492,41 +561,9 @@ def dot_general(
 
   # We need to choose between slow_dot_general, which dequantizes first and
   # then computes in floating-point types, and fast_dot_general, which
-  # computes in quantized types first and then dequantize.
-  use_fast_dot_general = True
-  min_tile_size = get_min_tile_size_to_dequant_on_output()
-  for operand, ca in zip((lhs, rhs), dimension_numbers[0]):
-    if not isinstance(operand, qarray.QArray):
-      if numerics.should_quantize(operand.dtype):
-        # Always dequantize on inputs if any of the operands is in bf16/fp32,
-        # because XLA is able to fuse the dequantize and the matmul. The slow
-        # path is usually not slower than the fast path, since both use fp
-        # matmul, and will be significantly faster when subchannel or zero_point
-        # is used.
-        use_fast_dot_general = False
-        break
-      # For raw arrays in lower precision, e.g. fp8, int4, bool, using fast path
-      # may be beneficial.
-      continue
-
-    qarray.validate_qarray(operand)
-
-    # qtypes like nf4 cannot be dequantized on output.
-    if not numerics.can_dequant_on_output(operand.qtype):
-      use_fast_dot_general = False
-      break
-
-    # If a contracting dimension is tiled too small, tiled dot general will
-    # be inefficient and we should dequantize the input first. This is critical
-    # when a contracting dimension is channelwise quantized, e.g. tile_size=1.
-    for axis in ca:
-      if operand.scale.shape[axis] > 1:
-        tile_size = operand.qvalue.shape[axis] // operand.scale.shape[axis]
-        if tile_size < min_tile_size:
-          use_fast_dot_general = False
-          break
-
-  if use_fast_dot_general:
+  # computes in quantized types first and then dequantize. Without a QArray
+  # there is nothing to dequantize, so use a plain dot_general.
+  if _should_use_fast_dot_general(lhs, rhs, dimension_numbers):
     return _fast_dot_general(
         lhs,
         rhs,
