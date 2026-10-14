@@ -35,10 +35,13 @@ Supported hybrid modes:
     2. 'three_pass_fp8_int4/int4_int4/int4': INT4 cross passes.
     3. 'three_pass_fp8_int4/fp4_fp4/int4': Mixed 4-bit cross passes
     (coarse INT4, residual FP4).
+    4. 'three_pass_fp8_fp4/int4_int4/fp4': Mixed 4-bit cross passes
+    (coarse FP4, residual INT4).
 Additionally, microscaled variants are supported:
-    4. 'three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4'
-    5. 'three_pass_mxfp8_mxint4/mxint4_mxint4/mxint4'
-    6. 'three_pass_mxfp8_mxint4/mxfp4_mxfp4/mxint4'
+    5. 'three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4'
+    6. 'three_pass_mxfp8_mxint4/mxint4_mxint4/mxint4'
+    7. 'three_pass_mxfp8_mxint4/mxfp4_mxfp4/mxint4'
+    8. 'three_pass_mxfp8_mxfp4/mxint4_mxint4/mxfp4'
 
 Additionally it supports int8 by decomposing into int4. This could be useful on
 devices with high int4 FLOPs. For the purposes of emulation we do this on the
@@ -99,10 +102,12 @@ MultiPassMode: TypeAlias = Literal[
     'three_pass_fp8_fp4/fp4_fp4/fp4',
     'three_pass_fp8_int4/int4_int4/int4',
     'three_pass_fp8_int4/fp4_fp4/int4',
+    'three_pass_fp8_fp4/int4_int4/fp4',
     # Microscaled hybrid modes:
     'three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4',
     'three_pass_mxfp8_mxint4/mxint4_mxint4/mxint4',
     'three_pass_mxfp8_mxint4/mxfp4_mxfp4/mxint4',
+    'three_pass_mxfp8_mxfp4/mxint4_mxint4/mxfp4',
 ]
 
 
@@ -512,7 +517,7 @@ def _downcast_by_shift(
   elif target_qtype in (jnp.int4, 'int4', 'mxint4'):
     shift = 32.0
     scaled_val = operand.qvalue.astype(jnp.float32) / shift
-    new_qval = jnp.clip(jnp.round(scaled_val), -7.0, 7.0).astype(jnp.int4)
+    new_qval = jnp.clip(jnp.round(scaled_val), -8.0, 7.0).astype(jnp.int4)
     actual_qtype = jnp.int4
   else:
     raise ValueError(
@@ -640,6 +645,52 @@ def _block_shift_to_fp8(
   return rel_scaled_val.astype(target_dtype), fp8_block_scale
 
 
+def _quantize_fp8_for_int4_residual(
+    x: jax.Array, how_fp8: qarray.HowToQuantize
+) -> qarray.QArray:
+  """Quantizes x to FP8 with a half-step boundary offset for INT4 residuals.
+
+  In aligned FP8 + INT4 multi-pass quantization, each FP8 step
+  Delta = 16 * s_res is subdivided into 16 asymmetric two's-complement INT4
+  bins [-8, +7], which span [-8.5 * s_res, +7.5 * s_res] around each FP8
+  anchor. Standard symmetric Pass 1 FP8 rounding places the handoff midpoint
+  at a_L + 8.0 * s_res, causing values in (a_L + 7.5 * s_res, a_L + 8.0 * s_res)
+  to round down to a_L and saturate at bin +7 (9.375% occupancy) while starving
+  bin -8 of a_R (3.125% occupancy) and inducing a systematic -1/32 * s_res
+  negative bias.
+
+  Offsetting x by +0.5 * s_res in the 16-step binade before Pass 1 FP8 rounding
+  shifts the midpoint boundary to a_L + 7.5 * s_res. When the residual
+  r = x - dequantize(a0) is subsequently computed against the un-shifted x,
+  residuals map uniformly across [-8.5 * s_res, +7.5 * s_res), equalizing all
+  16 INT4 bins at 6.25% and eliminating the quantization bias while preserving
+  exact zero (0.0) and all base FP8 anchors.
+
+  Args:
+    x: Input unquantized array.
+    how_fp8: Pass 1 FP8 quantization configuration.
+
+  Returns:
+    Quantized Pass 1 QArray with boundary-adjusted FP8 anchors.
+  """
+  calib = qarray.calibrate(x, how_fp8)
+  s0, zp0 = qarray.compute_scale_zero_point(calib, how_fp8.qtype)
+  if how_fp8.calibration_method == 'absmax':
+    s_res = 2.0 * s0
+  elif how_fp8.calibration_method.startswith('absmax,'):
+    s_res = s0
+  else:
+    raw_absmax = jnp.max(jnp.abs(x))
+    e_top = jnp.ceil(jnp.log2(jnp.maximum(raw_absmax / s0, 2.0**-5))) - 1.0
+    s_res = s0 * jnp.exp2(jnp.clip(e_top, -6.0, 8.0) - 7.0)
+
+  def _apply_offset(arr: jax.Array, sr: jax.Array) -> jax.Array:
+    return jnp.where(jnp.abs(arr) >= 128.0 * sr, arr + 0.5 * sr, arr)
+
+  x_adj = qarray.call_with_generic_broadcast(_apply_offset, x, s_res)
+  return qarray.quantize_with_scale_zero_point(x_adj, how_fp8.qtype, s0, zp0)
+
+
 def _hybrid_fp8_4bit_dot_general(
     lhs: jax.Array,
     rhs: jax.Array,
@@ -663,18 +714,24 @@ def _hybrid_fp8_4bit_dot_general(
        octaves of dynamic range for exponent shifting in _block_shift_to_fp8).
   2. FP8 + INT4 / MXFP8 + MXINT4 ('three_pass_fp8_int4/int4_int4/int4',
   'three_pass_mxfp8_mxint4/mxint4_mxint4/mxint4'):
-     - Pass 1 uses cutoff 256.0 via absmax, 448/256. Downcasting by 32 maps
+     - Pass 1 uses cutoff 256.0 via absmax, 448/256 and offsets the 16-step
+       binade by +0.5 * s_res before FP8 rounding so the asymmetric INT4
+       residual grid [-8, 7] spans [-8.5 * s_res, +7.5 * s_res] with uniform
+       bin occupancy and zero quantization bias. Downcasting by 32 maps
        [0, 256.0] to [0, 8.0], matching the optimal OAS bound of 8.0 for
        INT4 (max 7.0) and preventing saturation loss.
-     - Cross passes use INT4 / MXINT4 residuals and coarse operands.
+     - Cross passes use INT4 / MXINT4 residuals and coarse operands with
+       aligned residual calibration (absmax, 7.5/8.5 so 8.5 * s_res maps to
+       7.5 * s_res, preventing a 2x scale jump on the [-8, -7.5) tail).
      - Hardware execution: float8_e5m2 represents integers [-8, 7] bit-
        exactly (<=2 mantissa bits), while 5 exponent bits provide wide
        dynamic range to absorb block scale shifts in _block_shift_to_fp8.
   3. FP8 + mixed 4-bit / MXFP8 + MXMixed4 ('three_pass_fp8_int4/fp4_fp4/int4',
-  'three_pass_mxfp8_mxint4/mxfp4_mxfp4/mxint4'):
-     - Pass 1 uses cutoff 256.0 to accommodate INT4's saturation limit.
-     - Downcast coarse operands are INT4 / MXINT4, while residuals are
-       quantized to FP4 / MXFP4.
+  'three_pass_mxfp8_mxint4/mxfp4_mxfp4/mxint4',
+  'three_pass_fp8_fp4/int4_int4/fp4',
+  'three_pass_mxfp8_mxfp4/mxint4_mxint4/mxfp4'):
+     - Downcast coarse operands and residuals independently select FP4/MXFP4
+       or INT4/MXINT4.
      - Hardware execution: float8_e5m2 x float8_e5m2 on native hardware
        matrix units.
 
@@ -788,6 +845,7 @@ def _hybrid_fp8_4bit_dot_general(
     calib = 'absmax'
     downcast_qtype = 'mxfp4' if is_microscale else jnp.float4_e2m1fn
     residual_qtype = 'mxfp4' if is_microscale else jnp.float4_e2m1fn
+    residual_calib = 'absmax'
   elif multipass_mode in (
       'three_pass_fp8_int4/int4_int4/int4',
       'three_pass_mxfp8_mxint4/mxint4_mxint4/mxint4',
@@ -795,6 +853,7 @@ def _hybrid_fp8_4bit_dot_general(
     calib = f'absmax,{448.0 / 256.0}'
     downcast_qtype = 'mxint4' if is_microscale else jnp.int4
     residual_qtype = 'mxint4' if is_microscale else jnp.int4
+    residual_calib = f'absmax,{7.5 / 8.5}'
   elif multipass_mode in (
       'three_pass_fp8_int4/fp4_fp4/int4',
       'three_pass_mxfp8_mxint4/mxfp4_mxfp4/mxint4',
@@ -802,6 +861,15 @@ def _hybrid_fp8_4bit_dot_general(
     calib = f'absmax,{448.0 / 256.0}'
     downcast_qtype = 'mxint4' if is_microscale else jnp.int4
     residual_qtype = 'mxfp4' if is_microscale else jnp.float4_e2m1fn
+    residual_calib = 'absmax'
+  elif multipass_mode in (
+      'three_pass_fp8_fp4/int4_int4/fp4',
+      'three_pass_mxfp8_mxfp4/mxint4_mxint4/mxfp4',
+  ):
+    calib = 'absmax'
+    downcast_qtype = 'mxfp4' if is_microscale else jnp.float4_e2m1fn
+    residual_qtype = 'mxint4' if is_microscale else jnp.int4
+    residual_calib = f'absmax,{7.5 / 8.5}'
   else:
     raise ValueError(f'Unknown hybrid multipass_mode: {multipass_mode}')
 
@@ -832,8 +900,12 @@ def _hybrid_fp8_4bit_dot_general(
   )
 
   # Quantize inputs into Pass 1 operands and use _dot
-  a0 = qarray.quantize(lhs, how_l_fp8)
-  b0 = qarray.quantize(rhs, how_r_fp8)
+  if residual_qtype in ('mxint4', jnp.int4):
+    a0 = _quantize_fp8_for_int4_residual(lhs, how_l_fp8)
+    b0 = _quantize_fp8_for_int4_residual(rhs, how_r_fp8)
+  else:
+    a0 = qarray.quantize(lhs, how_l_fp8)
+    b0 = qarray.quantize(rhs, how_r_fp8)
   c00 = _dot(a0, b0)
 
   # Compute residuals.
@@ -847,6 +919,7 @@ def _hybrid_fp8_4bit_dot_general(
       for_lhs=False,
       qtype=residual_qtype,
       tile_size=residual_tile_size,
+      calibration_method=residual_calib,
   )
   how_l_residual = dg.get_how_to_quantize(
       dimension_numbers=dimension_numbers,
@@ -854,6 +927,7 @@ def _hybrid_fp8_4bit_dot_general(
       for_lhs=True,
       qtype=residual_qtype,
       tile_size=residual_tile_size,
+      calibration_method=residual_calib,
   )
 
   # Convert coarse operands mxfp8 -> mxfp4 / mxint4 for each block size
@@ -954,9 +1028,11 @@ def multipass_dot_general(
       'three_pass_fp8_fp4/fp4_fp4/fp4',
       'three_pass_fp8_int4/int4_int4/int4',
       'three_pass_fp8_int4/fp4_fp4/int4',
+      'three_pass_fp8_fp4/int4_int4/fp4',
       'three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4',
       'three_pass_mxfp8_mxint4/mxint4_mxint4/mxint4',
       'three_pass_mxfp8_mxint4/mxfp4_mxfp4/mxint4',
+      'three_pass_mxfp8_mxfp4/mxint4_mxint4/mxfp4',
   ):
     return _hybrid_fp8_4bit_dot_general(
         lhs,
