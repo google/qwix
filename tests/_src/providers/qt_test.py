@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import itertools
+from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import linen as nn
@@ -210,6 +211,180 @@ class QtTest(parameterized.TestCase):
     # Since rhs is all ones, sparsifying it will make 2 elements zero.
     # So the dot product of ones(1,4) and sparsified ones(4,1) should be 2.0.
     self.assertEqual(out, jnp.array([[2.0]], dtype=jnp.bfloat16))
+
+    # additional_qt_config['sparsity_rule'] uses the rule's order ('R') rather
+    # than the contracting axis, and also works without weight_qtype.
+    sparsity_only_rule = qt.QtRule(
+        additional_qt_config=rule.additional_qt_config
+    )
+    out_row_order = TestModule(qt.QtProvider([sparsity_only_rule])).apply(
+        {},
+        jnp.ones((1, 2), dtype=jnp.bfloat16),
+        jnp.ones((2, 4), dtype=jnp.bfloat16),
+    )
+    self.assertEqual(
+        jnp.count_nonzero(out_row_order), jnp.array(2, dtype=jnp.int32)
+    )
+
+  def test_dot_general_rhs_sparsity_rule_skips_activations(self):
+    """Tests that rhs_sparsity_rule is not applied when rhs is not a weight."""
+    lhs = jnp.ones((1, 4), dtype=jnp.bfloat16)
+    rhs = jnp.ones((4, 1), dtype=jnp.bfloat16)
+
+    rule = qt.QtRule(
+        weight_qtype=jnp.int8,
+        rhs_sparsity_rule=sparsity.SparsityRule(
+            weight_sparsity_n=2,
+            weight_sparsity_m=4,
+        ),
+    )
+    provider = qt.QtProvider([rule])
+
+    class TestModule(nn.Module):
+      provider: qt.QtProvider
+
+      def __call__(self, lhs, rhs):
+        dimension_numbers = (((1,), (0,)), ((), ()))
+        return self.provider.dot_general(lhs, rhs, dimension_numbers)
+
+    module = TestModule(provider)
+    out = module.apply({}, lhs, rhs)
+
+    # rhs is an activation (not a module param), so it must stay dense.
+    self.assertEqual(out, jnp.array([[4.0]], dtype=jnp.bfloat16))
+
+    # For a sparsity-only rule (weight_qtype=None), activation-activation
+    # dot_general and einsum calls must pass straight through to LAX without
+    # entering dot_general_qt (preserving preferred_element_type, etc.).
+    sparsity_only_provider = qt.QtProvider([
+        qt.QtRule(
+            rhs_sparsity_rule=sparsity.SparsityRule(
+                weight_sparsity_n=2, weight_sparsity_m=4
+            )
+        )
+    ])
+
+    class PassthroughModule(nn.Module):
+      provider: qt.QtProvider
+
+      def __call__(self, a, b):
+        dg = self.provider.dot_general(
+            a,
+            b,
+            (((1,), (0,)), ((), ())),
+            preferred_element_type=jnp.float32,
+        )
+        es = self.provider.einsum(
+            "ij,jk->ik", a, b, preferred_element_type=jnp.float32
+        )
+        return dg, es
+
+    with mock.patch.object(
+        qt.dot_general_qt,
+        "dot_general_qt",
+        wraps=qt.dot_general_qt.dot_general_qt,
+    ) as mock_dg_qt:
+      dg_out, es_out = PassthroughModule(sparsity_only_provider).apply(
+          {}, lhs, rhs
+      )
+    mock_dg_qt.assert_not_called()
+    self.assertEqual(dg_out.dtype, jnp.float32)
+    self.assertEqual(es_out.dtype, jnp.float32)
+    self.assertEqual(dg_out, jnp.array([[4.0]], dtype=jnp.float32))
+    self.assertEqual(es_out, jnp.array([[4.0]], dtype=jnp.float32))
+
+  @parameterized.named_parameters(
+      dict(testcase_name="sparsity_only", weight_qtype=None),
+      dict(testcase_name="with_int8_weight_qtype", weight_qtype=jnp.int8),
+  )
+  def test_rhs_sparsity_rule_masks_weights(self, weight_qtype):
+    """rhs_sparsity_rule masks module weights along fan-in."""
+    linear = nnx.Linear(8, 3, use_bias=False, rngs=nnx.Rngs(0))
+    sparsity_rule = sparsity.SparsityRule(
+        weight_sparsity_n=2, weight_sparsity_m=4
+    )
+    rule = qt.QtRule(
+        weight_qtype=weight_qtype,
+        rhs_sparsity_rule=sparsity_rule,
+    )
+    model_input = jax.random.normal(jax.random.key(1), (2, 8), jnp.float32)
+    sparse_linear = qwix_model.quantize_model(
+        linear, qt.QtProvider([rule]), model_input
+    )
+
+    kernel = linear.kernel[...]
+    # Reference: keep the top-2 |w| in every group of 4 along the input axis.
+    groups = jnp.abs(kernel).reshape(2, 4, 3)
+    threshold = jnp.sort(groups, axis=1)[:, 2:3, :]
+    keep = (groups >= threshold).reshape(8, 3)
+    sparse_kernel = jnp.where(keep, kernel, 0.0)
+
+    class EinsumLinear(nnx.Module):
+
+      def __init__(self, w):
+        self.kernel = nnx.Param(w)
+
+      def __call__(self, x):
+        return jnp.einsum("bi,io->bo", x, self.kernel[...])
+
+    expected = qwix_model.quantize_model(
+        EinsumLinear(sparse_kernel),
+        qt.QtProvider([qt.QtRule(weight_qtype=weight_qtype)]),
+        model_input,
+    )(model_input)
+
+    out = sparse_linear(model_input)
+    self.assertTrue(jnp.allclose(out, expected, atol=1e-5))
+    self.assertFalse(jnp.allclose(out, model_input @ kernel, atol=1e-5))
+    # Probe with the identity matrix to recover the effective (dequantized)
+    # weight and verify it keeps the exact 2-of-4 pattern along the input axis.
+    effective_weight = sparse_linear(jnp.eye(8, dtype=jnp.float32))
+    self.assertTrue(jnp.array_equal(effective_weight != 0, keep))
+
+    sparse_einsum = qwix_model.quantize_model(
+        EinsumLinear(kernel), qt.QtProvider([rule]), model_input
+    )
+    self.assertTrue(
+        jnp.allclose(sparse_einsum(model_input), expected, atol=1e-5)
+    )
+
+  def test_rhs_sparsity_rule_multi_contracting_einsum_and_conflict(self):
+    """Multi-contracting einsum groups along innermost rhs contracting axis."""
+    sparsity_rule = sparsity.SparsityRule(
+        weight_sparsity_n=2, weight_sparsity_m=4
+    )
+    rule = qt.QtRule(rhs_sparsity_rule=sparsity_rule)
+
+    class EinsumAttnOut(nnx.Module):
+
+      def __init__(self, w):
+        self.kernel = nnx.Param(w)
+
+      def __call__(self, x):
+        # jnp.einsum sorts contracted names ('h', 'n') alphabetically so
+        # rhs contracting dims are (1, 0); N=6 is not divisible by 4, while the
+        # innermost contracting axis H=8 (axis 1) is.
+        return jnp.einsum("btnh,nhd->btd", x, self.kernel[...])
+
+    w = jax.random.normal(jax.random.key(2), (6, 8, 3), jnp.float32)
+    x = jax.random.normal(jax.random.key(3), (1, 2, 6, 8), jnp.float32)
+    model = qwix_model.quantize_model(
+        EinsumAttnOut(w), qt.QtProvider([rule]), x
+    )
+    groups = jnp.abs(w).reshape(6, 2, 4, 3)
+    threshold = jnp.sort(groups, axis=2)[:, :, 2:3, :]
+    sparse_w = jnp.where((groups >= threshold).reshape(6, 8, 3), w, 0.0)
+    expected = jnp.einsum("btnh,nhd->btd", x, sparse_w)
+    self.assertTrue(jnp.allclose(model(x), expected, atol=1e-5))
+
+    conflicting_rule = qt.QtRule(
+        rhs_sparsity_rule=sparsity_rule,
+        additional_qt_config={"sparsity_rule": sparsity_rule},
+    )
+    with self.assertRaisesRegex(ValueError, "Cannot set both"):
+      qwix_model.quantize_model(
+          EinsumAttnOut(w), qt.QtProvider([conflicting_rule]), x
+      )
 
   def test_nnx_multi_head_attention_qt_bwd(self):
     rule = qt.QtRule(

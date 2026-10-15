@@ -24,6 +24,7 @@ from qwix._src import qconfig
 from qwix._src.core import conv_general_qt
 from qwix._src.core import dot_general_qt
 from qwix._src.core import ragged_dot_qt
+from qwix._src.core import sparsity
 from qwix._src.core import stochastic_rounding
 from qwix._src.utils import flax_util
 
@@ -57,10 +58,31 @@ class QtRule(qconfig.QuantizationRule):
   # noise for the 0th dimension and broadcast it over remaining dimensions.
   channelwise_noise_axes: Sequence[int] = (0,)
 
+  # Optional weight-only N:M sparsity rule. QtProvider applies it to the rhs of
+  # dot_general and einsum when the rhs is a module param (activations stay
+  # dense), grouping along the innermost rhs contracting axis; it may be the
+  # only setting of the rule (no qtypes). Note that `jnp.einsum` may reorder its
+  # operands before calling `dot_general` to avoid an output transpose (e.g.
+  # `'io,bi->ob'` places the first operand on lhs); this rule only applies when
+  # the weight reaches `dot_general` as rhs (such as standard `'...i,io->...o'`
+  # contractions). Other ops (e.g. ragged_dot, conv) do not apply it; callers
+  # that implement such ops themselves may read it from the current rule and
+  # call `qarray.sparsify(..., axis=...)`.
+  rhs_sparsity_rule: sparsity.SparsityRule | None = None
+
   # Override any fields in DotGeneralQtConfig or ConvGeneralQtConfig. This is
   # highly experimental and subjects to changes with no backward compatibility
   # guarantees.
   additional_qt_config: Mapping[str, Any] | None = None
+
+
+def _has_sparsity(rule: qconfig.QuantizationRule) -> bool:
+  """Returns whether `rule` sparsifies weights in dot_general / einsum."""
+  additional_config = getattr(rule, 'additional_qt_config', None) or {}
+  return (
+      additional_config.get('sparsity_rule') is not None
+      or getattr(rule, 'rhs_sparsity_rule', None) is not None
+  )
 
 
 class QtProvider(qconfig.QuantizationProvider):
@@ -84,7 +106,7 @@ class QtProvider(qconfig.QuantizationProvider):
   ) -> jax.Array:
     """QT dot_general."""
     rule, op_id = self._get_current_rule_and_op_id('dot_general')
-    if rule is None or rule.weight_qtype is None:
+    if rule is None or (rule.weight_qtype is None and not _has_sparsity(rule)):
       return jax.lax.dot_general(
           lhs,
           rhs,
@@ -94,6 +116,15 @@ class QtProvider(qconfig.QuantizationProvider):
           out_sharding=out_sharding,
       )
     config = self._create_dot_general_qt_config(rule, op_id, lhs, rhs)  # pyrefly: ignore[bad-argument-type]
+    if rule.weight_qtype is None and config.sparsity_rule is None:
+      return jax.lax.dot_general(
+          lhs,
+          rhs,
+          dimension_numbers,
+          precision=precision,
+          preferred_element_type=preferred_element_type,
+          out_sharding=out_sharding,
+      )
     return dot_general_qt.dot_general_qt(lhs, rhs, dimension_numbers, config)
 
   def einsum(
@@ -107,7 +138,7 @@ class QtProvider(qconfig.QuantizationProvider):
   ) -> jax.Array:
     """QT einsum."""
     rule, op_id = self._get_current_rule_and_op_id('einsum')
-    if rule is None or rule.weight_qtype is None:
+    if rule is None or (rule.weight_qtype is None and not _has_sparsity(rule)):
       return jnp.einsum(
           einsum_str,
           *operands,
@@ -128,15 +159,25 @@ class QtProvider(qconfig.QuantizationProvider):
         preferred_element_type,
         **kwargs,
     ):
+      # lhs and rhs might be flipped by einsum so we cannot use the operands
+      # from the einsum call.
+      config = self._create_dot_general_qt_config(rule, op_id, lhs, rhs)  # pyrefly: ignore[bad-argument-type]
+      if rule.weight_qtype is None and config.sparsity_rule is None:
+        return _dot_general(
+            lhs,
+            rhs,
+            dimension_numbers,
+            precision=precision,
+            preferred_element_type=preferred_element_type,
+            **kwargs,
+        )
       # TODO(dangyi): support preferred_element_type.
       del precision, preferred_element_type, kwargs
       return dot_general_qt.dot_general_qt(
           lhs,
           rhs,
           dimension_numbers,
-          # lhs and rhs might be flipped by einsum so we cannot use the operands
-          # from the einsum call.
-          self._create_dot_general_qt_config(rule, op_id, lhs, rhs),  # pyrefly: ignore[bad-argument-type]
+          config,
       )
 
     with jax.disable_jit():
@@ -389,9 +430,21 @@ class QtProvider(qconfig.QuantizationProvider):
         drhs_tile_size=drhs_tile_size,
         drhs_stochastic_rounding_noise_fn=bwd_stochastic_rounding_noise_fn,  # pyrefly: ignore[bad-argument-type]
         drhs_grad_disable_channelwise_axes=rule.disable_channelwise_axes,
+        sparsity_rule=rule.rhs_sparsity_rule if rhs_is_weight else None,
+        sparsity_along_contracting_axis=(
+            rule.rhs_sparsity_rule is not None and rhs_is_weight
+        ),
     )
 
     if rule.additional_qt_config:
+      if (
+          rule.rhs_sparsity_rule is not None
+          and 'sparsity_rule' in rule.additional_qt_config
+      ):
+        raise ValueError(
+            'Cannot set both rhs_sparsity_rule and'
+            " additional_qt_config['sparsity_rule']."
+        )
       qt_config = dataclasses.replace(qt_config, **rule.additional_qt_config)
     return qt_config
 

@@ -419,6 +419,59 @@ class DotGeneralQtTest(parameterized.TestCase):
     # Outputs should strictly match
     self.assertTrue(jnp.array_equal(result_internal, result_external))
 
+  def test_sparsity_rule_along_contracting_axis(self):
+    """Verifies opt-in N:M masking along the rhs contracting axis."""
+    rule = sparsity.SparsityRule(
+        weight_sparsity_n=2,
+        weight_sparsity_m=4,
+    )
+    config = dot_general_qt.DotGeneralQtConfig(
+        sparsity_rule=rule,
+        sparsity_along_contracting_axis=True,
+    )
+    lhs = jax.random.normal(jax.random.key(0), (2, 8), jnp.float32)
+    rhs = jax.random.normal(jax.random.key(1), (8, 3), jnp.float32)
+    dimension_numbers = (((1,), (0,)), ((), ()))
+
+    result_internal = dot_general_qt.dot_general_qt(
+        lhs, rhs, dimension_numbers, config
+    )
+    rhs_sparsified = qarray.sparsify(rhs, rule, dimension_numbers)
+    # Every group of 4 consecutive values along the contracting axis (axis 0)
+    # keeps exactly 2 non-zeros.
+    nonzeros = jnp.count_nonzero(rhs_sparsified.reshape(2, 4, 3), axis=1)
+    self.assertTrue(jnp.all(nonzeros == 2))
+    expected = jax.lax.dot_general(lhs, rhs_sparsified, dimension_numbers)
+    self.assertTrue(jnp.allclose(result_internal, expected, atol=1e-5))
+
+    # When only dlhs_residual_qtype is set (no fwd or grad qtypes), the
+    # backward pass must still quantize the sparsified rhs residual.
+    residual_only_config = dot_general_qt.DotGeneralQtConfig(
+        sparsity_rule=rule,
+        sparsity_along_contracting_axis=True,
+        dlhs_residual_qtype=jnp.int8,
+    )
+    dlhs_actual = jax.grad(
+        lambda l: dot_general_qt.dot_general_qt(
+            l, rhs, dimension_numbers, residual_only_config
+        ).sum()
+    )(lhs)
+    dlhs_expected = jax.grad(
+        lambda l: dot_general_qt.dot_general_qt(
+            l,
+            rhs_sparsified,
+            dimension_numbers,
+            dot_general_qt.DotGeneralQtConfig(dlhs_residual_qtype=jnp.int8),
+        ).sum()
+    )(lhs)
+    dlhs_unquantized = jax.grad(
+        lambda l: jax.lax.dot_general(
+            l, rhs_sparsified, dimension_numbers
+        ).sum()
+    )(lhs)
+    self.assertTrue(jnp.array_equal(dlhs_actual, dlhs_expected))
+    self.assertFalse(jnp.array_equal(dlhs_actual, dlhs_unquantized))
+
   def test_tiled_residual_fallback(self):
     """Verifies that tiled residuals correctly fallback to original inputs in bwd pass."""
     # Test that configurations with tiled residuals correctly fall back
