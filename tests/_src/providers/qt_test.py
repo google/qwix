@@ -202,6 +202,57 @@ class QtTest(parameterized.TestCase):
     # So the dot product of ones(1,4) and sparsified ones(4,1) should be 2.0.
     self.assertEqual(out, jnp.array([[2.0]], dtype=jnp.bfloat16))
 
+  def test_dot_general_rhs_sparsity_rule_skips_activations(self):
+    """Tests that rhs_sparsity_rule is not applied when rhs is not a weight."""
+    lhs = jnp.ones((1, 4), dtype=jnp.bfloat16)
+    rhs = jnp.ones((4, 1), dtype=jnp.bfloat16)
+
+    rule = qt.QtRule(
+        weight_qtype=jnp.int8,
+        rhs_sparsity_rule=sparsity.SparsityRule(
+            weight_sparsity_n=2,
+            weight_sparsity_m=4,
+        ),
+    )
+    provider = qt.QtProvider([rule])
+
+    class TestModule(nn.Module):
+      provider: qt.QtProvider
+
+      def __call__(self, lhs, rhs):
+        dimension_numbers = (((1,), (0,)), ((), ()))
+        return self.provider.dot_general(lhs, rhs, dimension_numbers)
+
+    module = TestModule(provider)
+    out = module.apply({}, lhs, rhs)
+
+    # rhs is an activation (not a module param), so it must stay dense.
+    self.assertEqual(out, jnp.array([[4.0]], dtype=jnp.bfloat16))
+
+  def test_rhs_sparsity_rule_without_quantization_masks_weights(self):
+    """A sparsity-only rule (no qtypes) masks module weights along fan-in."""
+    linear = nnx.Linear(8, 3, use_bias=False, rngs=nnx.Rngs(0))
+    rule = qt.QtRule(
+        rhs_sparsity_rule=sparsity.SparsityRule(
+            weight_sparsity_n=2, weight_sparsity_m=4
+        ),
+    )
+    model_input = jax.random.normal(jax.random.key(1), (2, 8), jnp.float32)
+    sparse_linear = qwix_model.quantize_model(
+        linear, qt.QtProvider([rule]), model_input
+    )
+
+    kernel = linear.kernel[...]
+    # Reference: keep the top-2 |w| in every group of 4 along the input axis.
+    groups = jnp.abs(kernel).reshape(2, 4, 3)
+    threshold = jnp.sort(groups, axis=1)[:, 2:3, :]
+    keep = (groups >= threshold).reshape(8, 3)
+    expected = model_input @ jnp.where(keep, kernel, 0.0)
+
+    out = sparse_linear(model_input)
+    self.assertTrue(jnp.allclose(out, expected, atol=1e-5))
+    self.assertFalse(jnp.allclose(out, model_input @ kernel, atol=1e-5))
+
   def test_nnx_multi_head_attention_qt_bwd(self):
     rule = qt.QtRule(
         module_path=".*",
