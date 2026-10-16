@@ -57,6 +57,10 @@ class QuantizationRule:
   # given tile size.
   # If it's a float, it must be "1 / tile_count" and the actual tile size will
   # be round(axis_size * tile_size).
+  # Microscaled formats (mxfp8, mxfp4, ...) have a fixed block size, which
+  # tile_size must equal if set. In PTQ and QLoRA it can stay unset: each
+  # microscaled operand uses its block size and the other operand is not
+  # tiled, e.g. per-token activations with MXFP4 weights.
   tile_size: int | float | None = None
 
   # If set, enable static-range quantization for input activations. Quantization
@@ -146,8 +150,8 @@ class QuantizationProvider:
       # 1. Disable interceptions during the pallas_call factory setup.
       # 2. Wrap the returned callable so that interceptions remain disabled
       #    during deferred execution.
-      intercept_map['jax.experimental.pallas.pallas_call'] = (  # pyrefly: ignore
-          lambda *args, **kwargs: interception.disable_interceptions(  # pyrefly: ignore
+      intercept_map['jax.experimental.pallas.pallas_call'] = (
+          lambda *args, **kwargs: interception.disable_interceptions(
               interception.disable_interceptions(pl.pallas_call)(
                   *args, **kwargs
               )

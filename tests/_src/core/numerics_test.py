@@ -202,6 +202,22 @@ class NumericsTest(absltest.TestCase):
       out_nvfp4 = numerics.convert_from(in_nvfp4, "nvfp4")
       self.assertIs(in_nvfp4, out_nvfp4)
 
+  def test_get_microscaled_block_size(self):
+    expected = {
+        "mxfp8": 32,
+        "mxfp4": 32,
+        "mxint8": 32,
+        "mxint4": 32,
+        "mxfp8_16": 16,
+        "nvfp4": 16,
+        "nf4": None,
+        jnp.int8: None,
+        jnp.float8_e4m3fn: None,
+    }
+    for qtype, block_size in expected.items():
+      with self.subTest(qtype=qtype):
+        self.assertEqual(numerics.get_microscaled_block_size(qtype), block_size)
+
   def test_mxint(self):
     with self.subTest("mxint8_bound"):
       bound = numerics.get_symmetric_bound("mxint8")
