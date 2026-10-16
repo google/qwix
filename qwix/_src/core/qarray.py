@@ -252,29 +252,106 @@ def validate_qarray(array: QArray):
 # ---------------------------------------------
 
 
-def sparsify(array: jax.Array, how: sparsity.SparsityRule) -> jax.Array:
+def _get_nm_sparsity_mask(
+    array: jax.Array,
+    how: sparsity.SparsityRule,
+    dimension_numbers: jax.lax.DotDimensionNumbers | None = None,
+) -> jax.Array:
+  """Computes the N:M boolean keep-mask for `array`.
+
+  If `dimension_numbers` is given and the (last) rhs contracting axis is
+  divisible by M, groups of M consecutive values along that axis keep their N
+  largest magnitudes. Otherwise falls back to `sparsity.get_sparsity_mask` with
+  the rule's order, block size and offset.
+
+  Args:
+    array: The (rhs) array to compute the mask for.
+    how: The N:M sparsity rule.
+    dimension_numbers: Optional dot_general dimension numbers; only the rhs
+      contracting dimensions are used.
+
+  Returns:
+    A boolean mask with the same shape as `array`.
+  """
+  n = how.weight_sparsity_n
+  m = how.weight_sparsity_m
+  if dimension_numbers is not None:
+    rhs_ca = dimension_numbers[0][1]
+    if rhs_ca and array.shape[rhs_ca[-1]] % m == 0:
+      ax = rhs_ca[-1]
+      shape = array.shape
+      new_shape = shape[:ax] + (shape[ax] // m, m) + shape[ax + 1 :]
+      reshaped = jnp.abs(array).reshape(new_shape)
+      perm = [i for i in range(len(new_shape)) if i != ax + 1] + [ax + 1]
+      inv_perm = [0] * len(perm)
+      for i, p in enumerate(perm):
+        inv_perm[p] = i
+      reshaped_last = jnp.transpose(reshaped, perm)
+      _, top_k_idx = jax.lax.top_k(reshaped_last, k=n)
+      mask_last = jnp.any(
+          jax.nn.one_hot(top_k_idx, m, dtype=jnp.bool_), axis=-2
+      )
+      return jnp.transpose(mask_last, inv_perm).reshape(shape)
+
+  return sparsity.get_sparsity_mask(
+      array,
+      n_sparsity=n,
+      m_sparsity=m,
+      order=how.weight_sparsity_order,
+      block_size=how.weight_sparsity_block_size,
+      offset=how.weight_sparsity_offset,
+  )
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2))
+def sparsify(
+    array: jax.Array,
+    how: sparsity.SparsityRule,
+    dimension_numbers: jax.lax.DotDimensionNumbers | None = None,
+) -> jax.Array:
   """Applies N:M sparsity to a dense array.
 
   N:M sparsity ensures that at most N values are non-zero in each block of M
-  consecutive values. Sparsity is based on magnitude.
+  consecutive values. Sparsity is based on magnitude. The mask is recomputed in
+  the backward pass instead of being saved as a residual, so pruned entries get
+  zero gradient.
 
   Args:
     array: The array to sparsify.
     how: How to sparsify the array.
+    dimension_numbers: If given, the N:M groups are taken along the rhs
+      contracting axis of these dot_general dimension numbers.
 
   Returns:
     A sparsified array with the same shape and type as input.
   """
   # TODO(b/493278511): Replace this with curriculum learning.
-  mask = sparsity.get_sparsity_mask(
-      array,
-      n_sparsity=how.weight_sparsity_n,
-      m_sparsity=how.weight_sparsity_m,
-      order=how.weight_sparsity_order,
-      block_size=how.weight_sparsity_block_size,
-      offset=how.weight_sparsity_offset,
-  )
-  return jnp.where(mask, array, jnp.zeros_like(array))
+  mask = _get_nm_sparsity_mask(array, how, dimension_numbers)
+  return jnp.where(mask, array, jnp.asarray(0, dtype=array.dtype))
+
+
+def _sparsify_fwd(
+    array: jax.Array,
+    how: sparsity.SparsityRule,
+    dimension_numbers: jax.lax.DotDimensionNumbers | None = None,
+):
+  """Forward pass of `sparsify`; saves only the dense input as residual."""
+  mask = _get_nm_sparsity_mask(array, how, dimension_numbers)
+  return jnp.where(mask, array, jnp.asarray(0, dtype=array.dtype)), array
+
+
+def _sparsify_bwd(
+    how: sparsity.SparsityRule,
+    dimension_numbers: jax.lax.DotDimensionNumbers | None,
+    res: jax.Array,
+    g: jax.Array,
+):
+  """Backward pass of `sparsify`; recomputes the mask from the residual."""
+  mask = _get_nm_sparsity_mask(res, how, dimension_numbers)
+  return (jnp.where(mask, g, jnp.asarray(0, dtype=g.dtype)),)
+
+
+sparsify.defvjp(_sparsify_fwd, _sparsify_bwd)
 
 
 @dataclasses.dataclass(slots=True, frozen=True, kw_only=True)

@@ -408,6 +408,87 @@ class QArrayTest(parameterized.TestCase):
     expected = jnp.array([[0.0, 0.0, 3.0, 4.0], [0.0, 0.0, 7.0, 8.0]])
     self.assertTrue(jnp.array_equal(y, expected))
 
+  def _expected_nm_sparsify(self, x, axis, n, m):
+    """Reference N:M sparsification along `axis` (keeps top-n |x| per group)."""
+    moved = jnp.moveaxis(x, axis, -1)
+    groups = moved.reshape(moved.shape[:-1] + (moved.shape[-1] // m, m))
+    _, top_idx = jax.lax.top_k(jnp.abs(groups), n)
+    keep = jnp.any(jax.nn.one_hot(top_idx, m, dtype=jnp.bool_), axis=-2)
+    sparse = jnp.where(keep, groups, jnp.zeros_like(groups))
+    return jnp.moveaxis(sparse.reshape(moved.shape), -1, axis)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='in_out_kernel',
+          shape=(8, 3),
+          dimension_numbers=(((1,), (0,)), ((), ())),
+          contracting_axis=0,
+      ),
+      dict(
+          testcase_name='transposed_kernel',
+          shape=(3, 8),
+          dimension_numbers=(((1,), (1,)), ((), ())),
+          contracting_axis=1,
+      ),
+      dict(
+          testcase_name='3d_kernel_middle_axis',
+          shape=(2, 8, 3),
+          dimension_numbers=(((2,), (1,)), ((), ())),
+          contracting_axis=1,
+      ),
+  )
+  def test_sparsify_along_contracting_axis(
+      self, shape, dimension_numbers, contracting_axis
+  ):
+    x = jax.random.normal(jax.random.key(0), shape, jnp.float32)
+    how = sparsity.SparsityRule(weight_sparsity_n=2, weight_sparsity_m=4)
+
+    y = qarray.sparsify(x, how, dimension_numbers)
+
+    expected = self._expected_nm_sparsify(x, contracting_axis, n=2, m=4)
+    self.assertTrue(jnp.array_equal(y, expected))
+    # Exactly 2 non-zeros in every group of 4 along the contracting axis.
+    moved = jnp.moveaxis(y, contracting_axis, -1)
+    groups = moved.reshape(moved.shape[:-1] + (moved.shape[-1] // 4, 4))
+    self.assertTrue(jnp.all(jnp.count_nonzero(groups, axis=-1) == 2))
+
+  def test_sparsify_contracting_axis_not_divisible_falls_back(self):
+    # Contracting axis (0) has size 6, which is not divisible by m=4, so the
+    # rule's default flattened row-wise masking is used instead.
+    x = jax.random.normal(jax.random.key(1), (6, 4), jnp.float32)
+    how = sparsity.SparsityRule(
+        weight_sparsity_n=2, weight_sparsity_m=4, weight_sparsity_order='R'
+    )
+    dimension_numbers = (((1,), (0,)), ((), ()))
+
+    y = qarray.sparsify(x, how, dimension_numbers)
+
+    self.assertTrue(jnp.array_equal(y, qarray.sparsify(x, how)))
+
+  @parameterized.named_parameters(
+      dict(testcase_name='default_order', dimension_numbers=None),
+      dict(
+          testcase_name='contracting_axis',
+          dimension_numbers=(((1,), (0,)), ((), ())),
+      ),
+  )
+  def test_sparsify_gradient_is_masked(self, dimension_numbers):
+    x = jax.random.normal(jax.random.key(2), (8, 4), jnp.float32)
+    upstream = jax.random.normal(jax.random.key(3), (8, 4), jnp.float32)
+    how = sparsity.SparsityRule(weight_sparsity_n=2, weight_sparsity_m=4)
+
+    def loss(x):
+      return jnp.sum(qarray.sparsify(x, how, dimension_numbers) * upstream)
+
+    grad = jax.jit(jax.grad(loss))(x)
+
+    # The mask is recomputed in the backward pass: pruned positions get zero
+    # gradient and kept positions pass the upstream gradient through unchanged.
+    kept = qarray.sparsify(x, how, dimension_numbers) != 0
+    self.assertTrue(
+        jnp.array_equal(grad, jnp.where(kept, upstream, jnp.zeros_like(x)))
+    )
+
   def test_quantize_nan_reproduction(self):
     # This test verifies both:
     # 1. Default Safe Mode: The scale == 0 (or scale < tiny) check prevents NaN.
