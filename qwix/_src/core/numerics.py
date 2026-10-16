@@ -41,6 +41,17 @@ def should_quantize(dtype: jax.typing.DTypeLike) -> bool:
   return jnp.dtype(dtype) in _QUANTIZE_DTYPES
 
 
+def get_microscaled_block_size(qtype: jax.typing.DTypeLike) -> int | None:
+  """Returns the fixed block size of a microscaled format, or None."""
+  if not isinstance(qtype, str):
+    return None
+  if qtype in ('mxfp8', 'mxfp4', 'mxint8', 'mxint4'):
+    return 32
+  if qtype in ('mxfp8_16', 'nvfp4'):
+    return 16
+  return None
+
+
 def can_dequant_on_output(qtype: jax.typing.DTypeLike) -> bool:
   """Checks if the qtype supports dequantizing after quantized computation.
 

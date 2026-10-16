@@ -13,7 +13,6 @@
 # limitations under the License.
 """Shared provider support for boxed quantized parameters."""
 
-import functools
 from typing import Callable, Generic, Sequence, TypeVar
 
 import flax
@@ -28,6 +27,7 @@ from qwix._src.core import conv_general
 from qwix._src.core import dot
 from qwix._src.core import dot_general
 from qwix._src.core import einsum
+from qwix._src.core import numerics
 from qwix._src.core import qarray
 from qwix._src.utils import flax_util
 
@@ -81,6 +81,24 @@ class WithAux(Generic[ArrayTypeVar]):
 nnx.register_data_type(WithAux)
 
 
+def _get_tile_size(
+    tile_size: int | float | None, qtype: jax.typing.DTypeLike
+) -> int | float | None:
+  """Returns the tile size, or the block size of a microscaled qtype if unset.
+
+  Microscaled formats have a fixed block size, so `tile_size` can stay unset
+  for them; it then also stays unset for the other operand, e.g. per-token
+  activations with MXFP4 weights.
+
+  Args:
+    tile_size: The tile size from the quantization rule.
+    qtype: The qtype of the operand being quantized.
+  """
+  if tile_size is None:
+    return numerics.get_microscaled_block_size(qtype)
+  return tile_size
+
+
 class BoxedParamProvider(qconfig.QuantizationProvider):
   """Base provider for runtime ops that substitute boxed parameters.
 
@@ -127,12 +145,14 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
           out_sharding=out_sharding,
       )
 
-    get_how_to_quantize = functools.partial(
-        dot_general.get_how_to_quantize,
-        dimension_numbers=dimension_numbers,
-        ndims=(len(lhs.shape), len(rhs.shape)),
-        tile_size=rule.tile_size,
-    )
+    def get_how_to_quantize(*, qtype, **kwargs):
+      return dot_general.get_how_to_quantize(
+          dimension_numbers=dimension_numbers,
+          ndims=(len(lhs.shape), len(rhs.shape)),
+          tile_size=_get_tile_size(rule.tile_size, qtype),
+          qtype=qtype,
+          **kwargs,
+      )
 
     # Prepare rhs.
     if isinstance(rhs, WithAux):  # weight, already quantized
@@ -194,12 +214,14 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
       raise ValueError(f'Unsupported einsum format: {einsum_str=} {operands=}')
 
     lhs, rhs = operands
-    get_how_to_quantize = functools.partial(
-        einsum.get_how_to_quantize,
-        einsum_str=einsum_str,
-        ndims=(len(lhs.shape), len(rhs.shape)),
-        tile_size=rule.tile_size,
-    )
+    def get_how_to_quantize(*, qtype, **kwargs):
+      return einsum.get_how_to_quantize(
+          einsum_str=einsum_str,
+          ndims=(len(lhs.shape), len(rhs.shape)),
+          tile_size=_get_tile_size(rule.tile_size, qtype),
+          qtype=qtype,
+          **kwargs,
+      )
 
     # Prepare rhs.
     if isinstance(rhs, WithAux):  # weight, already quantized
