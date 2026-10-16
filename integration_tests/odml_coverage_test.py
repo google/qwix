@@ -683,11 +683,10 @@ class OdmlTest(parameterized.TestCase):
           testcase_name='CNN',
           model=CNN(),
       ),
-      # TODO(b/441761069): this triggers an undefined-behavior error.
-      # dict(
-      #     testcase_name='Transformer',
-      #     model=Transformer(),
-      # ),
+      dict(
+          testcase_name='Transformer',
+          model=Transformer(),
+      ),
       dict(
           testcase_name='UNet',
           model=UNet(),
