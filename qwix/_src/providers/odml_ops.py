@@ -820,7 +820,7 @@ class Take(OnlyInputOp):
     rule, op_id = self._get_rule_and_op_id_fn(self._op_name)
     args[0] = self._maybe_fake_quant(args[0], rule, op_id)
 
-    if rule and rule.act_qtype:
+    if rule and (rule.act_qtype or rule.weight_qtype):
       # Provide a default fill_value for take. Otherwise, it will be nan
       # and cause the conversion to fail.
       kwargs.setdefault('fill_value', 0)

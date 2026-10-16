@@ -1271,6 +1271,55 @@ class OdmlTest(parameterized.TestCase):
         )
     )
 
+  @parameterized.named_parameters(
+      dict(testcase_name='weight_only', act_qtype=None, act_static_scale=None),
+      dict(testcase_name='drq', act_qtype=jnp.int8, act_static_scale=False),
+      dict(testcase_name='srq', act_qtype=jnp.int8, act_static_scale=True),
+  )
+  def test_take_fills_out_of_bounds_with_zero_when_table_is_quantized(
+      self, act_qtype, act_static_scale
+  ):
+    """Tests quantized jnp.take defaults fill_value to 0 instead of nan."""
+
+    class EmbedModel(nn.Module):
+
+      @nn.compact
+      def __call__(self, tokens):
+        table = self.param('table', nn.initializers.normal(), (4, 3))
+        return jnp.take(table, tokens, axis=0)
+
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*',
+            weight_qtype=jnp.int8,
+            act_qtype=act_qtype,
+            act_static_scale=act_static_scale,
+        )
+    ]
+    model = EmbedModel()
+    tokens = jnp.array([[0, 7, 2]], dtype=jnp.int32)  # 7 is out of bounds.
+    variables = model.init(jax.random.key(0), tokens)
+
+    qat_model = qwix_model.quantize_model(model, odml.OdmlQatProvider(rules))
+    qat_res, new_vars = qat_model.apply(variables, tokens, mutable=True)
+    variables = {**variables, **new_vars}
+    conversion_model = qwix_model.quantize_model(
+        model,
+        odml.OdmlConversionProvider(
+            rules, variables['params'], variables.get('quant_stats', {})
+        ),
+    )
+    conversion_res = conversion_model.apply(variables, tokens)
+
+    self.assertTrue(jnp.allclose(qat_res, conversion_res))
+    for res in (qat_res, conversion_res):
+      self.assertFalse(jnp.isnan(res).any())
+      self.assertTrue(jnp.array_equal(res[0, 1], jnp.zeros(3)))
+    in_bounds_tokens = jnp.array([[0, 1, 2]], dtype=jnp.int32)
+    jaxpr = jax.make_jaxpr(conversion_model.apply)(variables, in_bounds_tokens)
+    self.assertIn('quant.fake_quant', str(jaxpr))
+    self.assertNotIn('nan', str(jaxpr))
+
 
 if __name__ == '__main__':
   absltest.main()
