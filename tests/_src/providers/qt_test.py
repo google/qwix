@@ -171,6 +171,15 @@ class QtTest(parameterized.TestCase):
     )
     self.assertEqual(quant_stats["dot_general0_lhs"]["count"], 2)
 
+  def test_mxfp4_requires_tile_size(self):
+    """QT does not default the tile size of microscaled formats (yet)."""
+    rule = qt.QtRule(module_path=".*", weight_qtype="mxfp4")
+    linear = nnx.Linear(64, 16, rngs=nnx.Rngs(0))
+    with self.assertRaisesRegex(ValueError, "requires `tiled_axes`"):
+      qwix_model.quantize_model(
+          linear, qt.QtProvider([rule]), jnp.ones((2, 64))
+      )
+
   def test_dot_general_with_sparsity(self):
     """Tests that dot_general applies sparsity to rhs."""
     lhs = jnp.ones((1, 4), dtype=jnp.bfloat16)

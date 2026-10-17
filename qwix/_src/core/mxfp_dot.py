@@ -18,6 +18,7 @@ import math
 from typing import Any, TypeGuard
 import jax
 from jax import numpy as jnp
+from qwix._src.core import mxfp_pallas
 from qwix._src.core import qarray
 
 
@@ -36,7 +37,8 @@ def mxfp_dot_general(
   Note that `scaled_matmul` is supported when BOTH operands are microscaled
   formats (MXFP8, MXFP4, or NVFP4) with matching batch and contracting scale
   dimensions. One-sided microscaled operations or mismatched scale dimensions
-  will cleanly return `None` to fall back to standard float emulation.
+  will first attempt to use the `_mxfp4_weight_dot_general` path for TPU7x, and
+  otherwise return `None` to fall back to standard float emulation.
 
   Note: `jax.nn.scaled_matmul` only supports floating-point microscaled formats
   and does not support integer microscaled formats (e.g. mxint8). Integer
@@ -57,7 +59,9 @@ def mxfp_dot_general(
     A jax.Array with the result, or None to fall back to emulation.
   """
   if not (_is_mxfp(lhs) and _is_mxfp(rhs)):
-    return None
+    return _mxfp4_weight_dot_general(
+        lhs, rhs, dimension_numbers, preferred_element_type
+    )
 
   (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dimension_numbers
 
@@ -104,6 +108,70 @@ def mxfp_dot_general(
     return None
 
   return _unflatten_from_3d(out_3d, lhs, rhs, dimension_numbers)
+
+
+def _mxfp4_weight_dot_general(
+    lhs: qarray.MaybeQArray,
+    rhs: qarray.MaybeQArray,
+    dimension_numbers: jax.lax.DotDimensionNumbers,
+    preferred_element_type: jax.typing.DTypeLike | None,
+) -> jax.Array | None:
+  """Handles MXFP4 weights with FP8 activations on TPU7x."""
+  if not (isinstance(lhs, qarray.QArray) and isinstance(rhs, qarray.QArray)):
+    return None
+  (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dimension_numbers
+  # The kernel computes act[..., K] @ weight[K, ...]; einsum may swap them.
+  swapped = lhs.qtype == "mxfp4"
+  act, act_ca, w, w_ca = (
+      (rhs, rhs_ca, lhs, lhs_ca) if swapped else (lhs, lhs_ca, rhs, rhs_ca)
+  )
+  c = len(w_ca)
+  act_free, w_free = act.shape[:-c], w.shape[c:]
+  m, k, n = math.prod(act_free), math.prod(w.shape[:c]), math.prod(w_free)
+  if not (
+      c > 0
+      and not (lhs_ba or rhs_ba)
+      and w.qtype == "mxfp4"
+      and act.qvalue.dtype in (jnp.float8_e4m3fn, jnp.float8_e5m2)
+      and set(w_ca) == set(range(c))
+      and tuple(act.ndim - c + a for a in w_ca) == tuple(act_ca)
+      and all(s == 1 for s in act.scale.shape[-c:])
+      and w.scale.shape[c - 1] * mxfp_pallas.BLOCK_SIZE == w.shape[c - 1]
+      and k % 128 == 0
+      and n % 128 == 0
+      and _kernel_supported()
+  ):
+    return None
+
+  _, out_dtype = qarray.get_accumulator_and_result_type(
+      lhs, rhs, preferred_element_type=preferred_element_type
+  )
+  act_scale = jnp.broadcast_to(act.scale, (*act_free, *(1,) * c))
+  w_scale = jnp.broadcast_to(
+      w.scale, (*w.shape[: c - 1], w.scale.shape[c - 1], *w_free)
+  )
+  out = mxfp_pallas.mxfp4_matmul(
+      act.qvalue.reshape(m, k),
+      act_scale.reshape(m, 1),
+      w.qvalue.reshape(k, *w_free),
+      w_scale.reshape(k // mxfp_pallas.BLOCK_SIZE, *w_free),
+      out_dtype=out_dtype,
+  )
+  out = out.reshape(*act_free, *w_free)
+  if swapped:  # dot_general puts the lhs free axes first.
+    out = jnp.moveaxis(out, range(len(act_free)), range(-len(act_free), 0))
+  return out
+
+
+def _kernel_supported() -> bool:
+  """TPU7x, and not partitioned by XLA (single device or inside shard_map)."""
+  mesh = jax.sharding.get_abstract_mesh()
+  device = mesh.abstract_device or jax.devices()[0]
+  if device.device_kind != "TPU7x":
+    return False
+  if mesh.empty:
+    return len(jax.devices()) == 1
+  return mesh.size == 1 or mesh.are_all_axes_manual
 
 
 def _is_mxfp(operand: Any) -> TypeGuard[qarray.QArray]:

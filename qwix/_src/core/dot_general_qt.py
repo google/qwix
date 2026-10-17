@@ -171,16 +171,6 @@ def _apply_rhs_scale_to_lhs(lhs, rhs_scale, dnums):
   return qarray.call_with_generic_broadcast(jnp.multiply, lhs, lhs_scale)
 
 
-_MICROSCALED_QTYPES = frozenset({
-    'mxfp8',
-    'mxfp8_16',
-    'mxfp4',
-    'nvfp4',
-    'mxint8',
-    'mxint4',
-})
-
-
 def _is_block_scaled(operand: qarray.MaybeQArray) -> bool:
   """Returns True if the operand uses block-scaled or tiled quantization.
 
@@ -194,7 +184,7 @@ def _is_block_scaled(operand: qarray.MaybeQArray) -> bool:
     return False
   return (
       bool(qarray.get_tiled_axes(operand))
-      or operand.qtype in _MICROSCALED_QTYPES
+      or numerics.get_microscaled_block_size(operand.qtype) is not None
   )
 
 
