@@ -1040,6 +1040,41 @@ class MultiPassDotTest(parameterized.TestCase):
     snr_i8_asym_r = float(compute_snr_db(ref_f32, res_i8_asym_r))
     err_i8_asym_r = float(compute_relative_error(ref_f32, res_i8_asym_r))
 
+    # 7b. 4-Pass, 6-Pass, and 8-Pass Zero-Offset INT4 (zero-offset INT4 parts)
+    ref_f32_exact = lax.dot_general(
+        lhs, rhs, dnums, precision=lax.Precision.HIGHEST
+    )
+    res_four_pass_zo = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='four_pass_zero_offset_int4',
+    )
+    snr_four_pass_zo = float(compute_snr_db(ref_f32_exact, res_four_pass_zo))
+    err_four_pass_zo = float(
+        compute_relative_error(ref_f32_exact, res_four_pass_zo)
+    )
+
+    res_six_pass = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='six_pass_zero_offset_int4',
+    )
+    snr_six_pass = float(compute_snr_db(ref_f32_exact, res_six_pass))
+    err_six_pass = float(compute_relative_error(ref_f32_exact, res_six_pass))
+
+    res_eight_pass = multipass_dot.multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        multipass_mode='eight_pass_zero_offset_int4',
+    )
+    snr_eight_pass = float(compute_snr_db(ref_f32_exact, res_eight_pass))
+    err_eight_pass = float(
+        compute_relative_error(ref_f32_exact, res_eight_pass)
+    )
+
     print(
         f'INT8 Truncated (3-pass): SNR={snr_i8_tri:.2f} dB,'
         f' err={err_i8_tri:.4f}'
@@ -1052,6 +1087,18 @@ class MultiPassDotTest(parameterized.TestCase):
         f'INT8 Asym RHS (2-pass): SNR={snr_i8_asym_r:.2f} dB,'
         f' err={err_i8_asym_r:.4f}'
     )
+    print(
+        f'INT4 Zero-Offset (4-pass): SNR={snr_four_pass_zo:.2f} dB,'
+        f' err={err_four_pass_zo:.4f}'
+    )
+    print(
+        f'INT4 Zero-Offset (6-pass): SNR={snr_six_pass:.2f} dB,'
+        f' err={err_six_pass:.4f}'
+    )
+    print(
+        f'INT4 Zero-Offset (8-pass): SNR={snr_eight_pass:.2f} dB,'
+        f' err={err_eight_pass:.4f}'
+    )
 
     self.assertAlmostEqual(snr_i8_tri, 34.85, delta=1.5)
     self.assertAlmostEqual(err_i8_tri, 0.0182, delta=0.005)
@@ -1061,6 +1108,17 @@ class MultiPassDotTest(parameterized.TestCase):
 
     self.assertAlmostEqual(snr_i8_asym_r, 17.99, delta=1.5)
     self.assertAlmostEqual(err_i8_asym_r, 0.1274, delta=0.02)
+
+    self.assertAlmostEqual(snr_four_pass_zo, 38.95, delta=0.1)
+    self.assertAlmostEqual(err_four_pass_zo, 0.0113, delta=0.0005)
+
+    six_pass_target = 55.44 if is_ghostfish() else 55.45
+    self.assertAlmostEqual(snr_six_pass, six_pass_target, delta=0.1)
+    self.assertAlmostEqual(err_six_pass, 0.0017, delta=0.0002)
+
+    eight_pass_target = 62.95 if is_ghostfish() else 63.05
+    self.assertAlmostEqual(snr_eight_pass, eight_pass_target, delta=0.1)
+    self.assertAlmostEqual(err_eight_pass, 0.0007, delta=0.0002)
 
     # 8. Hybrid FP8 + 4-Bit Strategies (3 passes)
     res_fp8_fp4 = multipass_dot.multipass_dot_general(
@@ -1336,7 +1394,54 @@ class MultiPassDotTest(parameterized.TestCase):
         compute_relative_error(ref_f32, res_int8_256_emulated)
     )
 
-    # 5. Exact Unscaled Signed INT8 Bit-Level Verification (Integer Inputs)
+    # 5. 4-Pass, 6-Pass, and 8-Pass Zero-Offset INT4 (Channel-Wise)
+    ref_f32_exact = lax.dot_general(
+        lhs, rhs, dnums, precision=lax.Precision.HIGHEST
+    )
+    res_four_pass_zo_int4 = multipass_dot._int8_multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        compute_dtype=jnp.float8_e4m3fn,
+        multipass_mode='four_pass_zero_offset_int4',
+        tile_size=None,
+    )
+    snr_four_pass_zo_int4 = float(
+        compute_snr_db(ref_f32_exact, res_four_pass_zo_int4)
+    )
+    err_four_pass_zo_int4 = float(
+        compute_relative_error(ref_f32_exact, res_four_pass_zo_int4)
+    )
+
+    res_six_pass_int4 = multipass_dot._int8_multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        compute_dtype=jnp.float8_e4m3fn,
+        multipass_mode='six_pass_zero_offset_int4',
+        tile_size=None,
+    )
+    snr_six_pass_int4 = float(compute_snr_db(ref_f32_exact, res_six_pass_int4))
+    err_six_pass_int4 = float(
+        compute_relative_error(ref_f32_exact, res_six_pass_int4)
+    )
+
+    res_eight_pass_int4 = multipass_dot._int8_multipass_dot_general(
+        lhs,
+        rhs,
+        dnums,
+        compute_dtype=jnp.float8_e4m3fn,
+        multipass_mode='eight_pass_zero_offset_int4',
+        tile_size=None,
+    )
+    snr_eight_pass_int4 = float(
+        compute_snr_db(ref_f32_exact, res_eight_pass_int4)
+    )
+    err_eight_pass_int4 = float(
+        compute_relative_error(ref_f32_exact, res_eight_pass_int4)
+    )
+
+    # 6. Exact Unscaled Signed INT8 Bit-Level Verification (Integer Inputs)
     a_int8 = jax.random.randint(k1, shape_l, minval=-128, maxval=128).astype(
         jnp.int32
     )
@@ -1394,6 +1499,33 @@ class MultiPassDotTest(parameterized.TestCase):
             'Exact to block prod',
         ),
         (
+            '4-Pass Zero-Offset INT4',
+            'None',
+            4,
+            'float8_e4m3fn',
+            snr_four_pass_zo_int4,
+            err_four_pass_zo_int4,
+            '2 zero-offset INT4 parts',
+        ),
+        (
+            '6-Pass Zero-Offset INT4',
+            'None',
+            6,
+            'float8_e4m3fn',
+            snr_six_pass_int4,
+            err_six_pass_int4,
+            '3 zero-offset INT4 parts',
+        ),
+        (
+            '8-Pass Zero-Offset INT4',
+            'None',
+            8,
+            'float8_e4m3fn',
+            snr_eight_pass_int4,
+            err_eight_pass_int4,
+            '3 zero-offset INT4 parts',
+        ),
+        (
             'Exact Signed INT8 Reference',
             'None',
             1,
@@ -1433,15 +1565,63 @@ class MultiPassDotTest(parameterized.TestCase):
     self.assertAlmostEqual(
         snr_int8_256_emulated, snr_int8_256_1p, delta=eq_delta
     )
+    self.assertAlmostEqual(snr_four_pass_zo_int4, 38.95, delta=0.1)
+    six_pass_target = 55.44 if is_ghostfish() else 55.45
+    self.assertAlmostEqual(snr_six_pass_int4, six_pass_target, delta=0.1)
+    eight_pass_target = 62.95 if is_ghostfish() else 63.05
+    self.assertAlmostEqual(snr_eight_pass_int4, eight_pass_target, delta=0.1)
 
   def test_prep_int8_parts_range(self):
-    """Verifies _prep_int8_parts produces values strictly in [-8, 7] for all int8 values."""
+    """Verifies _prep_int8_parts and _prep_zero_offset_int4_parts produce values in [-8, 7]."""
     all_int8 = jnp.arange(-128, 128, dtype=jnp.int32)
     x_h, x_l = multipass_dot._prep_int8_parts(all_int8)
     self.assertTrue(bool(jnp.all((x_h >= -8) & (x_h <= 7))))
     self.assertTrue(bool(jnp.all((x_l >= -8) & (x_l <= 7))))
     reconstructed = (x_h << 4) + x_l + 8
     np.testing.assert_array_equal(reconstructed, all_int8)
+
+    all_vals_2p = jnp.arange(-119, 120, dtype=jnp.int32)
+    b0, b1 = multipass_dot._prep_zero_offset_int4_parts(all_vals_2p, n_parts=2)
+    for part in (b0, b1):
+      self.assertTrue(bool(jnp.all((part >= -8) & (part <= 7))))
+    recon_vals_2p = b0.astype(jnp.int32) * 16 + b1.astype(jnp.int32)
+    np.testing.assert_array_equal(recon_vals_2p, all_vals_2p)
+
+    test_x_2p = jnp.array([-500, -200, -119, 0, 119, 200, 500], dtype=jnp.int32)
+    d0, d1 = multipass_dot._prep_zero_offset_int4_parts(test_x_2p, n_parts=2)
+    recon_d = d0.astype(jnp.int32) * 16 + d1.astype(jnp.int32)
+    np.testing.assert_array_equal(
+        recon_d,
+        jnp.array([-119, -119, -119, 0, 119, 119, 119], dtype=jnp.int32),
+    )
+
+    all_vals = jnp.arange(-1911, 1912, dtype=jnp.int32)
+    a0, a1, a2 = multipass_dot._prep_zero_offset_int4_parts(all_vals, n_parts=3)
+    for part in (a0, a1, a2):
+      self.assertTrue(bool(jnp.all((part >= -8) & (part <= 7))))
+    recon_vals = (
+        a0.astype(jnp.int32) * 256
+        + a1.astype(jnp.int32) * 16
+        + a2.astype(jnp.int32)
+    )
+    np.testing.assert_array_equal(recon_vals, all_vals)
+
+    test_x = jnp.array(
+        [-5000, -2500, -1911, 0, 1911, 2500, 5000], dtype=jnp.int32
+    )
+    c0, c1, c2 = multipass_dot._prep_zero_offset_int4_parts(test_x, n_parts=3)
+    recon_c = (
+        c0.astype(jnp.int32) * 256
+        + c1.astype(jnp.int32) * 16
+        + c2.astype(jnp.int32)
+    )
+    np.testing.assert_array_equal(
+        recon_c,
+        jnp.array([-1911, -1911, -1911, 0, 1911, 1911, 1911], dtype=jnp.int32),
+    )
+
+    with self.assertRaisesRegex(ValueError, 'Unsupported n_parts'):
+      multipass_dot._prep_zero_offset_int4_parts(test_x, n_parts=4)
 
   @parameterized.parameters(
       ((8, 16), (16, 8), (((1,), (0,)), ((), ()))),
@@ -1506,48 +1686,121 @@ class MultiPassDotTest(parameterized.TestCase):
     np.testing.assert_array_equal(res_emulated, ref)
 
   @parameterized.parameters(
-      ('four_pass_int4', 32, 64, 36.0),
-      ('four_pass_int4', 256, 256, 36.0),
-      ('three_pass_int4', 32, 64, 33.0),
-      ('three_pass_int4', 256, 256, 33.0),
-      ('two_pass_lhs_int4', 32, 64, 16.0),
-      ('two_pass_rhs_int4', 32, 64, 16.0),
+      ('four_pass_int4', 32, 64, (42.64, 42.57), (41.63, 41.18)),
+      ('four_pass_int4', 256, 256, (40.09, 40.11), (39.88, 39.69)),
+      ('three_pass_int4', 32, 64, (38.71, 38.63), (38.49, 38.09)),
+      ('three_pass_int4', 256, 256, (35.93, 35.91), (36.32, 36.17)),
+      ('two_pass_lhs_int4', 32, 64, (20.78, 20.77), (20.80, 20.87)),
+      ('two_pass_rhs_int4', 32, 64, (20.52, 20.47), (20.39, 20.12)),
+      (
+          'four_pass_zero_offset_int4',
+          None,
+          256,
+          (39.62, 39.62),
+          (39.62, 39.62),
+      ),
+      (
+          'four_pass_zero_offset_int4',
+          None,
+          512,
+          (38.95, 38.95),
+          (38.98, 38.98),
+      ),
+      (
+          'four_pass_zero_offset_int4',
+          None,
+          1024,
+          (38.52, 38.52),
+          (38.49, 38.49),
+      ),
+      ('six_pass_zero_offset_int4', None, 256, (56.81, 56.78), (56.85, 56.82)),
+      ('six_pass_zero_offset_int4', None, 512, (55.45, 55.44), (55.43, 55.42)),
+      ('six_pass_zero_offset_int4', None, 1024, (54.23, 54.22), (54.26, 54.25)),
+      (
+          'eight_pass_zero_offset_int4',
+          None,
+          256,
+          (63.68, 63.50),
+          (63.68, 63.52),
+      ),
+      (
+          'eight_pass_zero_offset_int4',
+          None,
+          512,
+          (63.05, 62.95),
+          (63.06, 62.94),
+      ),
+      (
+          'eight_pass_zero_offset_int4',
+          None,
+          1024,
+          (62.63, 62.55),
+          (62.66, 62.57),
+      ),
   )
   def test_int8_multipass_dot(
-      self, multipass_mode, tile_size, k_dim, min_snr=36.0
+      self,
+      multipass_mode,
+      tile_size,
+      k_dim,
+      target_snr_f32,
+      target_snr_bf16,
   ):
-    """Verifies subchannel int8 GEMM using multi-pass integer modes."""
+    """Verifies channelwise and subchannel integer GEMM using multi-pass INT4 modes."""
     k1, k2 = jax.random.split(self.rng)
-    lhs = jax.random.normal(k1, (16, k_dim), dtype=jnp.float32)
-    rhs = jax.random.normal(k2, (k_dim, 16), dtype=jnp.float32)
     dnums = (((1,), (0,)), ((), ()))
+    m_dim = 256 if tile_size is None else 16
+    lhs_f32 = jax.random.normal(k1, (m_dim, k_dim), dtype=jnp.float32)
+    rhs_f32 = jax.random.normal(k2, (k_dim, m_dim), dtype=jnp.float32)
 
-    res_multipass = multipass_dot._int8_multipass_dot_general(
-        lhs,
-        rhs,
-        dnums,
-        compute_dtype=jnp.float8_e4m3fn,
-        multipass_mode=multipass_mode,
-        tile_size=tile_size,
-    )
-    self.assertEqual(res_multipass.shape, (16, 16))
-    self.assertFalse(jnp.isnan(res_multipass).any())
+    for input_dtype, (cpu_target, tpu_target) in (
+        (jnp.float32, target_snr_f32),
+        (jnp.bfloat16, target_snr_bf16),
+    ):
+      lhs = lhs_f32.astype(input_dtype)
+      rhs = rhs_f32.astype(input_dtype)
 
-    # Direct dispatch via multipass_dot_general with single multipass_mode
-    # parameter to select integer emulation.
-    res_direct = multipass_dot.multipass_dot_general(
-        lhs,
-        rhs,
-        dnums,
-        multipass_mode=multipass_mode,
-        tile_size=tile_size,
-    )
-    np.testing.assert_allclose(res_direct, res_multipass, atol=1e-5)
+      res_multipass = multipass_dot._int8_multipass_dot_general(
+          lhs,
+          rhs,
+          dnums,
+          compute_dtype=jnp.float8_e4m3fn,
+          multipass_mode=multipass_mode,
+          tile_size=tile_size,
+          preferred_element_type=jnp.float32,
+      )
+      self.assertEqual(res_multipass.shape, (m_dim, m_dim))
+      self.assertEqual(res_multipass.dtype, jnp.float32)
+      self.assertFalse(jnp.isnan(res_multipass).any())
 
-    # Should closely match reference float dot
-    true_dot = lax.dot_general(lhs, rhs, dnums)
-    snr = compute_snr_db(true_dot, res_multipass)
-    self.assertGreater(snr, min_snr)
+      # Direct dispatch via multipass_dot_general with single multipass_mode
+      # parameter to select integer emulation.
+      res_direct = multipass_dot.multipass_dot_general(
+          lhs,
+          rhs,
+          dnums,
+          multipass_mode=multipass_mode,
+          tile_size=tile_size,
+          preferred_element_type=jnp.float32,
+      )
+      np.testing.assert_allclose(res_direct, res_multipass, atol=1e-5)
+
+      true_dot = lax.dot_general(
+          lhs.astype(jnp.float32),
+          rhs.astype(jnp.float32),
+          dnums,
+          precision=lax.Precision.HIGHEST,
+          preferred_element_type=jnp.float32,
+      )
+      snr = float(compute_snr_db(true_dot, res_multipass))
+      err = float(compute_relative_error(true_dot, res_multipass))
+      print(
+          f'[{multipass_mode}] dtype={jnp.dtype(input_dtype).name}'
+          f' tile_size={tile_size} k={k_dim}: SQNR={snr:.2f} dB,'
+          f' err={err:.4f}'
+      )
+      target_snr = tpu_target if is_ghostfish() else cpu_target
+      self.assertAlmostEqual(snr, target_snr, delta=0.05)
 
   @parameterized.parameters(
       # Leading batch with tile_size=32
@@ -1734,6 +1987,9 @@ class MultiPassDotTest(parameterized.TestCase):
       ('three_pass_int4', 3, False),
       ('two_pass_lhs_int4', 2, True),
       ('two_pass_rhs_int4', 2, True),
+      ('four_pass_zero_offset_int4', 4, False),
+      ('six_pass_zero_offset_int4', 6, False),
+      ('eight_pass_zero_offset_int4', 8, False),
   )
   def test_approx_int8_multipass_graph_mechanics_and_gemm_ops(
       self, mode, expected_gemms, expect_int4_cast
@@ -2050,6 +2306,9 @@ class MultiPassDotTest(parameterized.TestCase):
       ('three_pass_fp8_int4/int4_int4/int4',),
       ('three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4',),
       ('three_pass_mxfp8_mxint4/mxint4_mxint4/mxint4',),
+      ('four_pass_zero_offset_int4',),
+      ('six_pass_zero_offset_int4',),
+      ('eight_pass_zero_offset_int4',),
   )
   def test_hybrid_fp8_square_asymmetric_scale_alignment(self, mode):
     """Verifies scale alignment when M == N with asymmetric operand scales."""
@@ -2072,6 +2331,9 @@ class MultiPassDotTest(parameterized.TestCase):
       ('three_pass_fp8_int4/int4_int4/int4',),
       ('three_pass_mxfp8_mxfp4/mxfp4_mxfp4/mxfp4',),
       ('three_pass_mxfp8_mxint4/mxint4_mxint4/mxint4',),
+      ('four_pass_zero_offset_int4',),
+      ('six_pass_zero_offset_int4',),
+      ('eight_pass_zero_offset_int4',),
   )
   def test_hybrid_fp8_dtype_preservation(self, mode):
     """Verifies return dtype matches input dtype or preferred_element_type."""
@@ -2295,6 +2557,40 @@ class MultiPassDotTest(parameterized.TestCase):
         else:
           self.assertEmpty(lhs_ba)
           self.assertEmpty(rhs_ba)
+
+  @parameterized.parameters(
+      ('four_pass_int4',),
+      ('three_pass_int4',),
+      ('two_pass_lhs_int4',),
+      ('two_pass_rhs_int4',),
+      ('four_pass_zero_offset_int4',),
+      ('six_pass_zero_offset_int4',),
+      ('eight_pass_zero_offset_int4',),
+  )
+  def test_int8_multipass_dot_worst_case_constant_inputs(self, multipass_mode):
+    """Verifies constant all-ones inputs with large K (>9.4k) do not overflow int32."""
+    # For K = 12288 (> 9408), all-constant inputs quantize every element to
+    # qmax (e.g. 1911 for 3-part zero-offset INT4), reaching 1911^2 * K / 16
+    # ~= 2.80e9 > INT32_MAX (2.147e9) in 8-pass mode if accumulated in int32.
+    # For K = 163840 (> 151647), 4-pass and 6-pass modes also exceed INT32_MAX
+    # if accumulated in int32.
+    dnums = (((1,), (0,)), ((), ()))
+    rel_tol = 0.25 if is_ghostfish() else 0.08
+    for k_dim in (12288, 163840):
+      lhs = jnp.ones((2, k_dim), dtype=jnp.float32)
+      rhs = jnp.ones((k_dim, 2), dtype=jnp.float32)
+      res = multipass_dot.multipass_dot_general(
+          lhs,
+          rhs,
+          dnums,
+          multipass_mode=multipass_mode,
+          tile_size=None,
+          preferred_element_type=jnp.float32,
+      )
+      self.assertTrue(bool(jnp.all(res > 0.0)))
+      np.testing.assert_allclose(
+          res, jnp.full((2, 2), float(k_dim)), rtol=rel_tol
+      )
 
 
 if __name__ == '__main__':
