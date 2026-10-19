@@ -820,9 +820,10 @@ class Take(OnlyInputOp):
     rule, op_id = self._get_rule_and_op_id_fn(self._op_name)
     args[0] = self._maybe_fake_quant(args[0], rule, op_id)
 
-    if rule and rule.act_qtype:
-      # Provide a default fill_value for take. Otherwise, it will be nan
-      # and cause the conversion to fail.
+    if rule and (rule.act_qtype or rule.weight_qtype):
+      # A fake-quantized table cannot keep jnp.take's default nan fill value
+      # (the converter would have to quantize nan), so default it to 0
+      # whenever this op may quantize the table.
       kwargs.setdefault('fill_value', 0)
 
     out = self._call_original_op(*args, **kwargs)
