@@ -304,18 +304,8 @@ class HowToQuantize:
   noise_fn: numerics.NoiseFn | None = None
 
   def __post_init__(self):
-    if isinstance(self.qtype, str) and self.qtype in (
-        'mxfp8',
-        'mxfp8_16',
-        'mxfp4',
-        'nvfp4',
-        'mxint8',
-        'mxint4',
-    ):
-      resolved_tile_size = (
-          32 if self.qtype in ('mxfp8', 'mxfp4', 'mxint8', 'mxint4') else 16
-      )
-
+    resolved_tile_size = numerics.get_microscaled_block_size(self.qtype)
+    if resolved_tile_size is not None:
       if not self.tiled_axes:
         raise ValueError(
             f'Format {self.qtype} requires `tiled_axes` to be specified.'

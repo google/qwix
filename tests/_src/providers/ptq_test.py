@@ -13,6 +13,7 @@
 # limitations under the License.
 import functools
 import os
+from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -699,6 +700,107 @@ class PtqTest(parameterized.TestCase):
     )
     out = ptq_mha(model_input, decode=False)
     self.assertEqual(out.shape, (2, 16, 64))
+
+  @parameterized.named_parameters(
+      dict(testcase_name="dot_general", use_einsum=False),
+      dict(testcase_name="einsum", use_einsum=True),
+  )
+  def test_mxfp4_weight_per_token_act(self, use_einsum):
+    """Without tile_size, MXFP4 weights get block 32 and acts stay per-token."""
+
+    class EinsumModel(nnx.Module):
+
+      def __init__(self):
+        self.kernel = nnx.Param(jnp.ones((64, 16)))
+
+      def __call__(self, x):
+        return jnp.einsum("ij,jk->ik", x, self.kernel)
+
+    if use_einsum:
+      model = EinsumModel()
+    else:
+      model = nnx.Linear(64, 16, use_bias=False, rngs=nnx.Rngs(0))
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*",
+            weight_qtype="mxfp4",
+            act_qtype=jnp.float8_e4m3fn,
+        ),
+    ]
+    x = jnp.ones((2, 64))
+    with mock.patch.object(
+        boxed_param, "quantize_act", wraps=boxed_param.quantize_act
+    ) as quantize_act:
+      ptq_model = qwix_model.quantize_model(model, ptq.PtqProvider(q_rules), x)
+      out = ptq_model(x)
+    self.assertEqual(out.shape, (2, 16))
+    self.assertEqual(ptq_model.kernel.array.qtype, "mxfp4")
+    self.assertEqual(ptq_model.kernel.array.scale.shape, (2, 16))  # 64 // 32
+    act_how = quantize_act.call_args.args[1]
+    self.assertEqual(act_how.tiled_axes, {})  # per-token
+    self.assertEqual(act_how.channelwise_axes, [0])
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="mxfp8_act_int8_weight",
+          weight_qtype=jnp.int8,
+          act_qtype="mxfp8",
+          weight_scale_shape=(1, 16),
+          act_tiled_axes={1: 32},
+      ),
+      dict(
+          testcase_name="mxfp8_16_act_mxfp4_weight",
+          weight_qtype="mxfp4",
+          act_qtype="mxfp8_16",
+          weight_scale_shape=(2, 16),
+          act_tiled_axes={1: 16},
+      ),
+  )
+  def test_microscaled_block_size_per_operand(
+      self, weight_qtype, act_qtype, weight_scale_shape, act_tiled_axes
+  ):
+    layer = nnx.Linear(64, 16, use_bias=False, rngs=nnx.Rngs(0))
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*", weight_qtype=weight_qtype, act_qtype=act_qtype
+        ),
+    ]
+    x = jnp.ones((2, 64))
+    with mock.patch.object(
+        boxed_param, "quantize_act", wraps=boxed_param.quantize_act
+    ) as quantize_act:
+      ptq_layer = qwix_model.quantize_model(layer, ptq.PtqProvider(q_rules), x)
+      out = ptq_layer(x)
+    self.assertEqual(out.shape, (2, 16))
+    self.assertEqual(ptq_layer.kernel.array.scale.shape, weight_scale_shape)
+    self.assertEqual(quantize_act.call_args.args[1].tiled_axes, act_tiled_axes)
+
+  def test_mxfp4_explicit_tile_size(self):
+    layer = nnx.Linear(64, 16, rngs=nnx.Rngs(0))
+    x = jnp.ones((2, 64))
+    # The block size still works, and still applies to the activations.
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*",
+            weight_qtype="mxfp4",
+            act_qtype=jnp.float8_e4m3fn,
+            tile_size=32,
+        ),
+    ]
+    with mock.patch.object(
+        boxed_param, "quantize_act", wraps=boxed_param.quantize_act
+    ) as quantize_act:
+      ptq_layer = qwix_model.quantize_model(layer, ptq.PtqProvider(q_rules), x)
+    self.assertEqual(ptq_layer.kernel.array.scale.shape, (2, 16))
+    self.assertEqual(quantize_act.call_args.args[1].tiled_axes, {1: 32})
+    # Any other tile size is still rejected.
+    q_rules = [
+        qconfig.QuantizationRule(
+            module_path=".*", weight_qtype="mxfp4", tile_size=128
+        ),
+    ]
+    with self.assertRaisesRegex(ValueError, "requires a tile size of 32"):
+      qwix_model.quantize_model(layer, ptq.PtqProvider(q_rules), x)
 
   def test_nnx_linear_2d_scales_ptq(self):
     layer = nnx.Linear(8, 16, rngs=nnx.Rngs(0))
