@@ -33,16 +33,20 @@ emulation/decomposition.
 """
 
 import functools
+from unittest import mock
+
 from absl import logging
 from absl.testing import absltest
+from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
 import numpy as np
 from qwix._src.core import mxfp_dot
+from qwix._src.core import mxfp_pallas
 from qwix._src.core import qarray
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _scaled_matmul_supported() -> bool:
   """Returns whether `jax.nn.scaled_matmul` can run on the current backend.
 
@@ -380,6 +384,111 @@ class MxfpDotTest(absltest.TestCase):
         lhs, rhs, dimension_numbers=(((1,), (1,)), ((), ()))
     )
     self.assertIsNone(res)
+
+
+class Mxfp4WeightDotTest(parameterized.TestCase):
+  """Tests the dispatch of MXFP4 weights to the Pallas kernel."""
+
+  def setUp(self):
+    super().setUp()
+    self.interpret = jax.devices()[0].platform != "tpu"
+    self.enter_context(
+        mock.patch.object(mxfp_dot, "_kernel_supported", return_value=True)
+    )
+    self.kernel = self.enter_context(
+        mock.patch.object(
+            mxfp_pallas,
+            "mxfp4_matmul",
+            wraps=functools.partial(
+                mxfp_pallas.mxfp4_matmul, interpret=self.interpret
+            ),
+        )
+    )
+
+  def _make_operands(self, act_shape, w_shape, num_contracting=1):
+    act = jax.random.normal(jax.random.key(0), act_shape, jnp.bfloat16)
+    w = jax.random.normal(jax.random.key(1), w_shape, jnp.bfloat16)
+    act_q = qarray.quantize(
+        act,
+        qarray.HowToQuantize(
+            qtype=jnp.float8_e4m3fn,
+            channelwise_axes=list(range(len(act_shape) - num_contracting)),
+        ),
+    )
+    w_q = qarray.quantize(
+        w,
+        qarray.HowToQuantize(
+            qtype="mxfp4",
+            channelwise_axes=list(range(num_contracting, len(w_shape))),
+            tiled_axes={num_contracting - 1: 32},
+        ),
+    )
+    return act_q, w_q
+
+  @parameterized.named_parameters(
+      dict(testcase_name="2d", act_shape=(8, 256), w_shape=(256, 128)),
+      dict(testcase_name="3d", act_shape=(2, 8, 256), w_shape=(256, 4, 32)),
+      dict(
+          testcase_name="multi_contracting",
+          act_shape=(8, 4, 64),
+          w_shape=(4, 64, 128),
+          act_ca=(2, 1),
+          w_ca=(1, 0),
+      ),
+      # einsum may pass the weight as lhs.
+      dict(
+          testcase_name="swapped",
+          act_shape=(2, 8, 256),
+          w_shape=(256, 4, 32),
+          swapped=True,
+      ),
+  )
+  def test_dispatch(
+      self, act_shape, w_shape, swapped=False, act_ca=None, w_ca=None
+  ):
+    w_ca = (0,) if w_ca is None else w_ca
+    act_ca = (len(act_shape) - 1,) if act_ca is None else act_ca
+    act, w = self._make_operands(act_shape, w_shape, num_contracting=len(w_ca))
+    if swapped:
+      lhs, rhs, dnums = w, act, ((w_ca, act_ca), ((), ()))
+    else:
+      lhs, rhs, dnums = act, w, ((act_ca, w_ca), ((), ()))
+    res = mxfp_dot.mxfp_dot_general(lhs, rhs, dnums, jnp.float32)
+    self.kernel.assert_called_once()
+    as_f32 = lambda q: qarray.dequantize(
+        q.replace(scale=q.scale.astype(jnp.float32))
+    )
+    ref = jax.lax.dot_general(
+        as_f32(lhs),
+        as_f32(rhs),
+        dnums,
+        precision=jax.lax.Precision.HIGHEST,
+    )
+    # Max error / max |ref|: f32 rounding on CPU, ~4e-5 observed on GPU
+    # (interpret mode), <= 0.7% observed on TPU (the fp8 MXU rounds like bf16).
+    scale = {"cpu": 1e-5, "gpu": 1e-4}.get(jax.devices()[0].platform, 1e-2)
+    np.testing.assert_allclose(res, ref, atol=scale * np.max(np.abs(ref)))
+
+  def test_fallback(self):
+    act, w = self._make_operands((8, 256), (256, 128))
+    dnums = (((1,), (0,)), ((), ()))
+    for lhs, rhs in [
+        (jnp.ones((8, 256), jnp.bfloat16), w),  # bf16 activation
+        (act.replace(qvalue=act.qvalue.astype(jnp.int8)), w),  # int8 activation
+        (act.replace(scale=jnp.ones((8, 8))), w),  # tiled activation
+        (act, w.replace(qtype="mxfp8")),  # non-mxfp4 weight
+    ]:
+      self.assertIsNone(mxfp_dot.mxfp_dot_general(lhs, rhs, dnums))
+    # Wrong contracting axes (act on first axis or weight on last axis).
+    self.assertIsNone(
+        mxfp_dot.mxfp_dot_general(act.T, w, (((0,), (0,)), ((), ())))
+    )
+    self.assertIsNone(
+        mxfp_dot.mxfp_dot_general(act, w.T, (((1,), (1,)), ((), ())))
+    )
+    with mock.patch.object(mxfp_dot, "_kernel_supported", return_value=False):
+      self.assertIsNone(mxfp_dot.mxfp_dot_general(act, w, dnums))
+    self.kernel.assert_not_called()
 
 
 if __name__ == "__main__":
