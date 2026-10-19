@@ -24,6 +24,7 @@ from qwix._src import qconfig
 from qwix._src.core import conv_general_qt
 from qwix._src.core import dot_general_qt
 from qwix._src.core import ragged_dot_qt
+from qwix._src.core import sparsity
 from qwix._src.core import stochastic_rounding
 from qwix._src.utils import flax_util
 
@@ -57,10 +58,27 @@ class QtRule(qconfig.QuantizationRule):
   # noise for the 0th dimension and broadcast it over remaining dimensions.
   channelwise_noise_axes: Sequence[int] = (0,)
 
+  # Optional weight-only N:M sparsity rule. QtProvider applies it to the rhs of
+  # dot_general and einsum when the rhs is a module param (activations stay
+  # dense), grouping along the rhs contracting axis; it may be the only setting
+  # of the rule (no qtypes). Other ops (e.g. ragged_dot, conv) do not apply it;
+  # callers that implement such ops themselves may read it from the current
+  # rule and call `qarray.sparsify(..., axis=...)`.
+  rhs_sparsity_rule: sparsity.SparsityRule | None = None
+
   # Override any fields in DotGeneralQtConfig or ConvGeneralQtConfig. This is
   # highly experimental and subjects to changes with no backward compatibility
   # guarantees.
   additional_qt_config: Mapping[str, Any] | None = None
+
+
+def _has_sparsity(rule: qconfig.QuantizationRule) -> bool:
+  """Returns whether `rule` sparsifies weights in dot_general / einsum."""
+  additional_config = getattr(rule, 'additional_qt_config', None) or {}
+  return (
+      additional_config.get('sparsity_rule') is not None
+      or getattr(rule, 'rhs_sparsity_rule', None) is not None
+  )
 
 
 class QtProvider(qconfig.QuantizationProvider):
@@ -84,7 +102,7 @@ class QtProvider(qconfig.QuantizationProvider):
   ) -> jax.Array:
     """QT dot_general."""
     rule, op_id = self._get_current_rule_and_op_id('dot_general')
-    if rule is None or rule.weight_qtype is None:
+    if rule is None or (rule.weight_qtype is None and not _has_sparsity(rule)):
       return jax.lax.dot_general(
           lhs,
           rhs,
@@ -107,7 +125,7 @@ class QtProvider(qconfig.QuantizationProvider):
   ) -> jax.Array:
     """QT einsum."""
     rule, op_id = self._get_current_rule_and_op_id('einsum')
-    if rule is None or rule.weight_qtype is None:
+    if rule is None or (rule.weight_qtype is None and not _has_sparsity(rule)):
       return jnp.einsum(
           einsum_str,
           *operands,
@@ -389,6 +407,8 @@ class QtProvider(qconfig.QuantizationProvider):
         drhs_tile_size=drhs_tile_size,
         drhs_stochastic_rounding_noise_fn=bwd_stochastic_rounding_noise_fn,  # pyrefly: ignore[bad-argument-type]
         drhs_grad_disable_channelwise_axes=rule.disable_channelwise_axes,
+        sparsity_rule=rule.rhs_sparsity_rule if rhs_is_weight else None,
+        sparsity_along_contracting_axis=rule.rhs_sparsity_rule is not None,
     )
 
     if rule.additional_qt_config:

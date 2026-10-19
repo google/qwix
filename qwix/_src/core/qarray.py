@@ -252,29 +252,169 @@ def validate_qarray(array: QArray):
 # ---------------------------------------------
 
 
-def sparsify(array: jax.Array, how: sparsity.SparsityRule) -> jax.Array:
+def _resolve_sparsity_axis(
+    ndim: int,
+    dimension_numbers: jax.lax.DotDimensionNumbers | None,
+    axis: int | None,
+) -> int | None:
+  """Returns the (non-negative) axis along which N:M groups are formed, if any.
+
+  An explicit `axis` takes precedence. Otherwise, if `dimension_numbers` is
+  given, the innermost (last listed) rhs contracting axis is used.
+
+  Args:
+    ndim: Rank of the array to sparsify.
+    dimension_numbers: Optional dot_general dimension numbers of the matmul the
+      array is the rhs of.
+    axis: Optional explicit axis.
+
+  Returns:
+    The axis, or None to use the rule's flattened `weight_sparsity_order` path.
+
+  Raises:
+    ValueError: If the axis is out of range or the dimension numbers have no
+      rhs contracting dimension.
+  """
+  if axis is None and dimension_numbers is not None:
+    rhs_contracting_dims = tuple(dimension_numbers[0][1])
+    if not rhs_contracting_dims:
+      raise ValueError(
+          'Cannot apply N:M sparsity along the contracting axis: the rhs has no'
+          f' contracting dimension in {dimension_numbers=}.'
+      )
+    axis = rhs_contracting_dims[-1]
+  if axis is None:
+    return None
+  if not -ndim <= axis < ndim:
+    raise ValueError(f'Sparsity axis {axis} is out of range for rank {ndim}.')
+  return axis % ndim
+
+
+def _get_nm_sparsity_mask(
+    array: jax.Array,
+    how: sparsity.SparsityRule,
+    axis: int | None = None,
+) -> jax.Array:
+  """Computes the N:M boolean keep-mask for `array`.
+
+  If `axis` is given, groups of M consecutive values along `axis` keep their N
+  largest magnitudes (ties keep the lower index); only `weight_sparsity_n` and
+  `weight_sparsity_m` of the rule are used. Otherwise the rule is applied as
+  before via `sparsity.get_sparsity_mask` (order, block size and offset).
+
+  Args:
+    array: The array to compute the mask for.
+    how: The N:M sparsity rule.
+    axis: Optional (non-negative) axis to form the N:M groups along.
+
+  Returns:
+    A boolean mask with the same shape as `array`.
+
+  Raises:
+    ValueError: If `axis` is given and its size is not divisible by M, or the
+      rule sets a block size or offset (which only apply without `axis`).
+  """
+  n = how.weight_sparsity_n
+  m = how.weight_sparsity_m
+  if axis is None:
+    return sparsity.get_sparsity_mask(
+        array,
+        n_sparsity=n,
+        m_sparsity=m,
+        order=how.weight_sparsity_order,
+        block_size=how.weight_sparsity_block_size,
+        offset=how.weight_sparsity_offset,
+    )
+
+  shape = array.shape
+  if shape[axis] % m != 0:
+    raise ValueError(
+        f'Cannot apply {n}:{m} sparsity along axis {axis} of an array with'
+        f' shape {shape}: dimension {shape[axis]} is not divisible by M={m}.'
+    )
+  if how.weight_sparsity_block_size > 1 or how.weight_sparsity_offset > 0:
+    raise ValueError(
+        'weight_sparsity_block_size and weight_sparsity_offset are not'
+        ' supported when sparsifying along an explicit axis; got'
+        f' block_size={how.weight_sparsity_block_size},'
+        f' offset={how.weight_sparsity_offset}.'
+    )
+  grouped_shape = shape[:axis] + (shape[axis] // m, m) + shape[axis + 1 :]
+  magnitudes = jnp.moveaxis(jnp.abs(array).reshape(grouped_shape), axis + 1, -1)
+  _, top_k_idx = jax.lax.top_k(magnitudes, k=n)
+  keep = jnp.any(jax.nn.one_hot(top_k_idx, m, dtype=jnp.bool_), axis=-2)
+  return jnp.moveaxis(keep, -1, axis + 1).reshape(shape)
+
+
+def sparsify(
+    array: jax.Array,
+    how: sparsity.SparsityRule,
+    dimension_numbers: jax.lax.DotDimensionNumbers | None = None,
+    *,
+    axis: int | None = None,
+) -> jax.Array:
   """Applies N:M sparsity to a dense array.
 
   N:M sparsity ensures that at most N values are non-zero in each block of M
   consecutive values. Sparsity is based on magnitude.
 
+  By default the rule's `weight_sparsity_order`, block size and offset are used
+  on the flattened array. To get hardware-style N:M sparsity of a weight, pass
+  either `axis` (the axis to group along, usually the weight's contracting /
+  input axis) or the `dimension_numbers` of the dot_general the array is the
+  rhs of; in the latter case the innermost (last listed) rhs contracting axis
+  is used.
+
+  The mask is not saved for the backward pass: it is recomputed from the dense
+  input, so pruned entries get zero gradient at the cost of a second top-k.
+
   Args:
     array: The array to sparsify.
     how: How to sparsify the array.
+    dimension_numbers: Optional dot_general dimension numbers of the matmul
+      `array` is the rhs of. Ignored if `axis` is given.
+    axis: Optional axis along which to form the N:M groups.
 
   Returns:
     A sparsified array with the same shape and type as input.
+
+  Raises:
+    ValueError: If the grouping axis is invalid or not divisible by M.
   """
   # TODO(b/493278511): Replace this with curriculum learning.
-  mask = sparsity.get_sparsity_mask(
-      array,
-      n_sparsity=how.weight_sparsity_n,
-      m_sparsity=how.weight_sparsity_m,
-      order=how.weight_sparsity_order,
-      block_size=how.weight_sparsity_block_size,
-      offset=how.weight_sparsity_offset,
+  return _sparsify(
+      array, how, _resolve_sparsity_axis(array.ndim, dimension_numbers, axis)
   )
-  return jnp.where(mask, array, jnp.zeros_like(array))
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2))
+def _sparsify(
+    array: jax.Array, how: sparsity.SparsityRule, axis: int | None
+) -> jax.Array:
+  mask = _get_nm_sparsity_mask(array, how, axis)
+  return jnp.where(mask, array, jnp.asarray(0, dtype=array.dtype))
+
+
+def _sparsify_fwd(
+    array: jax.Array, how: sparsity.SparsityRule, axis: int | None
+):
+  """Forward pass of `_sparsify`; saves only the dense input as residual."""
+  mask = _get_nm_sparsity_mask(array, how, axis)
+  return jnp.where(mask, array, jnp.asarray(0, dtype=array.dtype)), array
+
+
+def _sparsify_bwd(
+    how: sparsity.SparsityRule,
+    axis: int | None,
+    res: jax.Array,
+    g: jax.Array,
+):
+  """Backward pass of `_sparsify`; recomputes the mask from the residual."""
+  mask = _get_nm_sparsity_mask(res, how, axis)
+  return (jnp.where(mask, g, jnp.asarray(0, dtype=g.dtype)),)
+
+
+_sparsify.defvjp(_sparsify_fwd, _sparsify_bwd)
 
 
 @dataclasses.dataclass(slots=True, frozen=True, kw_only=True)
