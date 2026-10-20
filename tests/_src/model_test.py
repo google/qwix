@@ -60,6 +60,15 @@ class ModelTest(absltest.TestCase):
     self.assertEqual(quantized.apply({}, 0), 110)
     self.assertEqual(quantized.apply({}, 0, method="sin"), 110)
 
+  def test_quantize_linen_class(self):
+    quantized_cls = model.quantize_linen_class(
+        NnModel, CustomProvider([]), methods=["sin", "__call__"]
+    )
+    instance = quantized_cls()
+    self.assertEqual(instance.sin(0), 0)
+    self.assertEqual(instance.apply({}, 0), 110)
+    self.assertEqual(instance.apply({}, 0, method="sin"), 110)
+
 
 if __name__ == "__main__":
   absltest.main()

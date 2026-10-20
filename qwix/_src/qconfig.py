@@ -191,6 +191,60 @@ class QuantizationProvider:
     self._initial_run_complete = True
     return model_output
 
+  def reset_op_ids_on_module_entry(
+      self,
+      next_fun: Callable[..., Any],
+      args: tuple[Any, ...],
+      kwargs: dict[str, Any],
+      context: nn.module.InterceptorContext,
+  ) -> Any:
+    """A flax method interceptor that restarts op ids on each invocation.
+
+    Op ids are positional: `multiply0` means "the first multiply in this
+    module's body". Flax reuses a module's scope across repeated calls within
+    one `apply`, so without this the second call keeps counting from where the
+    first stopped.
+
+    That matters whenever a model applies the same layer more than once, which
+    diffusion samplers routinely do -- classifier-free guidance runs the
+    backbone once conditioned and once unconditioned. QAT calibrates a single
+    pass, so the later passes would ask for ids that were never created and
+    lose their calibration entirely.
+
+    Resetting per invocation makes every invocation map onto the same
+    statistics. During QAT the calibration then averages over all the passes,
+    and at conversion every pass resolves. This is the same reasoning that lets
+    the passes share one set of weights.
+
+    Args:
+      next_fun: The next interceptor or the module method itself.
+      args: Positional arguments to the method.
+      kwargs: Keyword arguments to the method.
+      context: The flax interceptor context, used for the module identity.
+
+    Returns:
+      Whatever the intercepted method returns.
+    """
+    # Unbound modules have no scope, and therefore no op ids to reset.
+    scope = getattr(context.module, 'scope', None)
+    if scope is None:
+      return next_fun(*args, **kwargs)
+
+    # Flax pushes the module being called before running interceptors, so the
+    # current module is the last entry and everything before it encloses this
+    # call. If an enclosing module already owns this scope, its invocation is
+    # still in progress and the counters must keep running. That covers both a
+    # module calling another of its own methods, and `nn.share_scope` siblings,
+    # which deliberately share one counter namespace so that they do not land
+    # on the same ids.
+    module_stack = nn.module._context.module_stack  # pylint: disable=protected-access
+    for enclosing in module_stack[:-1]:
+      if getattr(enclosing, 'scope', None) is scope:
+        return next_fun(*args, **kwargs)
+
+    aux_data.clear(scope)
+    return next_fun(*args, **kwargs)
+
   def _get_current_rule_and_op_id(
       self,
       op_name: str,
