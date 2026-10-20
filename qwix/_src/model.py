@@ -89,12 +89,29 @@ def quantize_model(
     raise ValueError(f"Unsupported model type: {type(model)}")
 
 
-def quantize_linen_model(
-    model: nn.Module,
+def quantize_linen_class(
+    model_class: type[nn.Module],
     provider: qconfig.QuantizationProvider,
-    methods: Collection[str],
-) -> nn.Module:
-  """Quantize a linen model."""
+    methods: Collection[str] = ("__call__",),
+) -> type[nn.Module]:
+  """Quantize a linen model class.
+
+  Interception is applied by building a subclass rather than by setting
+  attributes on a model instance. `nn.Module.apply` invokes a copy of the
+  model rather than the original one, so setting the attributes of the model
+  doesn't always work. For example, in a VAE model, we intercept the encode
+  and decode methods, but invoke the __call__ method during training. The
+  interception on encode and decode methods will be unset when the model is
+  copied.
+
+  Args:
+    model_class: The linen model class to quantize.
+    provider: The quantization provider.
+    methods: The methods to quantize.
+
+  Returns:
+    A quantized model class subclassing the original model class.
+  """
 
   def _is_in_nn_module() -> bool:
     nn_module = nn.module._context.module_stack[-1]  # pylint: disable=protected-access
@@ -102,16 +119,6 @@ def quantize_linen_model(
       return False
     return nn_module.scope is not None
 
-  # Make a copy of the model to avoid modifying the original model.
-  model = model.copy()
-
-  # We need to modify the model class's methods because nn.Module.apply will
-  # invoke a copy of the model rather than the original one, so setting the
-  # attributes of the model doesn't always work. For example, in a VAE model,
-  # we intercept the encode and decode methods, but invoke the __call__ method
-  # during training. The interception on encode and decode methods will be
-  # unset when the model is copied.
-  model_class = model.__class__
   # If the model class is already quantized, get the unquantized type.
   if hasattr(model_class, "_unquantized_type"):
     model_class = model_class._unquantized_type  # pylint: disable=protected-access
@@ -146,8 +153,18 @@ def quantize_linen_model(
 
     new_fields[method_name] = method
 
-  # Create a new class for the model.
-  model.__class__ = type(model_class.__name__, (model_class,), new_fields)
+  return type(model_class.__name__, (model_class,), new_fields)
+
+
+def quantize_linen_model(
+    model: nn.Module,
+    provider: qconfig.QuantizationProvider,
+    methods: Collection[str],
+) -> nn.Module:
+  """Quantize a linen model."""
+  # Make a copy of the model to avoid modifying the original model.
+  model = model.copy()
+  model.__class__ = quantize_linen_class(model.__class__, provider, methods)
   return model
 
 
@@ -241,7 +258,7 @@ def _output_transform_nnx(
   # flax_util.get_current_module() can work inside the output transform.
   # We cannot use the model in quantize_nnx_model because users may choose to
   # clone the model.
-  args = inspect.currentframe().f_back.f_locals["args"]  # pytype: disable=attribute-error # pyrefly: ignore
+  args = inspect.currentframe().f_back.f_locals["args"]  # pyrefly: ignore[missing-attribute]
   self = args[0]  # pylint: disable=unused-variable
   return provider.process_model_output(method_name, output)
 
