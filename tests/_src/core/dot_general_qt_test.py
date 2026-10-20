@@ -312,6 +312,41 @@ class DotGeneralQtTest(parameterized.TestCase):
     # are actually used but the jaxpr includes all of them.
     self.assertEqual(dot_general_count, 9)
 
+  def test_backward_with_unquantized_gradient_consumes_int8_residuals(self):
+    """The backward dots fold the residual scales into g (dot_general fold path).
+
+    Without gradient quantization, dlhs = g . W^T and drhs = X^T . g contract
+    the channelwise residuals along their channel axis, so their scales are
+    folded into g and the matmuls consume the int8 residuals directly instead
+    of a dequantized bf16 copy.
+    """
+    dnum = (((1,), (0,)), ((), ()))
+    config = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='int8', rhs_qtype='int8'
+    )
+
+    def loss(x, w):
+      return jnp.sum(dot_general_qt.dot_general_qt(x, w, dnum, config))
+
+    jaxpr = jax.make_jaxpr(jax.grad(loss, argnums=(0, 1)))(
+        jax.ShapeDtypeStruct((16, 256), jnp.bfloat16),
+        jax.ShapeDtypeStruct((256, 64), jnp.bfloat16),
+    )
+    operand_dtypes = [
+        tuple(v.aval.dtype for v in eqn.invars)
+        for eqn in jaxpr.eqns
+        if eqn.primitive.name == 'dot_general'
+    ]
+    # One fwd int8 x int8 dot, then dlhs and drhs with the unquantized g.
+    self.assertEqual(
+        operand_dtypes,
+        [
+            (jnp.int8, jnp.int8),
+            (jnp.bfloat16, jnp.int8),
+            (jnp.bfloat16, jnp.int8),
+        ],
+    )
+
   def test_gradient_clipping_integration(self):
     """Verifies that calibration scaling triggers gradient masking (STE)."""
     lhs = jnp.array([[-2.0, 0.0, 2.0]], dtype=jnp.float32)

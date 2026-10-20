@@ -18,7 +18,6 @@ import functools
 from typing import Any, Callable
 
 import jax
-from jax import numpy as jnp
 import numpy as np
 from qwix._src import interception
 from qwix._src.core import dot_general
@@ -159,16 +158,6 @@ def _update_dimension_numbers_for_backward(
   x_ca_sorted_by_y = tuple(np.take(x_ca, np.argsort(y_ca)))
   out_transpose_axes = tuple(np.argsort(tuple(x_ba) + x_ra + x_ca_sorted_by_y))
   return dnums, out_transpose_axes
-
-
-def _apply_rhs_scale_to_lhs(lhs, rhs_scale, dnums):
-  """Applies the rhs_scale to lhs."""
-  (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dnums
-  lhs_axes_to_rhs = dict(zip(lhs_ca, rhs_ca)) | dict(zip(lhs_ba, rhs_ba))
-  lhs_scale = qarray.transpose_array(
-      rhs_scale, [lhs_axes_to_rhs.get(a) for a in range(lhs.ndim)]
-  )
-  return qarray.call_with_generic_broadcast(jnp.multiply, lhs, lhs_scale)
 
 
 def _is_block_scaled(operand: qarray.MaybeQArray) -> bool:
@@ -410,7 +399,10 @@ def dot_general_qt_bwd(
         # Apply the scale of y to g, this trick avoids requantizing y because
         # the y from fwd pass has different channelwise_axes.
         assert y.zero_point is None and y.qtype == y.qvalue.dtype
-        g = _apply_rhs_scale_to_lhs(g, y.scale, bwd_dnums)
+        (g_ca, y_ca), (g_ba, y_ba) = bwd_dnums
+        g = dot_general.fold_scale_into(
+            g, y.scale, (*g_ca, *g_ba), (*y_ca, *y_ba)
+        )
         y = y.qvalue
 
       g_how = dot_general.get_how_to_quantize(

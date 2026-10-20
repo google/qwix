@@ -12,14 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import functools
 import time
+from unittest import mock
 
 from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 from jax import numpy as jnp
+from qwix._src.core import dot_general
 from qwix._src.core import einsum
 from qwix._src.core import qarray
 
@@ -446,6 +449,77 @@ class EinsumTest(parameterized.TestCase):
     rhs = jnp.ones((1, 3, 4, 8))
     with self.assertRaisesRegex(ValueError, 'Cannot broadcast'):
       einsum.einsum('BTNH,BSNH->BTNS', lhs, rhs)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='qk_fast',
+          einsum_str='btkgd,bskd->bkgts',
+          lhs_shape=(2, 3, 2, 2, 16),
+          expected_impl='_fast_dot_general',
+      ),
+      dict(
+          testcase_name='pv_fold',
+          einsum_str='bkgts,bskd->btkgd',
+          lhs_shape=(2, 2, 2, 3, 8),
+          expected_impl='_fold_scale_dot_general',
+      ),
+  )
+  def test_attention_with_per_token_quantized_kv(
+      self, einsum_str, lhs_shape, expected_impl
+  ):
+    """K/V with per-token, per-head scales [b,s,k,1] of a quantized KV cache.
+
+    QK contracts d, so the scales are applied to the output; PV contracts s,
+    along which the scales vary, so they are folded into P instead.
+
+    Args:
+      einsum_str: The einsum string.
+      lhs_shape: The shape of the unquantized lhs.
+      expected_impl: The dot_general implementation expected to be used.
+    """
+    lhs = self._make_array(lhs_shape, jnp.float32)
+    kv = self._make_array((2, 8, 2, 16), jnp.float32)
+    q_kv = qarray.quantize(
+        kv,
+        qarray.HowToQuantize(qtype=jnp.int8, channelwise_axes=(0, 1, 2)),
+    )
+    impls = (
+        '_fast_dot_general',
+        '_fold_scale_dot_general',
+        '_slow_dot_general',
+    )
+    with contextlib.ExitStack() as stack:
+      mocks = {
+          impl: stack.enter_context(
+              mock.patch.object(
+                  dot_general, impl, wraps=getattr(dot_general, impl)
+              )
+          )
+          for impl in impls
+      }
+      q_res = einsum.einsum(
+          einsum_str, lhs, q_kv, precision=jax.lax.Precision.HIGHEST
+      )
+    for impl, mock_impl in mocks.items():
+      if impl == expected_impl:
+        mock_impl.assert_called_once()
+      else:
+        mock_impl.assert_not_called()
+
+    fp_res = jnp.einsum(
+        einsum_str,
+        lhs,
+        qarray.dequantize(q_kv),
+        precision=jax.lax.Precision.HIGHEST,
+    )
+    self.assertEqual(q_res.dtype, fp_res.dtype)
+    self.assertEqual(q_res.shape, fp_res.shape)
+    # Both sides run f32 matmuls at Precision.HIGHEST and differ only by the
+    # f32 rounding of the scaled operand, so a few ulps of f32 bound them.
+    # Observed rel_mae: 3e-8 to 4e-8 on TPU v5e, 4e-8 to 9e-8 on CPU.
+    rel_mae = jnp.abs(q_res - fp_res).mean() / jnp.abs(fp_res).mean()
+    logging.info('rel_mae=%s', rel_mae)
+    self.assertLessEqual(rel_mae, 4 * jnp.finfo(jnp.float32).eps)
 
   def test_innermost_tiling_heuristic(self):
     einsum_str = 'BTNH,NHO->BTO'

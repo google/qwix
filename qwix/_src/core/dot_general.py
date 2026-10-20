@@ -15,7 +15,7 @@
 
 # pylint: disable=line-too-long
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 import itertools
 from typing import Any
 import jax
@@ -88,6 +88,42 @@ def _get_scale_transpose(
       list(lhs_ba) + list(lhs_ra) + [None] * len(rhs_ra),  # lhs_scale_transpose
       list(rhs_ba) + [None] * len(lhs_ra) + list(rhs_ra),  # rhs_scale_transpose
   )
+
+
+def fold_scale_into(
+    x: jax.Array,
+    scale: jax.Array,
+    x_axes: Sequence[int],
+    scale_axes: Sequence[int],
+) -> jax.Array:
+  """Multiplies the scale of a quantized operand into the other operand.
+
+  For a dot_general of x and a quantized operand q (on either side),
+  dot_general(x, q.qvalue * scale) == dot_general(x * x_scale, q.qvalue), where
+  x_scale is scale transposed onto x by mapping axis scale_axes[i] of scale to
+  axis x_axes[i] of x, as long as scale has size 1 on all axes not in
+  scale_axes, which x doesn't have. Along scale_axes, i.e. the contracting and
+  batch axes, the scale can have any number of values (channelwise or tiled),
+  since it is generic broadcasted to x.
+
+  Args:
+    x: The unquantized operand of dot_general.
+    scale: The scale of the quantized operand q.
+    x_axes: The contracting and batch axes of x.
+    scale_axes: The axes of q (and scale) matching x_axes, in the same order.
+
+  Returns:
+    x multiplied by the scale, in the promoted dtype of x and scale.
+
+  Raises:
+    ValueError: If scale has more than one value along an axis that is not in
+      scale_axes.
+  """
+  x_axes_to_scale = dict(zip(x_axes, scale_axes, strict=True))
+  x_scale = qarray.transpose_array(
+      scale, [x_axes_to_scale.get(a) for a in range(x.ndim)]
+  )
+  return qarray.call_with_generic_broadcast(jnp.multiply, x, x_scale)
 
 
 def _apply_tiling(
@@ -275,6 +311,65 @@ def _slow_dot_general(
   return jax.lax.dot_general(lhs, rhs, dimension_numbers, **kwargs)
 
 
+def _fold_scale_dot_general(
+    lhs: qarray.MaybeQArray,
+    rhs: qarray.MaybeQArray,
+    dimension_numbers: jax.lax.DotDimensionNumbers,
+    preferred_element_type: jax.typing.DTypeLike | None = None,
+    **kwargs,
+) -> jax.Array:
+  """Dot general that folds the scale of the QArray into the other operand.
+
+  When the QArray's scale varies along a contracting axis, it cannot be factored
+  out to the output (_fast_dot_general). If the QArray has no zero_point and its
+  scale has size 1 on all of its remaining (output) axes, we instead shift the
+  scale onto the unquantized operand x (dot(x, q * s) == dot(x * s', q)) so the
+  matmul still consumes the raw qvalue; see _choose_dot_general_impl.
+
+  The scaled operand x * scale is computed in jnp.result_type(x, scale). When
+  scale.dtype == x.dtype (the common case), the matmul operands have the same
+  dtypes as in _fast_dot_general; when scale is wider than x (e.g. f32 scale
+  with bf16 x), the matmul consumes the promoted x * scale directly rather than
+  downcasting back to x.dtype, preserving accuracy against the slow path on
+  CPU/GPU (and on TPU, where default matmul precision rounds f32 inputs to bf16
+  anyway).
+
+  Args:
+    lhs: The left-hand side, either a jax.Array or QArray.
+    rhs: The right-hand side, either a jax.Array or QArray.
+    dimension_numbers: The dimension numbers passed to dot_general.
+    preferred_element_type: The preferred element type for dot_general.
+    **kwargs: Additional keyword arguments to jax.lax.dot_general.
+
+  Returns:
+    a floating-point jax.Array.
+  """
+  preferred_element_type, result_type = qarray.get_accumulator_and_result_type(
+      lhs, rhs, preferred_element_type=preferred_element_type
+  )
+  (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dimension_numbers
+  if isinstance(lhs, qarray.QArray):
+    assert lhs.zero_point is None and not isinstance(rhs, qarray.QArray)
+    rhs = fold_scale_into(
+        rhs, lhs.scale, (*rhs_ca, *rhs_ba), (*lhs_ca, *lhs_ba)
+    )
+    lhs = lhs.qvalue
+  else:
+    assert isinstance(rhs, qarray.QArray) and rhs.zero_point is None
+    lhs = fold_scale_into(
+        lhs, rhs.scale, (*lhs_ca, *lhs_ba), (*rhs_ca, *rhs_ba)
+    )
+    rhs = rhs.qvalue
+  res = jax.lax.dot_general(
+      lhs,
+      rhs,
+      dimension_numbers=dimension_numbers,
+      preferred_element_type=preferred_element_type,
+      **kwargs,
+  )
+  return res.astype(result_type)
+
+
 def loop_dot_general(
     lhs: qarray.MaybeQArray,
     rhs: qarray.MaybeQArray,
@@ -441,15 +536,25 @@ def get_min_tile_size_to_dequant_on_output() -> int:
   )
 
 
-def _should_use_fast_dot_general(
+def _choose_dot_general_impl(
     lhs: qarray.MaybeQArray,
     rhs: qarray.MaybeQArray,
     dimension_numbers: jax.lax.DotDimensionNumbers,
-) -> bool:
-  """Returns whether dot_general should use the fast path.
+) -> Callable[..., jax.Array]:
+  """Chooses the implementation of dot_general for the given operands.
 
-  The fast path computes in quantized types and applies the scales of the
-  QArray operands on the output, instead of dequantizing them first.
+  For a quantized operand q = qvalue * scale, there are three ways to evaluate
+  dot_general:
+  * _fast_dot_general: compute on raw qvalue and apply scales to the output
+    (when scales are constant along contracting axes, or tiled with large enough
+    tiles when both operands are quantized).
+  * _fold_scale_dot_general: for unquantized x QArray, multiply the QArray's
+    scale into the unquantized operand and compute on raw qvalue (when the scale
+    varies along a contracting axis, so it cannot be applied to the output, but
+    has size 1 along the QArray's remaining output axes, e.g. per-token KV-cache
+    scales in attention P @ V or channelwise weights in the QT backward pass).
+  * _slow_dot_general: dequantize to floating point before the matmul (or plain
+    jax.lax.dot_general when neither operand is a QArray).
 
   Args:
     lhs: The left-hand side of dot_general.
@@ -457,16 +562,16 @@ def _should_use_fast_dot_general(
     dimension_numbers: The dimension numbers of dot_general.
 
   Returns:
-    True if at least one operand is a QArray and it is beneficial to apply the
-    scales of every QArray operand on the output. Without a QArray operand there
-    is nothing to dequantize, so this returns False.
+    One of the three implementations, which take the same arguments as
+    dot_general.
   """
   # Without a QArray operand there is nothing to dequantize, so fall back to
-  # jax.lax.dot_general (slow path) and follow JAX's default dtype rules.
+  # jax.lax.dot_general and follow JAX's default dtype rules.
   if not isinstance(lhs, qarray.QArray) and not isinstance(rhs, qarray.QArray):
-    return False
-  for operand, contracting_axes, other_operand in zip(
-      (lhs, rhs), dimension_numbers[0], (rhs, lhs)
+    return _slow_dot_general
+  (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dimension_numbers
+  for operand, contracting_axes, batch_axes, other_operand in zip(
+      (lhs, rhs), (lhs_ca, rhs_ca), (lhs_ba, rhs_ba), (rhs, lhs)
   ):
     # Only QArray operands have scales to check. A jax.Array operand is
     # handled when checking the other operand, the QArray.
@@ -475,7 +580,7 @@ def _should_use_fast_dot_general(
     qarray.validate_qarray(operand)
     # qtypes like nf4 cannot be dequantized on output.
     if not numerics.can_dequant_on_output(operand.qtype):
-      return False
+      return _slow_dot_general
     # Tile sizes of the contracting axes with more than one scale (subchannel).
     tile_sizes = [
         operand.qvalue.shape[axis] // operand.scale.shape[axis]
@@ -489,25 +594,38 @@ def _should_use_fast_dot_general(
         other_operand, qarray.QArray
     ) and numerics.should_quantize(other_operand.dtype)
     # With an unquantized other operand, the matmul runs in floating point
-    # either way, so only dequantize on output if it adds no work: zero_point
-    # needs an extra matmul and tiled contracting axes need per-tile rescaling.
-    # Otherwise, this passes the raw quantized values to XLA, e.g. for int4
-    # nibble loading on newer TPUs.
+    # either way, so the scale is applied on the output only if that adds no
+    # work: a zero_point needs an extra matmul and tiled contracting axes need
+    # per-tile rescaling. Otherwise, if there is no zero_point and the scale has
+    # size 1 on the QArray's remaining (output) axes, fold the scale into the
+    # other operand (dot(x, q * s) == dot(x * s', q)) so the matmul still
+    # consumes the raw qvalue. Anything else dequantizes first.
     # TODO: b/570154253 - Unquantized x sub-channel QArray could also use the
     # fast path for small M (decode); this needs an M-aware heuristic or a
     # kernel.
     if is_other_operand_unquantized and (
         operand.zero_point is not None or tile_sizes
     ):
-      return False
+      remaining_axes = (
+          set(range(operand.ndim)) - set(contracting_axes) - set(batch_axes)
+      )
+      if (
+          operand.zero_point is None
+          and all(operand.scale.shape[axis] == 1 for axis in remaining_axes)
+          # Avoid folding in f16: x * scale (e.g. softmax probabilities times
+          # per-token V scales) can underflow into f16 subnormals.
+          and jnp.result_type(other_operand, operand.scale) != jnp.float16
+      ):
+        return _fold_scale_dot_general
+      return _slow_dot_general
     # Small tiles make the tiled matmul inefficient, e.g. tile_size=1 when a
     # contracting axis is channelwise quantized. The threshold is device
     # dependent.
     if tile_sizes and (
         min(tile_sizes) < get_min_tile_size_to_dequant_on_output()
     ):
-      return False
-  return True
+      return _slow_dot_general
+  return _fast_dot_general
 
 
 def dot_general(
@@ -559,25 +677,12 @@ def dot_general(
   if mxfp_result is not None:
     return mxfp_result
 
-  # We need to choose between slow_dot_general, which dequantizes first and
-  # then computes in floating-point types, and fast_dot_general, which
-  # computes in quantized types first and then dequantize. Without a QArray
-  # there is nothing to dequantize, so use a plain dot_general.
-  if _should_use_fast_dot_general(lhs, rhs, dimension_numbers):
-    return _fast_dot_general(
-        lhs,
-        rhs,
-        dimension_numbers,
-        precision=precision,
-        preferred_element_type=preferred_element_type,
-        **kwargs,
-    )
-  else:
-    return _slow_dot_general(
-        lhs,
-        rhs,
-        dimension_numbers,
-        precision=precision,
-        preferred_element_type=preferred_element_type,
-        **kwargs,
-    )
+  impl = _choose_dot_general_impl(lhs, rhs, dimension_numbers)
+  return impl(
+      lhs,
+      rhs,
+      dimension_numbers,
+      precision=precision,
+      preferred_element_type=preferred_element_type,
+      **kwargs,
+  )
