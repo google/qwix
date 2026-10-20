@@ -19,6 +19,7 @@ import functools
 import sys
 from typing import Any, Callable, Sequence
 
+from absl import logging
 import jax
 from jax import numpy as jnp
 from qwix._src import aux_data
@@ -28,6 +29,7 @@ from qwix._src.core import conv_general
 from qwix._src.core import dot_general
 from qwix._src.core import einsum
 from qwix._src.core import qarray
+from qwix._src.utils import flax_util
 
 
 def get_all_ops():
@@ -145,27 +147,28 @@ class AuxDataKey(str, enum.Enum):
   # static weight.
   WEIGHT_NAME = 'weight_name'  # str
 
-  # Whether this exact array is the direct logical value exposed by the
-  # Linen/NNX parameter API, with no subsequently intercepted tensor transform.
-  # This is stricter than WEIGHT_NAME, but it does not prove that a lifted or
-  # boxed static parameter tree has the same shape and layout.
-  IS_ORIGINAL_WEIGHT = 'is_original_weight'  # bool
+  # The layout transforms that turn the stored parameter into this array, as a
+  # tuple of (primitive, params) pairs in application order. Only the
+  # conversion provider records them (see PrimitiveBindOp), and replays them on
+  # the static parameter so that the baked scale describes the same tensor
+  # layout that the op actually consumes. An absent key means the array is the
+  # untransformed parameter.
+  WEIGHT_TRANSFORMS = 'weight_transforms'  # tuple[tuple[Primitive, dict], ...]
+
+  # Set on the output of a value-preserving primitive that Qwix cannot replay
+  # on a stored parameter (gather, dynamic_slice, concatenate, split). The
+  # output is not a weight anymore and stays float; consuming ops use this to
+  # explain why. Stored as (weight_name, primitive_name).
+  DROPPED_WEIGHT = 'dropped_weight'  # tuple[str, str]
 
   # Fixed range for logistic functions whose output ranges are known, e.g.
   # softmax.
   FIXED_RANGE = 'fixed_range'  # tuple[float, float]
 
-  # Exact RHS permutation to replay before flattened-einsum calibration.
-  FLATTENED_EINSUM_RHS_PERM = 'flattened_einsum_rhs_perm'  # tuple[int, ...]
-
 
 # Metadata keys that depend on the value being preserved.
 # If the value changes (e.g. add, mul), these keys become invalid.
-# IS_ORIGINAL_WEIGHT is intentionally excluded from all propagation. A
-# transform may retain weight provenance, but without a general static replay
-# mechanism its output cannot be treated as the direct parameter API value.
 _VALUE_DEPENDENT_METADATA = (
-    AuxDataKey.WEIGHT_NAME,
     AuxDataKey.FQ_RULE,
     AuxDataKey.FIXED_RANGE,
     AuxDataKey.ALLOW_FUSION,
@@ -188,6 +191,25 @@ _VALUE_PRESERVING_PRIMITIVES = {
     'concatenate',
     'gather',
     'split',
+}
+
+# The value-preserving primitives through which an array keeps its weight
+# identity. Each of them takes exactly one array operand and otherwise only
+# static parameters, so the conversion provider can rebuild the runtime layout
+# of a weight from its stored parameter with `primitive.bind(param, **params)`
+# and calibrate exactly what the op consumes. The remaining value-preserving
+# primitives take extra array operands (gather, dynamic_slice, concatenate) or
+# produce several outputs (split); a weight going through them becomes a plain
+# constant and stays float in both QAT and conversion.
+_REPLAYABLE_WEIGHT_PRIMITIVES = {
+    'reshape',
+    'transpose',
+    'broadcast_in_dim',
+    'slice',
+    'squeeze',
+    'rev',
+    'stop_gradient',
+    'convert_element_type',
 }
 
 # These elementwise arithmetic ops perform linear scaling or shifting.
@@ -547,15 +569,21 @@ class FinalOutput(QuantizedOp):
 def _forward_metadata(
     inputs: Any,
     outputs: Any,
-    primitive_name: str | None = None,
+    primitive: Any = None,
+    params: dict[str, Any] | None = None,
+    record_weight_transforms: bool = False,
 ):
   """Forwards metadata from inputs to outputs.
 
   Args:
     inputs: The input value(s) of the op, could be a pytree.
     outputs: The output value(s) of the op, could be a pytree.
-    primitive_name: The name of the JAX primitive being executed. If None, the
-      operation defaults to value-preserving (transparent) propagation.
+    primitive: The JAX primitive (jax.extend.core.Primitive) being executed. If
+      None, the operation defaults to value-preserving (transparent) propagation
+      for activations.
+    params: The static parameters the primitive was bound with.
+    record_weight_transforms: Whether to record replayable weight transforms in
+      AuxDataKey.WEIGHT_TRANSFORMS. Only the conversion provider needs them.
 
   Metadata propagation categories:
   1. Value-Preserving Operations (e.g., reshape, transpose, slice):
@@ -563,12 +591,17 @@ def _forward_metadata(
        layout
      or indexing, not the underlying numerical values.
      - AuxDataKey.IS_ACTIVATION (Union: if any input is activation)
-     - AuxDataKey.WEIGHT_NAME (if uniquely identifying a single weight)
      - AuxDataKey.FQ_RULE
      - AuxDataKey.FIXED_RANGE
      - AuxDataKey.ALLOW_FUSION
      - AuxDataKey.FQ_ARRAY (Intersection: if all activation inputs are
        quantized)
+     - AuxDataKey.WEIGHT_NAME, only for the single-operand primitives in
+       _REPLAYABLE_WEIGHT_PRIMITIVES, where the conversion provider can
+       rebuild the output from the stored parameter (optionally recording the
+       transform in AuxDataKey.WEIGHT_TRANSFORMS). Other value-preserving
+       primitives turn a weight into a plain constant and record why in
+       AuxDataKey.DROPPED_WEIGHT.
 
   2. Elementwise Linear Arithmetic Operations (e.g., mul, add, sub, div, neg):
      Consumes exactly one activation input (where others are static bounds or
@@ -587,6 +620,7 @@ def _forward_metadata(
      leakage. Propagates only data provenance:
      - AuxDataKey.IS_ACTIVATION (Union)
   """
+  primitive_name = primitive.name if primitive is not None else None
   is_value_preserving_op = (
       primitive_name in _VALUE_PRESERVING_PRIMITIVES
       if primitive_name is not None
@@ -613,10 +647,11 @@ def _forward_metadata(
   metadata = {}
   is_activation = False
   all_args_quantized = True
-  weight_names = set()
+  array_args = []
   for arg in jax.tree.leaves(inputs):
     if not isinstance(arg, jax.Array):
       continue
+    array_args.append(arg)
 
     # Check if at least one arg is activation.
     if aux_data.get(arg, AuxDataKey.IS_ACTIVATION, False):
@@ -629,11 +664,7 @@ def _forward_metadata(
     if is_value_preserving_op:
       for key in _VALUE_DEPENDENT_METADATA:
         val = aux_data.get(arg, key, None)
-        if val is None:
-          continue
-        if key == AuxDataKey.WEIGHT_NAME:
-          weight_names.add(val)
-        else:
+        if val is not None:
           # Last wins for value dependent metadata.
           metadata[key] = val
     # For linear scaling ops, propagate ONLY FQ_RULE and ALLOW_FUSION.
@@ -646,9 +677,27 @@ def _forward_metadata(
   # Set IS_ACTIVATION if at least one arg is activation.
   if is_activation:
     metadata[AuxDataKey.IS_ACTIVATION] = True
-  # For value-preserving ops, set WEIGHT_NAME if purely a single weight op.
-  elif len(weight_names) == 1:
-    metadata[AuxDataKey.WEIGHT_NAME] = next(iter(weight_names))
+  # Weight identity only survives value-preserving ops on a single weight.
+  elif is_value_preserving_op and primitive_name is not None:
+    weight_names = {
+        aux_data.get(arg, AuxDataKey.WEIGHT_NAME, None) for arg in array_args
+    } - {None}
+    if len(weight_names) == 1:
+      weight_name = next(iter(weight_names))
+      if (
+          primitive_name in _REPLAYABLE_WEIGHT_PRIMITIVES
+          and len(array_args) == 1
+      ):
+        metadata[AuxDataKey.WEIGHT_NAME] = weight_name
+        if record_weight_transforms:
+          transforms = aux_data.get(
+              array_args[0], AuxDataKey.WEIGHT_TRANSFORMS, ()
+          )
+          metadata[AuxDataKey.WEIGHT_TRANSFORMS] = transforms + (
+              (primitive, params or {}),
+          )
+      else:
+        metadata[AuxDataKey.DROPPED_WEIGHT] = (weight_name, primitive_name)
   # For value-preserving ops, set FQ_ARRAY if all args are fq and out is act.
   if is_value_preserving_op and is_activation and all_args_quantized:
     metadata[AuxDataKey.FQ_ARRAY] = 'self'
@@ -679,6 +728,11 @@ class Dropout(QuantizedOp):
 class PrimitiveBindOp(QuantizedOp):
   """Propagates metadata tags across JAX primitives."""
 
+  # Whether to record the layout transforms that weights go through, so that
+  # the conversion provider can replay them on the stored parameters. QAT
+  # calibrates the live weight operand and doesn't need them.
+  record_weight_transforms: bool = False
+
   def __init__(self, **kwargs):
     super().__init__(
         op_full_name=interception.PRIMITIVE_BIND_KEY,
@@ -689,7 +743,13 @@ class PrimitiveBindOp(QuantizedOp):
 
   def __call__(self, primitive, *args, **params):
     out = self._call_original_op(primitive, *args, **params)
-    _forward_metadata(args, out, primitive_name=primitive.name)
+    _forward_metadata(
+        args,
+        out,
+        primitive=primitive,
+        params=params,
+        record_weight_transforms=self.record_weight_transforms,
+    )
     return out
 
 
@@ -863,6 +923,36 @@ class DotEinsumConv(QuantizedOp):
       self.input_idx = [1, 2]
     else:
       self.input_idx = [0, 1]
+    # (module path, op id, weight name, primitive name) already warned about.
+    self._dropped_weights_warned = set()
+
+  def _maybe_warn_dropped_weight(self, array: Any, op_id: str):
+    """Explains why a former weight operand is consumed as a float constant."""
+    if not isinstance(array, jax.Array):
+      return
+    dropped = aux_data.get(array, AuxDataKey.DROPPED_WEIGHT, None)
+    if dropped is None:
+      return
+    weight_name, primitive_name = dropped
+    key = (
+        flax_util.get_current_module_path(),
+        op_id,
+        weight_name,
+        primitive_name,
+    )
+    if key in self._dropped_weights_warned:
+      return
+    self._dropped_weights_warned.add(key)
+    logging.warning(
+        '[QWIX] %s: weight %r went through %r, which Qwix cannot replay on the'
+        ' stored parameter at conversion time. The operand is treated as a'
+        ' plain constant and stays float in both QAT and conversion. Only %s'
+        ' keep a transformed weight quantizable.',
+        '/'.join(map(str, key[0] + (op_id,))),
+        weight_name,
+        primitive_name,
+        sorted(_REPLAYABLE_WEIGHT_PRIMITIVES),
+    )
 
   def _get_how_to_quantize(
       self,
@@ -927,6 +1017,10 @@ class DotEinsumConv(QuantizedOp):
     )
     assert lhs_is_activation + lhs_is_weight <= 1
     assert rhs_is_activation + rhs_is_weight <= 1
+    if not lhs_is_activation and not lhs_is_weight:
+      self._maybe_warn_dropped_weight(args[lhs_idx], op_id)
+    if not rhs_is_activation and not rhs_is_weight:
+      self._maybe_warn_dropped_weight(args[rhs_idx], op_id)
 
     # Check for strict mode.
     if self.check_activation and not lhs_is_activation and not lhs_is_weight:
