@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for MXFP scaled matmul.
+"""Unit tests for MXFP scaled dot.
 
-This test verifies the behavior of `jax.nn.scaled_matmul` for various
+This test verifies the behavior of `jax.lax.scaled_dot` for various
 MXFP (Microscaling Formats) configurations on different hardware backends.
 
 Key Formats:
@@ -41,38 +41,36 @@ import numpy as np
 from qwix._src.core import mxfp_dot
 from qwix._src.core import qarray
 
+_SCALED_DOT_3D_DNUMS = (((2,), (2,)), ((0,), (0,)))
 
-@functools.lru_cache(maxsize=None)
-def _scaled_matmul_supported() -> bool:
-  """Returns whether `jax.nn.scaled_matmul` can run on the current backend.
 
-  The `scaled_matmul` primitive lacks an MLIR lowering rule on some platforms
-  (e.g. CPU and TPU) in released JAX builds, where it raises
-  `NotImplementedError` at lowering time. We probe support at runtime and cache
-  the result so the affected tests automatically re-enable once a released JAX
-  gains a lowering for the current platform.
-  """
+@functools.cache
+def _scaled_dot_supported() -> bool:
+  """Returns whether `jax.lax.scaled_dot` can run on the current backend."""
   lhs = jnp.zeros((1, 1, 32), dtype=jnp.float32)
   rhs = jnp.zeros((1, 1, 32), dtype=jnp.float32)
   scale = jnp.ones((1, 1, 1), dtype=jnp.float32)
   try:
-    jax.jit(jax.nn.scaled_matmul)(lhs, rhs, scale, scale).block_until_ready()
+    fn = functools.partial(
+        jax.lax.scaled_dot,
+        dimension_numbers=_SCALED_DOT_3D_DNUMS,
+        preferred_element_type=jnp.float32,
+    )
+    jax.jit(fn)(lhs, rhs, lhs_scale=scale, rhs_scale=scale).block_until_ready()
     return True
-  except NotImplementedError:
+  except (AttributeError, NotImplementedError):
     return False
 
 
-def _skip_if_scaled_matmul_unsupported(test_case: absltest.TestCase) -> None:
-  if not _scaled_matmul_supported():
+def _skip_if_scaled_dot_unsupported(test_case: absltest.TestCase) -> None:
+  if not _scaled_dot_supported():
     test_case.skipTest(
-        "jax.nn.scaled_matmul has no lowering for platform "
-        f"{jax.devices()[0].platform!r} in this JAX build (raises "
-        "NotImplementedError). Re-enables automatically when a released JAX "
-        "adds support."
+        "jax.lax.scaled_dot is not supported on platform "
+        f"{jax.devices()[0].platform!r} in this JAX build."
     )
 
 
-def reference_scaled_matmul(lhs, rhs, lhs_scale, rhs_scale):
+def reference_scaled_dot(lhs, rhs, lhs_scale, rhs_scale):
   """Reference implementation using JNP."""
   # Assuming shapes:
   # lhs: (batch, m, k)
@@ -171,20 +169,31 @@ class MxfpNumericsTest(absltest.TestCase):
     return lhs, rhs
 
   def test_matmul_f32_baseline(self):
-    """Sanity check for scaled_matmul with FP32 and unit scales."""
-    _skip_if_scaled_matmul_unsupported(self)
+    """Sanity check for scaled_dot with FP32 and unit scales."""
+    _skip_if_scaled_dot_unsupported(self)
     lhs, rhs = self._generate_test_data()
 
-    # scaled_matmul with 1.0 scales should be same as normal matmul
+    # scaled_dot with 1.0 scales should be same as normal matmul
     lhs_scale = jnp.ones((1, 32, 2), dtype=jnp.float32)
     rhs_scale = jnp.ones((1, 32, 2), dtype=jnp.float32)
 
-    res = jax.nn.scaled_matmul(lhs, rhs, lhs_scale, rhs_scale)
+    scaled_dot_fn = functools.partial(
+        jax.lax.scaled_dot,
+        dimension_numbers=_SCALED_DOT_3D_DNUMS,
+        preferred_element_type=jnp.float32,
+    )
+    res = scaled_dot_fn(lhs, rhs, lhs_scale=lhs_scale, rhs_scale=rhs_scale)
     expected = jnp.einsum("bmk,bnk->bmn", lhs, rhs, precision="high")
     np.testing.assert_allclose(res, expected, rtol=2e-2, atol=2e-2)
-    logging.info("jax.nn.scaled_matmul (F32) SUCCEEDED")
+    logging.info("jax.lax.scaled_dot (F32) SUCCEEDED")
 
-    hlo = self._get_hlo(jax.nn.scaled_matmul, lhs, rhs, lhs_scale, rhs_scale)
+    hlo = self._get_hlo(
+        lambda a, b, sa, sb: scaled_dot_fn(a, b, lhs_scale=sa, rhs_scale=sb),
+        lhs,
+        rhs,
+        lhs_scale,
+        rhs_scale,
+    )
     logging.info("F32 Baseline HLO snippet: %s", hlo[:500])
 
   def run_mxfp_test(self, mxfp_format, data_type, scale_type, block_size):
@@ -197,7 +206,7 @@ class MxfpNumericsTest(absltest.TestCase):
       scale_type: The JAX data type for the scales.
       block_size: The block size for microscaling.
     """
-    _skip_if_scaled_matmul_unsupported(self)
+    _skip_if_scaled_dot_unsupported(self)
     logging.info(
         "Running MXFP test: mxfp_format=%s, data_type=%s, scale_type=%s,"
         " block_size=%d",
@@ -212,10 +221,15 @@ class MxfpNumericsTest(absltest.TestCase):
     lhs_q, lhs_scale = local_quantize(lhs, data_type, scale_type, block_size)
     rhs_q, rhs_scale = local_quantize(rhs, data_type, scale_type, block_size)
 
-    res = jax.nn.scaled_matmul(lhs_q, rhs_q, lhs_scale, rhs_scale)
-    logging.info("jax.nn.scaled_matmul succeeded for %s", mxfp_format)
+    scaled_dot_fn = functools.partial(
+        jax.lax.scaled_dot,
+        dimension_numbers=_SCALED_DOT_3D_DNUMS,
+        preferred_element_type=jnp.float32,
+    )
+    res = scaled_dot_fn(lhs_q, rhs_q, lhs_scale=lhs_scale, rhs_scale=rhs_scale)
+    logging.info("jax.lax.scaled_dot succeeded for %s", mxfp_format)
 
-    expected = reference_scaled_matmul(
+    expected = reference_scaled_dot(
         lhs_q.astype(jnp.float32),
         rhs_q.astype(jnp.float32),
         lhs_scale.astype(jnp.float32),
@@ -225,16 +239,22 @@ class MxfpNumericsTest(absltest.TestCase):
     np.testing.assert_allclose(res, expected, rtol=5e-2, atol=5e-2)
 
     hlo = self._get_hlo(
-        jax.nn.scaled_matmul, lhs_q, rhs_q, lhs_scale, rhs_scale
+        lambda a, b, sa, sb: scaled_dot_fn(a, b, lhs_scale=sa, rhs_scale=sb),
+        lhs_q,
+        rhs_q,
+        lhs_scale,
+        rhs_scale,
     )
     logging.info("%s HLO Snippet: %s", mxfp_format, hlo[:500])
 
-    # Check for custom-call pattern
-    if "custom-call" in hlo and (
-        "block_scaled_dot" in hlo or "blockScaledDot" in hlo
+    # Check for native scaled-dot or custom-call pattern
+    if "scaled-dot" in hlo or (
+        "custom-call" in hlo
+        and ("block_scaled_dot" in hlo or "blockScaledDot" in hlo)
     ):
       logging.info(
-          "Native %s support (custom-call) DETECTED in HLO", mxfp_format
+          "Native %s support (scaled-dot / custom-call) DETECTED in HLO",
+          mxfp_format,
       )
     else:
       logging.info(
@@ -243,7 +263,7 @@ class MxfpNumericsTest(absltest.TestCase):
           mxfp_format,
       )
 
-  def test_scaled_matmul_mxfp8(self):
+  def test_scaled_dot_mxfp8(self):
     self.run_mxfp_test(
         mxfp_format="mxfp8",
         data_type=jnp.float8_e4m3fn,
@@ -251,7 +271,7 @@ class MxfpNumericsTest(absltest.TestCase):
         block_size=32,
     )
 
-  def test_scaled_matmul_mxfp8_16(self):
+  def test_scaled_dot_mxfp8_16(self):
     self.run_mxfp_test(
         mxfp_format="mxfp8_16",
         data_type=jnp.float8_e4m3fn,
@@ -259,7 +279,7 @@ class MxfpNumericsTest(absltest.TestCase):
         block_size=16,
     )
 
-  def test_scaled_matmul_mxfp4(self):
+  def test_scaled_dot_mxfp4(self):
     self.run_mxfp_test(
         mxfp_format="mxfp4",
         data_type=jnp.float4_e2m1fn,
@@ -267,7 +287,7 @@ class MxfpNumericsTest(absltest.TestCase):
         block_size=32,
     )
 
-  def test_scaled_matmul_nvfp4(self):
+  def test_scaled_dot_nvfp4(self):
     self.run_mxfp_test(
         mxfp_format="nvfp4",
         data_type=jnp.float4_e2m1fn,

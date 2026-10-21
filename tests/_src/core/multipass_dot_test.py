@@ -90,7 +90,7 @@ def get_graph_gemms_and_casts(
   gemms = [
       eqn
       for eqn in all_eqns
-      if eqn.primitive.name in ('dot_general', 'scaled_matmul_wrapper')
+      if eqn.primitive.name in ('dot_general', 'scaled_dot')
   ]
   casts = [
       eqn for eqn in all_eqns if eqn.primitive.name == 'convert_element_type'

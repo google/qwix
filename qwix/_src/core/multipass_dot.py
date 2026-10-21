@@ -62,7 +62,7 @@ fp8 native path. We support the following int8 emulation modes:
 
 All decomposed passes are evaluated on quantized operands directly through the
 hardware FP8 path (via `_fast_dot_general` with hardware FP8 accumulation) or
-via `jax.nn.scaled_matmul` on supported GPUs.
+via `jax.lax.scaled_dot` on supported GPUs.
 
 Scaling factor design choice for residual passes:
 While an alternative formulation could independently compute fresh scaling
