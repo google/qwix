@@ -41,6 +41,11 @@ class QtRule(qconfig.QuantizationRule):
   bwd_calibration_method: str = 'absmax'
 
   # In backward pass, enable subchannel for the innermost (last) contraction
+  # axis when calculating gradients. If bwd_weight_grad_tile_size is also set,
+  # it overrides bwd_tile_size for the gradient of weights.
+  bwd_tile_size: int | float | None = None
+
+  # In backward pass, enable subchannel for the innermost (last) contraction
   # axis when calculating the gradient of weights. Note that the tiling is
   # actually applied to the incoming gradient and the residual activation
   # rather than any "weight".
@@ -348,13 +353,19 @@ class QtProvider(qconfig.QuantizationProvider):
     # bwd config, which is only enabled when bwd_qtype is set.
     dlhs_tile_size = None
     drhs_tile_size = None
+    dlhs_residual_qtype = None
+    drhs_residual_qtype = None
     bwd_stochastic_rounding_noise_fn = None
 
     if rule.bwd_qtype is not None:
-      if lhs_is_weight:
+      dlhs_tile_size = rule.bwd_tile_size
+      drhs_tile_size = rule.bwd_tile_size
+      if lhs_is_weight and rule.bwd_weight_grad_tile_size is not None:
         dlhs_tile_size = rule.bwd_weight_grad_tile_size
-      if rhs_is_weight:
+      if rhs_is_weight and rule.bwd_weight_grad_tile_size is not None:
         drhs_tile_size = rule.bwd_weight_grad_tile_size
+      dlhs_residual_qtype = rhs_qtype
+      drhs_residual_qtype = lhs_qtype
       if rule.bwd_stochastic_rounding is not None:
         bwd_stochastic_rounding_noise_fn = stochastic_rounding.get_noise_fn(
             method=rule.bwd_stochastic_rounding,
@@ -382,6 +393,9 @@ class QtProvider(qconfig.QuantizationProvider):
         dlhs_tile_size=dlhs_tile_size,
         dlhs_stochastic_rounding_noise_fn=bwd_stochastic_rounding_noise_fn,  # pyrefly: ignore[bad-argument-type]
         dlhs_grad_disable_channelwise_axes=rule.disable_channelwise_axes,
+        dlhs_residual_qtype=dlhs_residual_qtype,  # pyrefly: ignore[bad-argument-type]
+        dlhs_residual_calibration_method=rhs_calibration_method or 'absmax',
+        dlhs_residual_disable_channelwise_axes=rule.disable_channelwise_axes,
         # drhs configs.
         use_original_residuals=fwd_quantized and not bwd_quantized,
         drhs_grad_qtype=rule.bwd_qtype,
@@ -389,6 +403,9 @@ class QtProvider(qconfig.QuantizationProvider):
         drhs_tile_size=drhs_tile_size,
         drhs_stochastic_rounding_noise_fn=bwd_stochastic_rounding_noise_fn,  # pyrefly: ignore[bad-argument-type]
         drhs_grad_disable_channelwise_axes=rule.disable_channelwise_axes,
+        drhs_residual_qtype=drhs_residual_qtype,  # pyrefly: ignore[bad-argument-type]
+        drhs_residual_calibration_method=lhs_calibration_method or 'absmax',
+        drhs_residual_disable_channelwise_axes=rule.disable_channelwise_axes,
     )
 
     if rule.additional_qt_config:

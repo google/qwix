@@ -218,15 +218,9 @@ class QtTest(parameterized.TestCase):
         act_qtype="mxfp4",
         bwd_qtype="mxfp4",
         tile_size=32,
-        bwd_weight_grad_tile_size=32,
+        bwd_tile_size=32,
         disable_channelwise_axes=False,
         act_static_scale=False,
-        additional_qt_config={
-            "dlhs_grad_qtype": "mxfp4",
-            "dlhs_tile_size": 32,
-            "drhs_grad_qtype": "mxfp4",
-            "drhs_tile_size": 32,
-        },
     )
     model_input = jnp.ones((2, 32, 64), dtype=jnp.float32)
     mha = nnx.MultiHeadAttention(
@@ -260,7 +254,7 @@ class QtTest(parameterized.TestCase):
       self,
       tsb: bool,
       bwd_weight_grad_tsb: bool,
-      dlhs_tsb: bool,
+      bwd_tsb: bool,
   ):
     """Tests that QtProvider is compatible with 2D tile sizes."""
     # tsb is short for tile_size_bool
@@ -277,14 +271,10 @@ class QtTest(parameterized.TestCase):
         act_qtype="int8",
         bwd_qtype="int8",
         tile_size=_get_tile_size(tsb),
+        bwd_tile_size=_get_tile_size(bwd_tsb),
         bwd_weight_grad_tile_size=_get_tile_size(bwd_weight_grad_tsb),
         disable_channelwise_axes=False,
         act_static_scale=False,
-        additional_qt_config={
-            "dlhs_grad_qtype": "int8",
-            "dlhs_tile_size": _get_tile_size(dlhs_tsb),
-            "drhs_grad_qtype": "int8",
-        },
     )
     model_input = jnp.ones((8, 16), dtype=jnp.float32)
     linear = nnx.Linear(16, 32, rngs=nnx.Rngs(0))
@@ -305,6 +295,84 @@ class QtTest(parameterized.TestCase):
 
     grads = train_step(qt_linear, model_input)
     self.assertIsNotNone(grads)
+
+  def test_create_dot_general_qt_config_bwd_residuals_and_tiling(self):
+    """Tests backward residual qtypes and tile sizes in _create_dot_general_qt_config."""
+
+    class TestModule(nn.Module):
+      provider: qt.QtProvider
+
+      @nn.compact
+      def __call__(self, x):
+        w = self.param("w", nn.initializers.ones, (16, 32), jnp.bfloat16)
+        return (
+            self.provider._create_dot_general_qt_config(
+                self.provider._rules[0], "dot_general0", x, w
+            ),
+            self.provider._create_dot_general_qt_config(
+                self.provider._rules[0], "dot_general1", x, x
+            ),
+        )
+
+    x = jnp.ones((8, 16), dtype=jnp.bfloat16)
+
+    # 1. With bwd_qtype set: residual qtypes default to forward operand qtypes,
+    # and bwd_weight_grad_tile_size overrides bwd_tile_size on the weight side.
+    provider_bwd = qt.QtProvider([
+        qt.QtRule(
+            weight_qtype="mxfp8",
+            act_qtype="mxfp4",
+            bwd_qtype="mxfp8",
+            tile_size=32,
+            bwd_tile_size=32,
+            bwd_weight_grad_tile_size=16,
+            weight_calibration_method="absmax,0.8",
+            act_calibration_method="absmax,0.9",
+            disable_channelwise_axes=True,
+        ),
+    ])
+    module_bwd = TestModule(provider_bwd)
+    variables = module_bwd.init(jax.random.key(0), x)
+    linear_cfg, attn_cfg = module_bwd.apply(variables, x)
+
+    self.assertFalse(linear_cfg.use_original_residuals)
+    self.assertEqual(linear_cfg.dlhs_grad_qtype, "mxfp8")
+    self.assertEqual(linear_cfg.drhs_grad_qtype, "mxfp8")
+    self.assertEqual(linear_cfg.dlhs_residual_qtype, "mxfp8")
+    self.assertEqual(linear_cfg.drhs_residual_qtype, "mxfp4")
+    self.assertEqual(linear_cfg.dlhs_residual_calibration_method, "absmax,0.8")
+    self.assertEqual(linear_cfg.drhs_residual_calibration_method, "absmax,0.9")
+    self.assertTrue(linear_cfg.dlhs_residual_disable_channelwise_axes)
+    self.assertTrue(linear_cfg.drhs_residual_disable_channelwise_axes)
+    self.assertEqual(linear_cfg.dlhs_tile_size, 32)
+    self.assertEqual(linear_cfg.drhs_tile_size, 16)
+
+    self.assertEqual(attn_cfg.dlhs_residual_qtype, "mxfp4")
+    self.assertEqual(attn_cfg.drhs_residual_qtype, "mxfp4")
+    self.assertEqual(attn_cfg.dlhs_tile_size, 32)
+    self.assertEqual(attn_cfg.drhs_tile_size, 32)
+
+    # 2. Forward-only quantization (bwd_qtype=None): backward stays unquantized.
+    provider_fwd_only = qt.QtProvider([
+        qt.QtRule(
+            weight_qtype="mxfp8",
+            act_qtype="mxfp4",
+            tile_size=32,
+            bwd_tile_size=32,
+            bwd_weight_grad_tile_size=16,
+        ),
+    ])
+    module_fwd = TestModule(provider_fwd_only)
+    linear_fwd_cfg, _ = module_fwd.apply(
+        module_fwd.init(jax.random.key(0), x), x
+    )
+    self.assertTrue(linear_fwd_cfg.use_original_residuals)
+    self.assertIsNone(linear_fwd_cfg.dlhs_grad_qtype)
+    self.assertIsNone(linear_fwd_cfg.drhs_grad_qtype)
+    self.assertIsNone(linear_fwd_cfg.dlhs_residual_qtype)
+    self.assertIsNone(linear_fwd_cfg.drhs_residual_qtype)
+    self.assertIsNone(linear_fwd_cfg.dlhs_tile_size)
+    self.assertIsNone(linear_fwd_cfg.drhs_tile_size)
 
 
 if __name__ == "__main__":
