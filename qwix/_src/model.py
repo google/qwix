@@ -187,19 +187,12 @@ def quantize_nnx_model(
   # Only intercepts the `call_method` of the nnx module for now.
   #
   # The class method type(model).__call__ will be invoked when calling the
-  # instance of the class so we create a new class with the intercepted __call__
-  # and the update the class of the model.
-  new_fields = {
-      "_unquantized_type": model_class,
-      call_method: _apply_interceptors(
-          getattr(model_class, call_method),
-          provider,
-          output_transform=functools.partial(
-              _output_transform_nnx, provider, call_method
-          ),
-      ),
-  }
-  model.__class__ = type(model_class.__name__, (model_class,), new_fields)
+  # instance of the class so we update the class of the model to the subclass
+  # with the intercepted `call_method`. There is one such subclass per model
+  # class and method, and the provider lives on the instance (see
+  # `quantized_nnx_type`), so the class pickles by reference like any other.
+  model.__class__ = quantized_nnx_type(model_class, call_method)
+  model.qwix_provider = provider  # pyrefly: ignore[missing-attribute]
 
   rngs = model_inputs_kwargs.pop("rngs", None)
   if rngs is not None and not isinstance(rngs, nnx.Rngs):
@@ -228,6 +221,60 @@ def quantize_nnx_model(
   return model
 
 
+def quantized_nnx_type(
+    model_class: type[nnx.Module], call_method: str = "__call__"
+) -> type[nnx.Module]:
+  """Returns the subclass of `model_class` whose `call_method` is intercepted.
+
+  The subclass is created once and stored on `model_class` like a nested class
+  (`model_class._qwix_quantized___call__`), so that instances pickle by
+  reference like instances of `model_class`. It reads the provider from the
+  instance attribute `qwix_provider`, which `quantize_nnx_model` sets.
+
+  To unpickle a quantized model, call this (or `quantize_model`) for its class
+  first, so that the subclass exists.
+
+  Args:
+    model_class: The unquantized model class.
+    call_method: The name of the method to intercept.
+
+  Returns:
+    The quantized class.
+  """
+  attr = f"_qwix_quantized_{call_method}"
+  # `__dict__` rather than `getattr`: a subclass must not inherit the quantized
+  # type of its base class.
+  if attr in model_class.__dict__:
+    return model_class.__dict__[attr]
+
+  original_method = getattr(model_class, call_method)
+
+  @functools.wraps(original_method)
+  def intercepted_method(self, *args, **kwargs):
+    provider = self.qwix_provider
+    method = _apply_interceptors(
+        original_method,
+        provider,
+        output_transform=functools.partial(
+            _output_transform_nnx, provider, call_method
+        ),
+    )
+    return method(self, *args, **kwargs)
+
+  quantized_class = type(
+      model_class.__name__,
+      (model_class,),
+      {
+          "_unquantized_type": model_class,
+          call_method: intercepted_method,
+          "__module__": model_class.__module__,
+          "__qualname__": f"{model_class.__qualname__}.{attr}",
+      },
+  )
+  setattr(model_class, attr, quantized_class)
+  return quantized_class
+
+
 def _input_transform(provider: qconfig.QuantizationProvider, args, kwargs):
   model, *args = args
   model, args, kwargs = provider.process_model_inputs(model, args, kwargs)
@@ -241,7 +288,9 @@ def _output_transform_nnx(
   # flax_util.get_current_module() can work inside the output transform.
   # We cannot use the model in quantize_nnx_model because users may choose to
   # clone the model.
-  args = inspect.currentframe().f_back.f_locals["args"]  # pytype: disable=attribute-error # pyrefly: ignore
+  frame = inspect.currentframe()
+  assert frame is not None and frame.f_back is not None
+  args = frame.f_back.f_locals["args"]
   self = args[0]  # pylint: disable=unused-variable
   return provider.process_model_output(method_name, output)
 
