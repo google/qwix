@@ -415,5 +415,155 @@ class BlockPruningFunctionalityTest(parameterized.TestCase):
     np.testing.assert_array_equal(output, exp_output)
 
 
+class AxisPruningFunctionalityTest(parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='2d_axis0_2_4',
+          inputs=[
+              [1.0, -4.0],
+              [-3.0, 1.0],
+              [2.0, -3.0],
+              [-4.0, 2.0],
+              [5.0, -1.0],
+              [-1.0, 6.0],
+              [2.0, -7.0],
+              [-6.0, 3.0],
+          ],
+          n=2,
+          m=4,
+          axis=0,
+          expected_mask=[
+              [False, True],
+              [True, False],
+              [False, True],
+              [True, False],
+              [True, False],
+              [False, True],
+              [False, True],
+              [True, False],
+          ],
+      ),
+      dict(
+          testcase_name='2d_axis1_2_4',
+          inputs=[
+              [1.0, -4.0, 3.0, -2.0, 5.0, -1.0, 2.0, -6.0],
+              [-5.0, 2.0, -1.0, 4.0, -3.0, 6.0, -7.0, 1.0],
+          ],
+          n=2,
+          m=4,
+          axis=1,
+          expected_mask=[
+              [False, True, True, False, True, False, False, True],
+              [True, False, False, True, False, True, True, False],
+          ],
+      ),
+      dict(
+          testcase_name='2d_axis0_1_4',
+          inputs=[
+              [1.0, -4.0],
+              [-3.0, 1.0],
+              [2.0, -3.0],
+              [-4.0, 2.0],
+          ],
+          n=1,
+          m=4,
+          axis=0,
+          expected_mask=[
+              [False, True],
+              [False, False],
+              [False, False],
+              [True, False],
+          ],
+      ),
+      dict(
+          testcase_name='2d_axis0_3_4',
+          inputs=[
+              [1.0, -4.0],
+              [-3.0, 1.0],
+              [2.0, -3.0],
+              [-4.0, 2.0],
+          ],
+          n=3,
+          m=4,
+          axis=0,
+          expected_mask=[
+              [False, True],
+              [True, False],
+              [True, True],
+              [True, True],
+          ],
+      ),
+      dict(
+          testcase_name='3d_middle_axis_2_4',
+          inputs=[
+              [[1.0, -4.0], [-3.0, 1.0], [2.0, -3.0], [-4.0, 2.0]],
+              [[5.0, -1.0], [-1.0, 6.0], [2.0, -7.0], [-6.0, 3.0]],
+          ],
+          n=2,
+          m=4,
+          axis=1,
+          expected_mask=[
+              [[False, True], [True, False], [False, True], [True, False]],
+              [[True, False], [False, True], [False, True], [True, False]],
+          ],
+      ),
+      dict(
+          testcase_name='3d_negative_axis_2_4',
+          inputs=[
+              [[1.0, -4.0], [-3.0, 1.0], [2.0, -3.0], [-4.0, 2.0]],
+              [[5.0, -1.0], [-1.0, 6.0], [2.0, -7.0], [-6.0, 3.0]],
+          ],
+          n=2,
+          m=4,
+          axis=-2,
+          expected_mask=[
+              [[False, True], [True, False], [False, True], [True, False]],
+              [[True, False], [False, True], [False, True], [True, False]],
+          ],
+      ),
+  )
+  def test_get_sparsity_mask_along_axis(
+      self, inputs, n, m, axis, expected_mask
+  ):
+    inputs = jnp.asarray(inputs, dtype=jnp.float32)
+    expected_mask = jnp.asarray(expected_mask, dtype=jnp.bool_)
+    mask = sparsity.get_sparsity_mask(
+        inputs, n_sparsity=n, m_sparsity=m, axis=axis
+    )
+    self.assertEqual(mask.shape, inputs.shape)
+    self.assertEqual(mask.dtype, jnp.bool_)
+    np.testing.assert_array_equal(mask, expected_mask)
+
+    pruned = sparsity.prune_inputs_n_m(inputs, n=n, m=m, axis=axis)
+    np.testing.assert_array_equal(pruned, jnp.where(expected_mask, inputs, 0.0))
+
+  def test_axis_ties_keep_lower_indices(self):
+    ties = jnp.ones((4, 2), dtype=jnp.float32)
+    tie_mask = sparsity.get_sparsity_mask(
+        ties, n_sparsity=2, m_sparsity=4, axis=0
+    )
+    np.testing.assert_array_equal(
+        tie_mask,
+        jnp.array([[True, True], [True, True], [False, False], [False, False]]),
+    )
+
+  def test_axis_errors(self):
+    x = jnp.ones((6, 4), dtype=jnp.float32)
+    with self.assertRaisesRegex(ValueError, 'not divisible by M=4'):
+      sparsity.get_sparsity_mask(x, n_sparsity=2, m_sparsity=4, axis=0)
+    for bad_axis in (2, -3):
+      with self.assertRaisesRegex(ValueError, 'out of range'):
+        sparsity.get_sparsity_mask(x, n_sparsity=2, m_sparsity=4, axis=bad_axis)
+    with self.assertRaisesRegex(ValueError, 'block_size and offset'):
+      sparsity.get_sparsity_mask(
+          jnp.ones((8, 4)), n_sparsity=2, m_sparsity=4, block_size=2, axis=0
+      )
+    with self.assertRaisesRegex(ValueError, 'block_size and offset'):
+      sparsity.get_sparsity_mask(
+          jnp.ones((8, 4)), n_sparsity=2, m_sparsity=4, offset=2, axis=0
+      )
+
+
 if __name__ == '__main__':
   absltest.main()

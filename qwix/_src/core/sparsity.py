@@ -85,6 +85,8 @@ def get_sparsity_mask(
     order: str = 'R',
     block_size: int = 0,
     offset: int = 0,
+    *,
+    axis: int | None = None,
 ) -> jax.Array:
   """Returns sparsified inputs for n:m structured pruning.
 
@@ -108,13 +110,49 @@ def get_sparsity_mask(
         > 0, we only support scenarios where the input array size is equal to
         (offset * m). Offset != 128 may not be best optimized for the memory
         layout.
+    axis: Optional axis along which to form the N:M groups. When specified,
+      groups of `m_sparsity` consecutive elements along `axis` keep their
+      `n_sparsity` largest magnitudes without flattening other dimensions
+      (`order` is ignored, and `block_size > 1` or `offset != 0` is rejected).
 
   Returns:
-    A mask that indicates the pruning locations (`0`: no pruning, `1`: pruned).
+    A mask that indicates the pruning locations (`True`: kept, `False`:
+    pruned).
   """
   assert (
       n_sparsity <= m_sparsity
   ), f'N must be lower than M for N:M ({n_sparsity}:{m_sparsity}) sparsity.'
+  if axis is not None:
+    if not -inputs.ndim <= axis < inputs.ndim:
+      raise ValueError(
+          f'Sparsity axis {axis} is out of range for rank {inputs.ndim}.'
+      )
+    axis %= inputs.ndim
+    shape = inputs.shape
+    if shape[axis] % m_sparsity != 0:
+      raise ValueError(
+          f'Cannot apply {n_sparsity}:{m_sparsity} sparsity along axis {axis}'
+          f' of an array with shape {shape}: dimension {shape[axis]} is not'
+          f' divisible by M={m_sparsity}.'
+      )
+    if block_size > 1 or offset != 0:
+      raise ValueError(
+          'block_size and offset are not supported when sparsifying along an'
+          f' explicit axis; got {block_size=}, {offset=}.'
+      )
+    grouped_shape = (
+        shape[:axis]
+        + (shape[axis] // m_sparsity, m_sparsity)
+        + shape[axis + 1 :]
+    )
+    magnitudes = jnp.moveaxis(
+        jnp.abs(inputs).reshape(grouped_shape), axis + 1, -1
+    )
+    _, top_k_idx = jax.lax.top_k(magnitudes, k=n_sparsity)
+    keep = jnp.any(
+        jax.nn.one_hot(top_k_idx, m_sparsity, dtype=jnp.bool_), axis=-2
+    )
+    return jnp.moveaxis(keep, -1, axis + 1).reshape(shape)
   if order not in ['C', 'R']:
     raise ValueError(f'Index order {order} not supported.')
   if offset < 0:
@@ -266,6 +304,7 @@ def prune_inputs_n_m(
     m: int,
     order: str = 'R',
     offset: int = 0,
+    axis: int | None = None,
 ) -> jax.Array:
   """Returns pruned array with N:M (structured) pruning.
 
@@ -290,9 +329,10 @@ def prune_inputs_n_m(
         > 0, we only support scenarios where the input array size is equal to
         (offset * m). Offset != 128 may not be best optimized for the memory
         layout.
+    axis: Optional axis along which to form the N:M groups.
 
   Returns:
     An array with the same shape as inputs pruned with N:M strategy.
   """
-  mask = get_sparsity_mask(inputs, n, m, order=order, offset=offset)
+  mask = get_sparsity_mask(inputs, n, m, order=order, offset=offset, axis=axis)
   return jnp.where(mask, inputs, jnp.zeros(inputs.shape, inputs.dtype))
