@@ -85,6 +85,10 @@ class DotGeneralQtConfig:
   drhs_residual_disable_channelwise_axes: bool = False
 
   sparsity_rule: sparsity.SparsityRule | None = None
+  # If True, compute the N:M sparsity mask for rhs along its contracting axis
+  # (derived from dimension_numbers) instead of using the rule's
+  # `weight_sparsity_order` on the flattened array.
+  sparsity_along_contracting_axis: bool = False
 
   def tree_flatten(self):
     children = (
@@ -502,7 +506,15 @@ def dot_general_qt(
   # Sparsify rhs before calibration and quantization to make sure we
   # are quantizing the remaining values correctly
   if config.sparsity_rule is not None:
-    rhs = qarray.sparsify(rhs, config.sparsity_rule)
+    rhs = qarray.sparsify(
+        rhs,
+        config.sparsity_rule,
+        dimension_numbers=(
+            dimension_numbers
+            if config.sparsity_along_contracting_axis
+            else None
+        ),
+    )
   if config.rhs_qtype and numerics.should_quantize(rhs.dtype):
     rhs_how = dot_general.get_how_to_quantize(
         dimension_numbers=dimension_numbers,
