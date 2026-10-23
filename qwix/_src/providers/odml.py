@@ -159,17 +159,15 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
     weight = flax_util.unbox(ret)
     # Clear the previous aux_data such as fq_array.
     aux_data.clear(weight)
-    # weight_name is used to distinguish weights from activations.
+    # weight_name is used to distinguish weights from activations. Layout
+    # transforms the model applies afterwards are tracked by PrimitiveBindOp.
     aux_data.set(weight, odml_ops.AuxDataKey.WEIGHT_NAME, name)
-    # This identifies the direct parameter API result, before any intercepted
-    # model transform. Consumers must separately verify that a conversion-time
-    # static parameter has a compatible shape and layout.
-    aux_data.set(
-        weight,
-        odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT,
-        True,
-    )
     return ret
+
+  # Whether PrimitiveBindOp records the layout transforms that weights go
+  # through. QAT calibrates the live weight operand, so it only needs to know
+  # whether an array is still a weight, not how it was derived.
+  _record_weight_transforms: bool = False
 
   def get_interceptors(
       self,
@@ -187,7 +185,9 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
     return [
         lambda: interception.Interceptor(
             mapping={
-                interception.PRIMITIVE_BIND_KEY: odml_ops.PrimitiveBindOp()
+                interception.PRIMITIVE_BIND_KEY: odml_ops.PrimitiveBindOp(
+                    record_weight_transforms=self._record_weight_transforms
+                )
             },
             id=hash((id(self), 0)),
         ),
@@ -246,10 +246,6 @@ class OdmlQatProvider(qconfig.QuantizationProvider):
           aux_data.clear(weight)
           # weight_name is used to distinguish weights from activations.
           aux_data.set(weight, odml_ops.AuxDataKey.WEIGHT_NAME, path[-1])
-          # This is the direct parameter state before the model executes any
-          # intercepted transforms. Static tree compatibility remains a
-          # separate conversion-time check.
-          aux_data.set(weight, odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT, True)
 
     # Activation Handling: Apply the `ModelInput` operator to all leaves of
     # `model_args` and `model_kwargs` (the actual arguments passed to the
@@ -411,6 +407,10 @@ class OdmlConversionProvider(OdmlQatProvider):
       self._flatten_params[path] = param
     self._quant_stats = quant_stats
 
+  # Conversion cannot calibrate the (traced) runtime weight operand, so it
+  # needs the transforms to rebuild that operand from the stored parameter.
+  _record_weight_transforms: bool = True
+
   def get_intercept_map(self):
     intercept_map = super().get_intercept_map()
     # Override dot_general to flatten N-D weights to 2-D.
@@ -524,23 +524,6 @@ class OdmlConversionProvider(OdmlQatProvider):
         output_perm=info.output_perm,
     )
 
-  @staticmethod
-  def _flatten_einsum_rhs(
-      rhs: jax.Array, layout: _FlattenedEinsumRhsLayout
-  ) -> jax.Array:
-    """Flattens RHS output axes and records how to replay that layout."""
-    rhs_ordered = jax.lax.transpose(rhs, layout.rhs_perm)
-    flattened_rhs = jax.lax.reshape(rhs_ordered, layout.rhs_flattened_shape)
-    # Conversion fake quant reads the stored parameter rather than this runtime
-    # view. Record the exact transpose so calibration can replay this one
-    # intentional transform before matching the flattened runtime shape.
-    aux_data.set(
-        flattened_rhs,
-        odml_ops.AuxDataKey.FLATTENED_EINSUM_RHS_PERM,
-        layout.rhs_perm,
-    )
-    return flattened_rhs
-
   def _flatten_einsum(self, *args, _einsum, **kwargs):
     """Flattens RHS output axes for one-dimensional per-channel scales.
 
@@ -549,9 +532,12 @@ class OdmlConversionProvider(OdmlQatProvider):
     this leaves the LHS untouched and combines all RHS-only output dimensions
     into one channel. It restores the original output shape and order afterward.
 
-    Einsums with transformed or statically incompatible RHS weights, shared
-    batch dimensions, operand-local reductions, or an already one-dimensional
-    scale use the existing ODML path.
+    The RHS transpose and reshape are ordinary primitives, so PrimitiveBindOp
+    records them in the weight's transforms and `_fake_quant` replays them on
+    the stored parameter together with any transform the model applied before.
+
+    Einsums with shared batch dimensions, operand-local reductions, or an
+    already one-dimensional scale use the existing ODML path.
 
     Args:
       *args: Positional arguments (e.g. einsum_str, lhs, rhs).
@@ -594,38 +580,73 @@ class OdmlConversionProvider(OdmlQatProvider):
     if layout is None:
       return _einsum(*args, **kwargs)
 
-    # A transformed weight may retain WEIGHT_NAME, but replaying this rewrite on
-    # its untransformed stored parameter would calibrate a different tensor.
-    is_original_weight = aux_data.get(
-        rhs, odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT, False
-    )
-    if not is_original_weight:
-      raise ValueError(
-          f'Cannot flatten the per-channel scale for weight {weight_name!r}:'
-          ' this einsum requires multiple quantization dimensions, but its'
-          ' runtime RHS is not known to be the direct, original parameter'
-          ' value.'
-      )
-
-    # The marker only proves that no intercepted tensor transform followed the
-    # local parameter API read. Lifted transforms such as nn.vmap can still add
-    # axes to the stored parameter tree, so independently require the static
-    # calibration source to match this runtime RHS before recording a replay.
-    mdl_path = flax_util.get_current_module_path()
-    static_weight = self._flatten_params.get(mdl_path + (weight_name,))
-    if static_weight is None:
-      return _einsum(*args, **kwargs)
-    static_weight = flax_util.unbox(static_weight)
-    static_shape = getattr(static_weight, 'shape', None)
-    if static_shape is None or tuple(static_shape) != tuple(rhs.shape):
-      return _einsum(*args, **kwargs)
-
-    flattened_rhs = self._flatten_einsum_rhs(rhs, layout)
+    rhs_ordered = jax.lax.transpose(rhs, layout.rhs_perm)
+    flattened_rhs = jax.lax.reshape(rhs_ordered, layout.rhs_flattened_shape)
     out = _einsum(layout.rewritten_einsum, lhs, flattened_rhs, **kwargs)
     res = jax.lax.reshape(out, out.shape[:-1] + layout.rhs_free_shape)
     if layout.output_perm is not None:
       res = jax.lax.transpose(res, layout.output_perm)
     return res
+
+  def _resolve_static_weight(
+      self, array: jax.Array, weight_name: str
+  ) -> jax.Array:
+    """Returns the stored parameter laid out exactly like the runtime operand.
+
+    The runtime operand is a tracer during conversion, so its scale has to be
+    computed from the stored parameter. The parameter is looked up by name and
+    the layout transforms recorded by PrimitiveBindOp (transpose, reshape,
+    flip, ...) are replayed on it, so calibration sees the same values in the
+    same channel positions that the op consumes.
+
+    Args:
+      array: The runtime weight operand.
+      weight_name: Its AuxDataKey.WEIGHT_NAME.
+
+    Returns:
+      A concrete array with the same shape and dtype as `array`.
+
+    Raises:
+      KeyError: If the parameter is absent from the static parameter tree.
+      ValueError: If the replayed parameter does not match the runtime operand,
+        e.g. because a lifted transform (nn.vmap, nn.scan) gives the stored
+        parameter a different shape than the one the model body reads.
+    """
+    path = flax_util.get_current_module_path() + (weight_name,)
+    if path not in self._flatten_params:
+      raise KeyError(
+          f'Weight {"/".join(map(str, path))!r} was read during conversion but'
+          ' is absent from the static parameter tree passed to'
+          ' OdmlConversionProvider.'
+      )
+    stored = self._flatten_params[path]
+    transforms = aux_data.get(array, odml_ops.AuxDataKey.WEIGHT_TRANSFORMS, ())
+
+    @interception.disable_interceptions
+    def replay(weight):
+      weight = jnp.asarray(weight)
+      for primitive, params in transforms:
+        weight = primitive.bind(weight, **params)
+      return weight
+
+    def mismatch(detail):
+      return ValueError(
+          f'Static weight {"/".join(map(str, path))!r} with shape'
+          f' {stored.shape} does not reproduce the runtime operand of shape'
+          f' {array.shape} and dtype {array.dtype} after replaying'
+          f' {[p.name for p, _ in transforms]}: {detail}. The parameter tree'
+          ' passed to OdmlConversionProvider does not describe the weight the'
+          ' model consumes, e.g. because of a lifted transform such as nn.vmap'
+          ' or nn.scan.'
+      )
+
+    try:
+      weight = replay(stored)
+    except (TypeError, ValueError) as e:  # What JAX shape rules raise.
+      raise mismatch(f'replay failed with {type(e).__name__}') from e
+    if weight.shape != array.shape or weight.dtype != array.dtype:
+      raise mismatch(f'got shape {weight.shape} and dtype {weight.dtype}')
+    return weight
 
   def _fake_quant(
       self,
@@ -641,25 +662,7 @@ class OdmlConversionProvider(OdmlQatProvider):
       weight_name = aux_data.get(array, odml_ops.AuxDataKey.WEIGHT_NAME, None)
       if weight_name is not None:  # Weights.
         assert quant_stat_name is None
-        mdl_path = flax_util.get_current_module_path()
-        weight = self._flatten_params[mdl_path + (weight_name,)]
-        # _flatten_einsum path: replay the RHS transpose+reshape on the
-        # stored parameter so calibration uses the same tensor layout.
-        flattened_rhs_perm = aux_data.get(
-            array, odml_ops.AuxDataKey.FLATTENED_EINSUM_RHS_PERM, None
-        )
-        if flattened_rhs_perm is not None:
-          if len(flattened_rhs_perm) != weight.ndim:
-            raise ValueError(
-                'Cannot replay flattened einsum RHS layout on static weight '
-                f'with shape {weight.shape} and permutation '
-                f'{flattened_rhs_perm}.'
-            )
-          weight = jax.lax.reshape(
-              jax.lax.transpose(weight, flattened_rhs_perm), array.shape
-          )
-        elif weight.shape != array.shape:  # when _flatten_dot_general is used.
-          weight = weight.reshape(array.shape)
+        weight = self._resolve_static_weight(array, weight_name)
         calibration = qarray.calibrate(weight, how)
         scale, zp = qarray.compute_scale_zero_point(calibration, how.qtype)
       elif quant_stat_name is not None:  # Static-range activations.

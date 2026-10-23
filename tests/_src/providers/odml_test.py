@@ -22,10 +22,12 @@ from flax import linen as nn
 from flax import nnx
 import jax
 from jax import numpy as jnp
+import numpy as np
 from qwix._src import aux_data
 from qwix._src import interception
 from qwix._src import model as qwix_model
 from qwix._src import qconfig
+from qwix._src.core import qarray
 from qwix._src.providers import odml
 from qwix._src.providers import odml_ops
 from qwix._src.utils import flax_util
@@ -41,6 +43,74 @@ class NamedParamModule(nn.Module):
         self.param_name, nn.initializers.normal(), (x.shape[-1], self.features)
     )
     return jnp.dot(x, w)
+
+
+class _ScaleRecordingConversionProvider(odml.OdmlConversionProvider):
+  """Records, for every weight fake quant, the live operand and baked scale."""
+
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self.records = []
+    self._current = None
+
+  def _fake_quant(self, array, how, quant_stat_name=None):
+    if aux_data.get(array, odml_ops.AuxDataKey.WEIGHT_NAME, None) is not None:
+      self._current = {'array': array, 'how': how}
+      self.records.append(self._current)
+    try:
+      return super()._fake_quant(array, how, quant_stat_name)
+    finally:
+      self._current = None
+
+  def _get_attributes(self, *, scale, zp, dtype, is_weight):
+    attributes = super()._get_attributes(
+        scale=scale, zp=zp, dtype=dtype, is_weight=is_weight
+    )
+    if self._current is not None:
+      self._current['baked_scale'] = attributes['scale']
+    return attributes
+
+
+def _expected_scale(array, how):
+  """The scale of the tensor that actually flows into the op."""
+  calibration = qarray.calibrate(array, how)
+  scale, _ = qarray.compute_scale_zero_point(calibration, how.qtype)
+  return np.asarray(scale, np.float32).flatten()
+
+
+def _channel_asymmetric(shape, axis):
+  """Weights whose magnitude grows geometrically along `axis`.
+
+  A wrong channel layout then changes every per-channel scale, whereas i.i.d.
+  weights can hide a mix-up.
+
+  Args:
+    shape: The weight shape.
+    axis: The axis along which magnitudes differ.
+
+  Returns:
+    A float32 numpy array.
+  """
+  rng = np.random.RandomState(0)
+  ramp = np.geomspace(1.0 / 64.0, 1.0, shape[axis]).astype(np.float32)
+  ramp = ramp.reshape([-1 if i == axis else 1 for i in range(len(shape))])
+  return rng.normal(size=shape).astype(np.float32) * ramp
+
+
+# The recipes that quantize weights per-channel without activation statistics.
+_RECIPE_RULES = {
+    'weight_only': [
+        qconfig.QuantizationRule(module_path='.*', weight_qtype=jnp.int8)
+    ],
+    'drq': [
+        qconfig.QuantizationRule(
+            module_path='.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+            act_static_scale=False,
+        )
+    ],
+}
 
 
 class OdmlTest(parameterized.TestCase):
@@ -273,7 +343,7 @@ class OdmlTest(parameterized.TestCase):
     )
 
   @parameterized.parameters(False, True)
-  def test_linen_original_weight_marker_is_initialized(self, use_axis_metadata):
+  def test_linen_weight_tag_is_initialized(self, use_axis_metadata):
     """Tests Linen tags one direct logical array for boxed and raw params."""
     observed_metadata = []
 
@@ -290,11 +360,7 @@ class OdmlTest(parameterized.TestCase):
         weight = flax_util.unbox(param)
         observed_metadata.append((
             aux_data.get(weight, odml_ops.AuxDataKey.WEIGHT_NAME, None),
-            aux_data.get(
-                weight,
-                odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT,
-                False,
-            ),
+            aux_data.get(weight, odml_ops.AuxDataKey.WEIGHT_TRANSFORMS, None),
         ))
         return jnp.dot(x, weight)
 
@@ -306,7 +372,8 @@ class OdmlTest(parameterized.TestCase):
     observed_metadata.clear()
     qat_model.apply(variables, model_input)
 
-    self.assertEqual(observed_metadata, [('kernel', True)])
+    # The untransformed parameter carries its name and no transforms.
+    self.assertEqual(observed_metadata, [('kernel', None)])
 
   def test_linen_einsum_multi_axis_weight_conversion(self):
     """Tests 3D einsum weights with a middle contracting dimension."""
@@ -414,7 +481,6 @@ class OdmlTest(parameterized.TestCase):
             rules, {'kernel': rhs}, {}, **provider_kwargs
         )
         aux_data.set(rhs, odml_ops.AuxDataKey.WEIGHT_NAME, 'kernel')
-        aux_data.set(rhs, odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT, True)
         einsum_op = provider.get_intercept_map()['jax.numpy.einsum']
         is_flatten_handler = (
             getattr(einsum_op, 'func', None)
@@ -510,7 +576,7 @@ class OdmlTest(parameterized.TestCase):
     self.assertTrue(jnp.allclose(qat_res, conversion_res))
 
   def test_linen_transformed_einsum_weight_conversion(self):
-    """Tests transformed RHS weight views raise when per-channel weights are requested."""
+    """Tests transformed RHS weight views are replayed for per-channel weights."""
     rules = [
         qconfig.QuantizationRule(
             module_path='.*',
@@ -519,10 +585,10 @@ class OdmlTest(parameterized.TestCase):
         ),
     ]
 
-    with self.assertRaisesRegex(
-        ValueError, 'requires multiple quantization dimensions'
-    ):
-      self._run_linen_einsum_conversion(rules, transform_weight=True)
+    _, qat_res, conversion_res = self._run_linen_einsum_conversion(
+        rules, transform_weight=True
+    )
+    self.assertTrue(jnp.allclose(qat_res, conversion_res))
 
     _, qat_res, conversion_res = self._run_linen_einsum_conversion(
         rules,
@@ -548,40 +614,43 @@ class OdmlTest(parameterized.TestCase):
     )
     self.assertTrue(jnp.allclose(qat_res, conversion_res))
 
-  def test_linen_einsum_flatten_requires_matching_static_weight_shape(self):
-    """Tests a lifted static parameter axis keeps einsum on the old path."""
+  def test_linen_einsum_lifted_static_weight_shape_raises(self):
+    """Tests a lifted static parameter axis is reported instead of guessed."""
     rules = [qconfig.QuantizationRule(module_path='.*', weight_qtype=jnp.int8)]
-    lhs = jnp.ones((2, 3, 5), dtype=jnp.float32)
-    rhs = jnp.ones((4, 5, 7), dtype=jnp.float32)
-    lifted_static_rhs = jnp.ones((2, 4, 5, 7), dtype=jnp.float32)
-    provider = odml.OdmlConversionProvider(
-        rules, {'kernel': lifted_static_rhs}, {}
+
+    class EinsumModel(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        w = self.param('kernel', nn.initializers.lecun_normal(), (4, 16, 8))
+        return jnp.einsum('BTD,NDH->BTNH', x, w)
+
+    model = EinsumModel()
+    model_input = jnp.ones((2, 3, 16), dtype=jnp.float32)
+    variables = model.init(jax.random.key(0), model_input)
+    # The static tree carries an extra leading axis, as nn.vmap would add.
+    lifted_params = {'kernel': jnp.ones((2, 4, 16, 8), dtype=jnp.float32)}
+    conversion_model = qwix_model.quantize_model(
+        model, odml.OdmlConversionProvider(rules, lifted_params, {})
     )
-    aux_data.set(rhs, odml_ops.AuxDataKey.WEIGHT_NAME, 'kernel')
-    aux_data.set(rhs, odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT, True)
-    calls = []
 
-    def _einsum(*args, **kwargs):
-      calls.append(args)
-      return jnp.einsum(*args, **kwargs)
-
-    with mock.patch.object(
-        flax_util, 'get_current_module_path', return_value=()
+    with self.assertRaisesRegex(
+        ValueError, r"Static weight 'kernel' with shape \(2, 4, 16, 8\)"
     ):
-      res = provider._flatten_einsum(  # pylint: disable=protected-access
-          'BTD,NDH->BTNH', lhs, rhs, _einsum=_einsum
-      )
+      conversion_model.apply(variables, model_input)
 
-    self.assertEqual(res.shape, (2, 3, 4, 7))
-    self.assertEqual(calls[0][0], 'BTD,NDH->BTNH')
-    self.assertIs(calls[0][2], rhs)
-    self.assertIsNone(
-        aux_data.get(
-            calls[0][2],
-            odml_ops.AuxDataKey.FLATTENED_EINSUM_RHS_PERM,
-            None,
-        )
+  def test_conversion_missing_static_weight_raises(self):
+    """Tests a weight absent from the static tree names the path it needed."""
+    rules = [qconfig.QuantizationRule(module_path='.*', weight_qtype=jnp.int8)]
+    model = NamedParamModule(features=4, param_name='weight')
+    model_input = jnp.ones((1, 3), dtype=jnp.float32)
+    variables = model.init(jax.random.key(0), model_input)
+    conversion_model = qwix_model.quantize_model(
+        model, odml.OdmlConversionProvider(rules, {'other': jnp.ones(3)}, {})
     )
+
+    with self.assertRaisesRegex(KeyError, "Weight 'weight' was read"):
+      conversion_model.apply(variables, model_input)
 
   def test_linen_einsum_single_axis_scale_is_not_flattened(self):
     """Tests an already supported scale vector stays on the normal path."""
@@ -590,7 +659,6 @@ class OdmlTest(parameterized.TestCase):
     rhs = jnp.ones((5, 7), dtype=jnp.float32)
     provider = odml.OdmlConversionProvider(rules, {'kernel': rhs}, {})
     aux_data.set(rhs, odml_ops.AuxDataKey.WEIGHT_NAME, 'kernel')
-    aux_data.set(rhs, odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT, True)
     calls = []
 
     def _einsum(*args, **kwargs):
@@ -605,33 +673,60 @@ class OdmlTest(parameterized.TestCase):
     self.assertEqual(calls[0][0], 'BTD,DH->BTH')
     self.assertEqual(calls[0][2].shape, rhs.shape)
 
-  def test_odml_original_weight_marker_is_not_forwarded(self):
-    """Tests a real structural interceptor invalidates layout identity."""
-    rhs = jnp.ones((4, 5, 7), dtype=jnp.float32)
-    aux_data.set(rhs, odml_ops.AuxDataKey.WEIGHT_NAME, 'kernel')
-    aux_data.set(rhs, odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT, True)
+  def test_weight_transforms_recorded_only_for_conversion(self):
+    """Tests the structural interceptor keeps weight identity through layout ops.
 
-    provider = odml.OdmlQatProvider([])
-    transpose = interception.wrap_func_intercepted(
-        lambda x: jnp.transpose(x, (0, 2, 1)),
+    QAT only needs to know that the output is still a weight; the conversion
+    provider additionally records how to rebuild it from the stored parameter.
+    """
+    for provider, expect_transforms in (
+        (odml.OdmlQatProvider([]), False),
+        (odml.OdmlConversionProvider([], {}, {}), True),
+    ):
+      with self.subTest(type(provider).__name__):
+        rhs = jnp.ones((4, 5, 7), dtype=jnp.float32)
+        aux_data.set(rhs, odml_ops.AuxDataKey.WEIGHT_NAME, 'kernel')
+        transpose = interception.wrap_func_intercepted(
+            lambda x: jnp.transpose(x, (0, 2, 1)),
+            provider.get_interceptors()[0],
+            disable_jit=False,
+        )
+        rhs_transposed = transpose(rhs)
+
+        self.assertEqual(
+            aux_data.get(rhs_transposed, odml_ops.AuxDataKey.WEIGHT_NAME, None),
+            'kernel',
+        )
+        transforms = aux_data.get(
+            rhs_transposed, odml_ops.AuxDataKey.WEIGHT_TRANSFORMS, None
+        )
+        if not expect_transforms:
+          self.assertIsNone(transforms)
+        else:
+          self.assertLen(transforms, 1)
+          primitive, params = transforms[0]
+          self.assertEqual(primitive.name, 'transpose')
+          self.assertEqual(params['permutation'], (0, 2, 1))
+
+  def test_weight_identity_dropped_by_unreplayable_primitive(self):
+    """Tests gather and friends turn a weight into a plain constant."""
+    provider = odml.OdmlConversionProvider([], {}, {})
+    rhs = jnp.ones((4, 5), dtype=jnp.float32)
+    aux_data.set(rhs, odml_ops.AuxDataKey.WEIGHT_NAME, 'kernel')
+    concat = interception.wrap_func_intercepted(
+        lambda x: jnp.concatenate([x, x], axis=1),
         provider.get_interceptors()[0],
         disable_jit=False,
     )
-    rhs_transposed = transpose(rhs)
+    out = concat(rhs)
 
+    self.assertIsNone(aux_data.get(out, odml_ops.AuxDataKey.WEIGHT_NAME, None))
     self.assertEqual(
-        aux_data.get(rhs_transposed, odml_ops.AuxDataKey.WEIGHT_NAME, None),
-        'kernel',
-    )
-    self.assertFalse(
-        aux_data.get(
-            rhs_transposed,
-            odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT,
-            False,
-        )
+        aux_data.get(out, odml_ops.AuxDataKey.DROPPED_WEIGHT, None),
+        ('kernel', 'concatenate'),
     )
 
-  def test_nnx_original_weight_marker_is_initialized(self):
+  def test_nnx_weight_tag_is_initialized(self):
     """Tests NNX model preprocessing tags the direct parameter state."""
 
     class NnxModel(nnx.Module):
@@ -652,12 +747,222 @@ class OdmlTest(parameterized.TestCase):
         aux_data.get(weight, odml_ops.AuxDataKey.WEIGHT_NAME, None),
         'kernel',
     )
-    self.assertTrue(
-        aux_data.get(
-            weight,
-            odml_ops.AuxDataKey.IS_ORIGINAL_WEIGHT,
-            False,
+    self.assertIsNone(
+        aux_data.get(weight, odml_ops.AuxDataKey.WEIGHT_TRANSFORMS, None)
+    )
+
+  def _run_transformed_weight_conversion(
+      self, model, rules, model_input, param_name, asymmetric_axis
+  ):
+    """Runs QAT then eager conversion and returns their outputs and records."""
+    variables = flax.core.unfreeze(model.init(jax.random.key(0), model_input))
+    variables['params'][param_name] = jnp.asarray(
+        _channel_asymmetric(
+            variables['params'][param_name].shape, asymmetric_axis
         )
+    )
+    qat_model = qwix_model.quantize_model(model, odml.OdmlQatProvider(rules))
+    qat_res, new_vars = qat_model.apply(variables, model_input, mutable=True)
+    variables.update(flax.core.unfreeze(new_vars))
+
+    provider = _ScaleRecordingConversionProvider(
+        rules, variables['params'], variables.get('quant_stats', {})
+    )
+    conversion_model = qwix_model.quantize_model(model, provider)
+    conversion_res = conversion_model.apply(variables, model_input)
+    return (
+        qat_res,
+        conversion_res,
+        provider.records,
+        conversion_model,
+        variables,
+    )
+
+  @parameterized.product(
+      transform=[
+          'identity',
+          'transpose',
+          'transpose_square',
+          'flip',
+          'slice',
+          'expand_and_squeeze',
+          'cast_bf16',
+          'einsum_flatten',
+          'einsum_flatten_swapaxes',
+          'tied_embedding',
+      ],
+      recipe=['weight_only', 'drq'],
+  )
+  def test_conversion_replays_weight_transforms(self, transform, recipe):
+    """Tests the baked scale describes the tensor the op actually consumes.
+
+    The weight is transformed between the parameter read and the contraction.
+    QAT calibrates the live operand; conversion must bake bitwise the same
+    scale by replaying the transforms on the stored parameter.
+    """
+    k, n = 16, 12
+
+    class Model(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        match transform:
+          case 'identity':
+            w = self.param('w', nn.initializers.normal(), (k, n))
+            return jnp.dot(x, w)
+          case 'transpose':
+            w = self.param('w', nn.initializers.normal(), (n, k))
+            return jnp.dot(x, w.T)
+          case 'transpose_square':
+            w = self.param('w', nn.initializers.normal(), (k, k))
+            return jnp.dot(x, w.T)
+          case 'flip':
+            w = self.param('w', nn.initializers.normal(), (k, n))
+            return jnp.dot(x, jnp.flip(w, axis=1))
+          case 'slice':
+            w = self.param('w', nn.initializers.normal(), (k, 2 * n))
+            return jnp.dot(x, w[:, :n])
+          case 'expand_and_squeeze':
+            w = self.param('w', nn.initializers.normal(), (k, n))
+            return jnp.dot(x, jnp.squeeze(w[None], axis=0))
+          case 'cast_bf16':
+            w = self.param('w', nn.initializers.normal(), (k, n))
+            return jnp.dot(x, w.astype(jnp.bfloat16))
+          case 'einsum_flatten':
+            w = self.param('w', nn.initializers.normal(), (n, k, 3))
+            return jnp.einsum('BK,NKH->BNH', x, w)
+          case 'einsum_flatten_swapaxes':
+            w = self.param('w', nn.initializers.normal(), (k, n, 3))
+            return jnp.einsum('BK,NKH->BNH', x, jnp.swapaxes(w, 0, 1))
+          case 'tied_embedding':
+            table = self.param('w', nn.initializers.normal(), (n, k))
+            h = jnp.take(table, x, axis=0)
+            return jnp.dot(h, table.T)
+          case _:
+            raise ValueError(transform)
+
+    if transform == 'tied_embedding':
+      model_input = jnp.arange(n, dtype=jnp.int32).reshape(1, n)
+    else:
+      model_input = jnp.linspace(-1.0, 1.0, 4 * k).reshape(4, k)
+    # The per-channel axis of the live operand, as an axis of the stored param.
+    row_channel_transforms = (
+        'transpose',
+        'transpose_square',
+        'einsum_flatten',
+        'tied_embedding',
+    )
+    asymmetric_axis = 0 if transform in row_channel_transforms else 1
+
+    qat_res, conversion_res, records, _, _ = (
+        self._run_transformed_weight_conversion(
+            Model(), _RECIPE_RULES[recipe], model_input, 'w', asymmetric_axis
+        )
+    )
+
+    per_channel = [r for r in records if r['how'].channelwise_axes]
+    self.assertNotEmpty(per_channel)
+    for record in per_channel:
+      # Eager conversion sees the concrete live operand, so the oracle is
+      # simply "calibrate what the op consumes".
+      np.testing.assert_array_equal(
+          record['baked_scale'],
+          _expected_scale(record['array'], record['how']),
+      )
+    np.testing.assert_allclose(conversion_res, qat_res, rtol=1e-6, atol=1e-6)
+
+  @parameterized.product(
+      transform=['transpose', 'tied_embedding'],
+      recipe=['weight_only', 'drq'],
+  )
+  def test_nnx_conversion_replays_weight_transforms(self, transform, recipe):
+    """Tests NNX params keep their identity through transforms and replay.
+
+    NNX tags the parameter state up front instead of at `nn.Module.param`
+    time, and the conversion provider looks the parameter up in the pure
+    state dict; the baked scale must still be the one of the live operand.
+    """
+    k, n = 16, 12
+
+    class Model(nnx.Module):
+
+      def __init__(self):
+        self.w = nnx.Param(jnp.asarray(_channel_asymmetric((n, k), 0)))
+
+      def __call__(self, x):
+        if transform == 'tied_embedding':
+          x = jnp.take(self.w[...], x, axis=0)
+        return jnp.dot(x, self.w[...].T)
+
+    if transform == 'tied_embedding':
+      model_input = jnp.arange(n, dtype=jnp.int32).reshape(1, n)
+    else:
+      model_input = jnp.linspace(-1.0, 1.0, 4 * k).reshape(4, k)
+    rules = _RECIPE_RULES[recipe]
+    model = Model()
+    qat_model = qwix_model.quantize_model(
+        model, odml.OdmlQatProvider(rules), model_input
+    )
+    qat_res = qat_model(model_input)
+    provider = _ScaleRecordingConversionProvider(
+        rules,
+        nnx.to_pure_dict(nnx.state(qat_model, nnx.Param)),
+        nnx.to_pure_dict(nnx.state(qat_model, flax_util.QuantStat)),
+    )
+    conversion_model = qwix_model.quantize_model(model, provider, model_input)
+    conversion_res = conversion_model(model_input)
+
+    per_channel = [r for r in provider.records if r['how'].channelwise_axes]
+    self.assertNotEmpty(per_channel)
+    for record in per_channel:
+      np.testing.assert_array_equal(
+          record['baked_scale'],
+          _expected_scale(record['array'], record['how']),
+      )
+    np.testing.assert_allclose(conversion_res, qat_res, rtol=1e-6, atol=1e-6)
+
+  @parameterized.named_parameters(
+      dict(testcase_name='gather', primitive_name='gather'),
+      dict(testcase_name='concatenate', primitive_name='concatenate'),
+  )
+  def test_unreplayable_weight_transform_falls_back_to_float(
+      self, primitive_name
+  ):
+    """Tests weights through gather/concatenate stay float, consistently."""
+    k, n = 16, 12
+
+    class Model(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        w = self.param('w', nn.initializers.normal(), (k, n))
+        if primitive_name == 'gather':
+          w = jnp.take(w, jnp.arange(n)[::-1], axis=1)
+        else:
+          w = jnp.concatenate([w, w], axis=1)
+        return jnp.dot(x, w)
+
+    model = Model()
+    model_input = jnp.linspace(-1.0, 1.0, 4 * k).reshape(4, k)
+    # DRQ: the lhs must not be fake quantized either, otherwise the converter
+    # is left with a dangling activation fake_quant in front of a float matmul.
+    with self.assertLogs(level='WARNING') as logs:
+      qat_res, conversion_res, records, conversion_model, variables = (
+          self._run_transformed_weight_conversion(
+              model, _RECIPE_RULES['drq'], model_input, 'w', 1
+          )
+      )
+    float_res = model.apply(variables, model_input)
+
+    self.assertEmpty(records)
+    np.testing.assert_array_equal(qat_res, float_res)
+    np.testing.assert_array_equal(conversion_res, float_res)
+    warnings = [m for m in logs.output if 'cannot replay' in m]
+    self.assertLen(warnings, 2)  # Once per provider.
+    self.assertIn(f"weight 'w' went through '{primitive_name}'", warnings[0])
+    jaxpr = jax.make_jaxpr(conversion_model.apply)(variables, model_input)
+    self.assertNotIn(
+        'composite', [eqn.primitive.name for eqn in jaxpr.jaxpr.eqns]
     )
 
   def test_linen_einsum_shared_batch_falls_back(self):
