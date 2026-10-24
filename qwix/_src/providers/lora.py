@@ -57,6 +57,11 @@ def apply_lora_to_model(
   )
 
 
+def _he_uniform(*args, **kwargs) -> jax.Array:
+  # `initializers.he_uniform()` returns a closure, which cannot be pickled.
+  return initializers.he_uniform()(*args, **kwargs)
+
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class LoraRule(qconfig.QuantizationRule):
   """LoRA rules that match and configure the LoRA behavior."""
@@ -76,7 +81,9 @@ class LoraRule(qconfig.QuantizationRule):
   dropout: float = 0.0
 
   # The initializers for the LoRA A (fan-in) weight, default as he_uniform().
-  lora_a_initializer: Callable[..., jax.Array] = initializers.he_uniform()
+  # Initializers must be picklable (e.g. module-level functions) for quantized
+  # models to be picklable and deep-copyable.
+  lora_a_initializer: Callable[..., jax.Array] = _he_uniform
 
   # The initializer for the LoRA B (fan-out) weight, default as zeros.
   lora_b_initializer: Callable[..., jax.Array] = initializers.zeros

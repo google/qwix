@@ -13,7 +13,9 @@
 # limitations under the License.
 """Shared provider support for boxed quantized parameters."""
 
-from typing import Callable, Generic, Sequence, TypeVar
+import importlib
+import types
+from typing import Any, Callable, Generic, Sequence, TypeVar
 
 import flax
 from flax import linen as nn
@@ -123,6 +125,19 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
     self._dot_general_fn = _dot_general_fn
     self._einsum_fn = _einsum_fn
     self._conv_general_dilated_fn = _conv_general_dilated_fn
+
+  def __getstate__(self) -> dict[str, Any]:
+    # Modules can be neither pickled nor deep-copied, so a qarray module is
+    # stored by name.
+    state = self.__dict__.copy()
+    if isinstance(self._qarray_module, types.ModuleType):
+      state['_qarray_module'] = self._qarray_module.__name__
+    return state
+
+  def __setstate__(self, state: dict[str, Any]):
+    if isinstance(state['_qarray_module'], str):
+      state['_qarray_module'] = importlib.import_module(state['_qarray_module'])
+    self.__dict__.update(state)
 
   def dot_general(
       self,
