@@ -11,8 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
 import functools
 import os
+import pickle
 from unittest import mock
 
 from absl.testing import absltest
@@ -211,6 +213,25 @@ class PtqTest(parameterized.TestCase):
         nnx.state(abs_ptq_linear),
         nnx.state(ptq_linear),
     )
+
+  def test_provider_pickle_and_deepcopy(self):
+    provider = ptq.PtqProvider(
+        [qconfig.QuantizationRule(module_path=".*", weight_qtype=jnp.int8)]
+    )
+    copies = {
+        "deepcopy": copy.deepcopy(provider),
+        "pickle": pickle.loads(pickle.dumps(provider)),  # pylint: disable=g-unsafe-pickle-load
+    }
+    fp_linear = nnx.Linear(12, 6, rngs=nnx.Rngs(0))
+    model_input = jnp.ones((10, 12))
+    expected = qwix_model.quantize_model(fp_linear, provider, model_input)(
+        model_input
+    )
+    for name, copied in copies.items():
+      with self.subTest(name):
+        self.assertIs(copied._qarray_module, provider._qarray_module)  # pylint: disable=protected-access
+        ptq_linear = qwix_model.quantize_model(fp_linear, copied, model_input)
+        self.assertTrue(jnp.array_equal(ptq_linear(model_input), expected))
 
   def test_nnx_einsum_sharding_ptq(self):
     mesh = jax.make_mesh(

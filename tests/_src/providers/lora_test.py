@@ -11,8 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
 import functools
 import os
+import pickle
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -162,6 +164,32 @@ class LoraTest(parameterized.TestCase):
 
     model_output = lora_linear(model_input)
     self.assertTrue(jnp.allclose(model_output, expected_model_output))
+
+  def test_provider_pickle_and_deepcopy(self):
+    # Default initializers, except for B so that the LoRA output is non-zero.
+    provider = lora.LoraProvider(
+        module_path=".*",
+        rank=3,
+        alpha=0.5,
+        lora_b_initializer=nnx.initializers.ones,
+    )
+    copies = {
+        "deepcopy": copy.deepcopy(provider),
+        "pickle": pickle.loads(pickle.dumps(provider)),  # pylint: disable=g-unsafe-pickle-load
+    }
+    linear = nnx.Linear(12, 10, rngs=nnx.Rngs(0))
+    model_input = jnp.ones((10, 12))
+
+    def apply_lora(provider):
+      lora_linear = lora.apply_lora_to_model(
+          linear, provider, model_input, rngs=nnx.Rngs(1)
+      )
+      return lora_linear(model_input)
+
+    expected = apply_lora(provider)
+    for name, copied in copies.items():
+      with self.subTest(name):
+        self.assertTrue(jnp.array_equal(apply_lora(copied), expected))
 
   @parameterized.parameters(0.0, 1.0)
   def test_lora_einsum_nnx(self, dropout_rate):
