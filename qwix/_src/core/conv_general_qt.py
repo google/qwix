@@ -59,6 +59,28 @@ _conv_spec_transpose = lambda spec: (spec[1], spec[0]) + tuple(spec[2:])
 _conv_sdims = lambda spec: spec[2:]
 
 
+def _reshape_axis_out_of(src: int, size1: int, x: jax.Array) -> jax.Array:
+  """Splits axis `src` of `x` into two axes, `[size1, x.shape[src] // size1]`."""
+  shape = list(x.shape)
+  size2, ragged = divmod(shape[src], size1)
+  assert not ragged
+  shape[src : src + 1] = [size1, size2]
+  return jax.lax.reshape(x, shape)
+
+
+def _reshape_axis_into(src: int, dst: int, x: jax.Array) -> jax.Array:
+  """Merges axis `src` of `x` into axis `dst`, as its major part.
+
+  `dst` numbers the axes after `src` is removed, as jax.lax's own helper of
+  the same name does for the transpose of a grouped convolution.
+  """
+  perm = [i for i in range(x.ndim) if i != src]
+  perm.insert(dst, src)
+  new_shape = list(np.delete(x.shape, src))
+  new_shape[dst] *= x.shape[src]
+  return jax.lax.reshape(x, new_shape, dimensions=perm)
+
+
 def _compute_dilated_shape(
     shape: Sequence[int], dilation: Sequence[int]
 ) -> tuple[int, ...]:
@@ -282,6 +304,20 @@ def conv_general_qt_bwd(
 
   rhs = jax.tree.map(lambda x: jax.lax.rev(x, rhs_sdims_indices), rhs)
 
+  # As jax.lax's transpose of a grouped convolution: the kernel's output
+  # features hold the groups, which the transposed kernel takes into its input
+  # features, and a batch-grouped convolution transposes to a feature-grouped
+  # one. A quantized kernel is dequantized first, as the float convolution
+  # below would read it, since its scales do not split with the groups.
+  dlhs_feature_group_count = feature_group_count
+  if feature_group_count > 1 or batch_group_count > 1:
+    groups = max(feature_group_count, batch_group_count)
+    if isinstance(rhs, qarray.QArray):
+      rhs = qarray.dequantize(rhs)
+    rhs = _reshape_axis_out_of(dnums.rhs_spec[0], groups, rhs)
+    rhs = _reshape_axis_into(dnums.rhs_spec[0], dnums.rhs_spec[1], rhs)
+    dlhs_feature_group_count = groups
+
   dlhs = conv_general.conv_general_dilated(
       lhs=dlhs_g,
       rhs=rhs,
@@ -290,9 +326,12 @@ def conv_general_qt_bwd(
       lhs_dilation=window_strides,
       rhs_dilation=rhs_dilation,
       dimension_numbers=dlhs_dnums,
-      feature_group_count=feature_group_count,
-      batch_group_count=batch_group_count,
+      feature_group_count=dlhs_feature_group_count,
+      batch_group_count=1,
   )
+  if batch_group_count > 1:
+    dlhs = _reshape_axis_out_of(dnums.lhs_spec[1], batch_group_count, dlhs)
+    dlhs = _reshape_axis_into(dnums.lhs_spec[1], dnums.lhs_spec[0], dlhs)
 
   # drhs
   drhs_dnums = jax.lax.ConvDimensionNumbers(
@@ -326,6 +365,9 @@ def conv_general_qt_bwd(
       how = dataclasses.replace(how, channelwise_axes=[])
     drhs_g = qarray.quantize(drhs_g, how)
 
+  # As jax.lax's transpose of a grouped convolution for its kernel: the
+  # transposed convolution groups its batch, the forward's features, where the
+  # forward grouped its features, and the reverse.
   drhs = conv_general.conv_general_dilated(
       lhs=lhs,
       rhs=drhs_g,
@@ -334,8 +376,8 @@ def conv_general_qt_bwd(
       lhs_dilation=lhs_dilation,
       rhs_dilation=window_strides,
       dimension_numbers=drhs_dnums,
-      feature_group_count=feature_group_count,
-      batch_group_count=batch_group_count,
+      feature_group_count=batch_group_count,
+      batch_group_count=feature_group_count,
   )
 
   return dlhs, drhs

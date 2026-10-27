@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from collections.abc import Sequence
+import dataclasses
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
@@ -52,26 +53,37 @@ def conv_general_fq(
     dimension_numbers: jax.lax.ConvGeneralDilatedDimensionNumbers | None,
     lhs_dilation: Sequence[int] | None = None,
     rhs_dilation: Sequence[int] | None = None,
+    feature_group_count: int = 1,
+    batch_group_count: int = 1,
 ):
   """conv_general_dilated implemented with fake quantization."""
   dnums = jax.lax.conv_dimension_numbers(
       lhs.shape, rhs.shape, dimension_numbers
   )
 
-  lhs_how = conv_general.get_how_to_quantize(
-      dimension_numbers=dnums,
-      for_lhs=True,
-      qtype=config.lhs_qtype,
-      calibration_method=config.lhs_calibration_method,
-  )
-  rhs_how = conv_general.get_how_to_quantize(
-      dimension_numbers=dnums,
-      for_lhs=False,
-      qtype=config.rhs_qtype,
-      calibration_method=config.rhs_calibration_method,
-  )
-  lhs_fq = _fake_quant(lhs, lhs_how)
-  rhs_fq = _fake_quant(rhs, rhs_how)
+  def fake_quant(operand, *, for_lhs):
+    qtype = config.lhs_qtype if for_lhs else config.rhs_qtype
+    if qtype is None:
+      return operand
+    how = conv_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        for_lhs=for_lhs,
+        qtype=qtype,
+        calibration_method=config.lhs_calibration_method
+        if for_lhs
+        else config.rhs_calibration_method,
+    )
+    disabled = (
+        config.lhs_disable_channelwise_axes
+        if for_lhs
+        else config.rhs_disable_channelwise_axes
+    )
+    if disabled:
+      how = dataclasses.replace(how, channelwise_axes=[])
+    return _fake_quant(operand, how)
+
+  lhs_fq = fake_quant(lhs, for_lhs=True)
+  rhs_fq = fake_quant(rhs, for_lhs=False)
   return jax.lax.conv_general_dilated(
       lhs_fq,
       rhs_fq,
@@ -80,6 +92,8 @@ def conv_general_fq(
       lhs_dilation=lhs_dilation,
       rhs_dilation=rhs_dilation,
       dimension_numbers=dnums,
+      feature_group_count=feature_group_count,
+      batch_group_count=batch_group_count,
   )
 
 
@@ -249,6 +263,110 @@ class ConvGeneralQtTest(parameterized.TestCase):
 
     for x, y in zip(maes, expected_maes):
       self.assertLessEqual(x, y, msg=f'{maes} < {expected_maes}')
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='depthwise_nhwc',
+          data_format='NHWC',
+          feature_group_count=8,
+      ),
+      dict(
+          testcase_name='grouped_nchw',
+          data_format='NCHW',
+          feature_group_count=2,
+      ),
+      dict(
+          testcase_name='grouped_int8_bwd_nchw',
+          data_format='NCHW',
+          feature_group_count=2,
+          bwd_qtype='int8',
+          expected_grad_mae=0.02,
+      ),
+      dict(
+          testcase_name='batch_grouped_rhs_only_nhwc',
+          data_format='NHWC',
+          batch_group_count=2,
+          lhs_qtype=None,
+      ),
+      dict(
+          testcase_name='batch_grouped_per_tensor_lhs_int8_bwd_nchw',
+          data_format='NCHW',
+          batch_group_count=2,
+          lhs_disable_channelwise_axes=True,
+          bwd_qtype='int8',
+          expected_grad_mae=0.02,
+      ),
+  )
+  def test_grouped_grad_against_fq(
+      self,
+      *,
+      data_format,
+      feature_group_count=1,
+      batch_group_count=1,
+      lhs_qtype='int8',
+      lhs_disable_channelwise_axes=False,
+      bwd_qtype=None,
+      expected_grad_mae=1e-6,
+  ):
+    """A grouped convolution's gradients are its fake-quantized twin's."""
+    groups = max(feature_group_count, batch_group_count)
+    batch = 4 * batch_group_count
+    channels_in = 8
+    channels_out = 8 * groups
+    kernel_in = channels_in // feature_group_count
+    if data_format == 'NCHW':
+      lhs_shape = (batch, channels_in, 16, 16)
+      rhs_shape = (channels_out, kernel_in, 3, 3)
+      dimension_numbers = ('NCHW', 'OIHW', 'NCHW')
+    else:
+      lhs_shape = (batch, 16, 16, channels_in)
+      rhs_shape = (3, 3, kernel_in, channels_out)
+      dimension_numbers = ('NHWC', 'HWIO', 'NHWC')
+    lhs = jax.random.normal(jax.random.key(0), lhs_shape, jnp.float32)
+    rhs = jax.random.normal(jax.random.key(1), rhs_shape, jnp.float32)
+    config = conv_general_qt.ConvGeneralQtConfig(
+        lhs_qtype=lhs_qtype,
+        rhs_qtype='int8',
+        lhs_disable_channelwise_axes=lhs_disable_channelwise_axes,
+        dlhs_grad_qtype=bwd_qtype,
+        drhs_grad_qtype=bwd_qtype,
+    )
+
+    def loss_fn_fq(lhs_arr, rhs_arr):
+      return jnp.sum(
+          conv_general_fq(
+              lhs_arr,
+              rhs_arr,
+              config,
+              (1, 1),
+              'SAME',
+              dimension_numbers,
+              feature_group_count=feature_group_count,
+              batch_group_count=batch_group_count,
+          )
+          ** 2
+      )
+
+    def loss_fn_qt(lhs_arr, rhs_arr):
+      return jnp.sum(
+          conv_general_qt.conv_general_qt(
+              lhs=lhs_arr,
+              rhs=rhs_arr,
+              config=config,
+              window_strides=(1, 1),
+              padding='SAME',
+              dimension_numbers=dimension_numbers,
+              feature_group_count=feature_group_count,
+              batch_group_count=batch_group_count,
+          )
+          ** 2
+      )
+
+    fq_grads = jax.jit(jax.grad(loss_fn_fq, argnums=(0, 1)))(lhs, rhs)
+    qt_grads = jax.jit(jax.grad(loss_fn_qt, argnums=(0, 1)))(lhs, rhs)
+    for fq_grad, qt_grad in zip(fq_grads, qt_grads):
+      self.assertEqual(fq_grad.shape, qt_grad.shape)
+      self.assertLessEqual(float(mae(fq_grad, qt_grad)), expected_grad_mae)
 
 
 if __name__ == '__main__':
