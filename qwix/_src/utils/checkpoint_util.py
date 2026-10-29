@@ -13,6 +13,7 @@
 # limitations under the License.
 """Utilities for handling checkpoints and prequantized parameters."""
 
+import dataclasses
 from typing import Any, Mapping, cast
 
 from absl import logging
@@ -22,6 +23,7 @@ import jax
 from jax import numpy as jnp
 from qwix._src import qconfig
 from qwix._src.core import qarray
+from qwix._src.providers import boxed_param
 from qwix._src.providers import qt
 from qwix._src.utils import flax_util
 
@@ -565,7 +567,8 @@ def _resolve_template_param(
 
   Args:
     path: The path from the checkpoint.
-    template_params: The template parameters of the NNX model.
+    template_params: The template parameters of the NNX model or Linen params
+      dict.
 
   Returns:
     A tuple of (resolved_path, template_param).
@@ -585,6 +588,68 @@ def _resolve_template_param(
   return path, template_param
 
 
+def _rebuild_linen_param(template_param: Any, processed: Any) -> Any:
+  """Places a processed value into the containers of its Linen template param.
+
+  Linen consumes params as given, so a quantized param must keep the template's
+  `WithAux` and `QArray` containers along with their static fields, such as
+  `WithAux.how` and `QArray.qtype`. Partitioning metadata boxes are dropped.
+
+  Args:
+    template_param: The Linen template param that owns the processed value.
+    processed: A `QArray` (Case 1) or a JAX array (Case 2 and 3).
+
+  Returns:
+    The processed value in the containers of `template_param`.
+  """
+  if isinstance(template_param, boxed_param.WithAux):
+    return dataclasses.replace(
+        template_param,
+        array=_rebuild_linen_param(template_param.array, processed),
+    )
+  if isinstance(template_param, qarray.QArray):
+    return dataclasses.replace(
+        template_param,
+        qvalue=processed.qvalue,
+        scale=processed.scale,
+        zero_point=processed.zero_point,
+    )
+  if isinstance(template_param, dict) and isinstance(processed, qarray.QArray):
+    # Manually overridden dict templates get the same dict as in NNX.
+    rebuilt = {'qvalue': processed.qvalue, 'scale': processed.scale}
+    if processed.zero_point is not None:
+      rebuilt['zero_point'] = processed.zero_point
+    return rebuilt
+  return processed
+
+
+def _to_linen_params(
+    flat_processed: Mapping[tuple[Any, ...], Any],
+    template_params: dict[str, Any],
+) -> dict[str, Any]:
+  """Nests processed values into a Linen params dict shaped like the template.
+
+  Args:
+    flat_processed: The processed values keyed by their resolved paths.
+    template_params: The Linen params dict used as the template.
+
+  Returns:
+    A nested dict consumable by `model.apply({'params': ...}, ...)`.
+  """
+  flat_params = {}
+  for path, processed in flat_processed.items():
+    # Checkpoint paths address the array inside a WithAux, but Linen needs the
+    # whole WithAux.
+    if path[-1:] == ('array',) and isinstance(
+        flax_util.get_value_from_path(template_params, path[:-1]),
+        boxed_param.WithAux,
+    ):
+      path = path[:-1]
+    template_param = flax_util.get_value_from_path(template_params, path)
+    flat_params[path] = _rebuild_linen_param(template_param, processed)
+  return flax.traverse_util.unflatten_dict(flat_params)
+
+
 def process_prequantized_params(
     checkpoint_params: Mapping[str, Any],
     template_params: Any,
@@ -592,34 +657,43 @@ def process_prequantized_params(
     allow_extra_params: bool = False,
     use_checkpoint_sharding: bool = False,
 ) -> Any:
-  """Converts external pre-quantized params into an `nnx.update`-friendly pure dict.
+  """Converts external pre-quantized params to match an NNX or Linen template.
 
   Args:
     checkpoint_params: A nested dict matching NNX state paths (without `.value`
-      suffixes). Leaves must be either a `jax.Array` or a dict containing
-      `'qvalue'`, `'scale'`, and optional `'zero_point'`.
-    template_params: An NNX model, possibly abstract (e.g., from
-      `nnx.eval_shape`).
+      suffixes) or Linen paths (within the `'params'` collection). Leaves must
+      be either a `jax.Array` or a dict containing `'qvalue'`, `'scale'`, and
+      optional `'zero_point'`.
+    template_params: An NNX model, possibly abstract (e.g. from
+      `nnx.eval_shape`), or a Linen params dict, possibly abstract (e.g.
+      `jax.eval_shape(model.init, ...)['params']`).
     allow_extra_params: If True, ignore payload entries not present in
       `template_params`.
     use_checkpoint_sharding: If True, use sharding from checkpoint_params
       instead of template_params.
 
   Returns:
-    A nested pure dict consumable by `nnx.update`. The nested key paths will
-    include `'value'` at the end, pointing to either a dict or a JAX array.
+    For an NNX model, a nested pure dict consumable by `nnx.update`. The nested
+    key paths will include `'value'` at the end, pointing to either a dict or a
+    JAX array. For a Linen params dict, a nested dict of the processed params
+    in the `WithAux` and `QArray` containers of `template_params`, consumable
+    by `model.apply({'params': ...}, ...)`.
   """
-  if not isinstance(template_params, nnx.Module):
+  if isinstance(template_params, (dict, flax.core.FrozenDict)):
+    # A Linen params dict, which is a plain dict from here on.
+    template_params = flax.core.unfreeze(template_params)
+  elif not isinstance(template_params, nnx.Module):
     raise TypeError(
-        'process_prequantized_params only supports NNX models. Got'
-        f' {type(template_params)}.'
+        'process_prequantized_params expects an NNX model or a Linen params'
+        f' dict as template_params. Got {type(template_params)}.'
     )
 
   # Value: QArray(Case 1) or a JAX array(Case 2 and 3).
   flat_processed = {}
-  # Value: dict containing 'qvalue'(quantized) or a JAX array(fp).
+  # Value: dict containing 'qvalue'(quantized) or a JAX array(fp). Unfreeze so
+  # that _is_leaf recognizes the quantized leaves of FrozenDict payloads.
   flat_checkpoint = flax.traverse_util.flatten_dict(
-      checkpoint_params, is_leaf=_is_leaf
+      flax.core.unfreeze(dict(checkpoint_params)), is_leaf=_is_leaf
   )
   # tuple path example: ('layers', 0, 'mlp', 'experts_gate_up_proj_weight').
   for path, checkpoint_param in flat_checkpoint.items():
@@ -629,10 +703,16 @@ def process_prequantized_params(
     )
     if template_param is None:
       if not allow_extra_params:
-        raise ValueError(
+        message = (
             'Found extra parameters in prequantized_params not present in'
             f' template: {resolved_path}'
         )
+        if isinstance(template_params, dict) and 'params' in template_params:
+          message += (
+              ". template_params has a top-level 'params' key; pass the Linen"
+              " params collection, e.g. variables['params']."
+          )
+        raise ValueError(message)
       logging.info('Skipping parameter not in template: %s', resolved_path)
       continue
 
@@ -641,7 +721,7 @@ def process_prequantized_params(
     # operations, users will need to modify the abstract model state to match
     # their expectations. For example, Qwen 3.5 MoE overrides the original fp
     # template to be a dict like {'array': {'qvalue': ..., 'scale': ...}}.
-    # Note: The consumer (e.g., Pallas kernel) must be implemented to handle
+    # Note: The consumer (e.g. Pallas kernel) must be implemented to handle
     # receiving a QArray/dict instead of a standard JAX array.
     template_array = _get_template_field(template_param, 'array')
     if template_array is not None:
@@ -695,7 +775,7 @@ def process_prequantized_params(
           use_checkpoint_sharding=use_checkpoint_sharding,
       )
 
-    # Handle invalid combinations (e.g., checkpoint is full precision, but
+    # Handle invalid combinations (e.g. checkpoint is full precision, but
     # template expects quantized).
     else:
       raise ValueError(
@@ -705,6 +785,9 @@ def process_prequantized_params(
       )
 
     flat_processed[resolved_path] = processed
+
+  if isinstance(template_params, dict):
+    return _to_linen_params(flat_processed, template_params)
 
   # Key: nested key path.
   # Value: QArray(Case 1) or a JAX array(Case 2 and 3).
@@ -732,8 +815,9 @@ def restore_quantization_rules(
 
   Args:
     checkpoint_params: A nested dict matching NNX state paths (without `.value`
-      suffixes). Leaves must be either a `jax.Array` or a dict containing
-      `'qvalue'`, `'scale'`, and optional `'zero_point'`.
+      suffixes) or Linen paths (within the `'params'` collection). Leaves must
+      be either a `jax.Array` or a dict containing `'qvalue'`, `'scale'`, and
+      optional `'zero_point'`.
     rule_type: The type of quantization rule, either `qconfig.QuantizationRule`
       or `qt.QtRule`.
     tile_size: The tile size for subchannel quantization.
@@ -745,8 +829,10 @@ def restore_quantization_rules(
     A list of `qconfig.QuantizationRule | qt.QtRule` objects.
   """
   rules = {}
+  # Unfreeze so that _is_leaf recognizes the quantized leaves of FrozenDict
+  # payloads.
   flat_checkpoint = flax.traverse_util.flatten_dict(
-      checkpoint_params, is_leaf=_is_leaf
+      flax.core.unfreeze(dict(checkpoint_params)), is_leaf=_is_leaf
   )
   for path, checkpoint_param in flat_checkpoint.items():
     # Skip non-quantized parameters.
