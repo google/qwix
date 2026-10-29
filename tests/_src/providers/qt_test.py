@@ -306,6 +306,126 @@ class QtTest(parameterized.TestCase):
     grads = train_step(qt_linear, model_input)
     self.assertIsNotNone(grads)
 
+  def test_exclude_module_path(self):
+    """Tests that exclude_module_path prevents rule matching on excluded modules."""
+
+    class TwoLayerModel(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.proj = nnx.Linear(4, 4, use_bias=False, rngs=rngs)
+        self.lm_head = nnx.Linear(4, 4, use_bias=False, rngs=rngs)
+
+      def __call__(self, x):
+        return self.lm_head(self.proj(x))
+
+    rule = qt.QtRule(
+        module_path=".*",
+        exclude_module_path=".*lm_head.*",
+        additional_qt_config={"multipass_mode": "1xe3m0"},
+    )
+    x = jnp.ones((1, 4), dtype=jnp.float32)
+    model = TwoLayerModel(nnx.Rngs(0))
+    model.proj.kernel[...] = jnp.full((4, 4), 1.25, dtype=jnp.float32)
+    model.lm_head.kernel[...] = jnp.full((4, 4), 1.25, dtype=jnp.float32)
+
+    qt_model = qwix_model.quantize_model(model, qt.QtProvider([rule]), x)
+    qt_out = qt_model(x)
+    # proj is quantized with 1-pass e3m0 (1.25 -> 1.0, row sum=4.0), while
+    # lm_head is excluded and stays float32 (1.25, output = 4 * 4.0 * 1.25 = 20.0).
+    self.assertTrue(
+        jnp.allclose(qt_out, jnp.full((1, 4), 20.0, dtype=jnp.float32))
+    )
+
+  def test_step_context_concrete_and_traced(self):
+    """Tests start_step and end_step gating under concrete and traced steps."""
+    rule = qt.QtRule(
+        module_path=".*",
+        start_step=5,
+        end_step=10,
+        additional_qt_config={"multipass_mode": "1xe3m0"},
+    )
+    provider = qt.QtProvider([rule])
+
+    class TestModule(nn.Module):
+      provider: qt.QtProvider
+
+      def __call__(self, a, b):
+        return self.provider.dot_general(a, b, (((1,), (0,)), ((), ())))
+
+    module = TestModule(provider)
+    lhs = jnp.full((1, 4), 1.25, dtype=jnp.float32)
+    rhs = jnp.ones((4, 1), dtype=jnp.float32)
+
+    with flax_util.step_context(2):
+      out_before = module.apply({}, lhs, rhs)
+    with flax_util.step_context(5):
+      out_active = module.apply({}, lhs, rhs)
+    with flax_util.step_context(10):
+      out_after = module.apply({}, lhs, rhs)
+
+    # Unquantized sum of 4 * 1.25 is 5.0; 1-pass e3m0 rounds 1.25 -> 1.0 (sum = 4.0).
+    self.assertAlmostEqual(float(out_before[0, 0]), 5.0, places=4)
+    self.assertAlmostEqual(float(out_active[0, 0]), 4.0, places=4)
+    self.assertAlmostEqual(float(out_after[0, 0]), 5.0, places=4)
+
+    @jax.jit
+    def jitted_step(step_arr, x, w):
+      with flax_util.step_context(step_arr):
+        return module.apply({}, x, w)
+
+    self.assertAlmostEqual(
+        float(jitted_step(jnp.int32(3), lhs, rhs)[0, 0]), 5.0, places=4
+    )
+    self.assertAlmostEqual(
+        float(jitted_step(jnp.int32(7), lhs, rhs)[0, 0]), 4.0, places=4
+    )
+    self.assertAlmostEqual(
+        float(jitted_step(jnp.int32(10), lhs, rhs)[0, 0]), 5.0, places=4
+    )
+
+  def test_scan_index_context_concrete_and_traced(self):
+    """Tests target_scan_indices gating under concrete and traced scan indices."""
+    rule = qt.QtRule(
+        module_path=".*",
+        target_scan_indices=(1, 3),
+        additional_qt_config={"multipass_mode": "1xe3m0"},
+    )
+    provider = qt.QtProvider([rule])
+
+    class TestModule(nn.Module):
+      provider: qt.QtProvider
+
+      def __call__(self, a, b):
+        return self.provider.dot_general(a, b, (((1,), (0,)), ((), ())))
+
+    module = TestModule(provider)
+    lhs = jnp.full((1, 4), 1.25, dtype=jnp.float32)
+    rhs = jnp.ones((4, 1), dtype=jnp.float32)
+
+    with flax_util.scan_index_context(0):
+      self.assertAlmostEqual(
+          float(module.apply({}, lhs, rhs)[0, 0]), 5.0, places=4
+      )
+    with flax_util.scan_index_context(1):
+      self.assertAlmostEqual(
+          float(module.apply({}, lhs, rhs)[0, 0]), 4.0, places=4
+      )
+
+    @jax.jit
+    def scan_layers(x, w):
+      def body(carry, idx):
+        with flax_util.scan_index_context(idx):
+          y = module.apply({}, carry, w)
+        return carry, y[0, 0]
+
+      _, outs = jax.lax.scan(body, x, jnp.arange(4, dtype=jnp.int32))
+      return outs
+
+    outs = scan_layers(lhs, rhs)
+    self.assertTrue(
+        jnp.allclose(outs, jnp.array([5.0, 4.0, 5.0, 4.0], dtype=jnp.float32))
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

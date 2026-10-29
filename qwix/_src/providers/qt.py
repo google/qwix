@@ -72,6 +72,16 @@ class QtProvider(qconfig.QuantizationProvider):
       rule = QtRule(**dataclasses.asdict(rule))
     return rule
 
+  def _is_rule_configured(self, rule: qconfig.QuantizationRule | None) -> bool:
+    if rule is None:
+      return False
+    if rule.weight_qtype is not None or rule.act_qtype is not None:
+      return True
+    if isinstance(rule, QtRule):
+      if rule.bwd_qtype is not None or rule.additional_qt_config:
+        return True
+    return False
+
   def dot_general(
       self,
       lhs: jax.Array,
@@ -83,18 +93,32 @@ class QtProvider(qconfig.QuantizationProvider):
       out_sharding=None,
   ) -> jax.Array:
     """QT dot_general."""
+    unquantized_fn = lambda: jax.lax.dot_general(
+        lhs,
+        rhs,
+        dimension_numbers,
+        precision=precision,
+        preferred_element_type=preferred_element_type,
+        out_sharding=out_sharding,
+    )
     rule, op_id = self._get_current_rule_and_op_id('dot_general')
-    if rule is None or rule.weight_qtype is None:
-      return jax.lax.dot_general(
-          lhs,
-          rhs,
-          dimension_numbers,
-          precision=precision,
-          preferred_element_type=preferred_element_type,
-          out_sharding=out_sharding,
-      )
+    if not self._is_rule_configured(rule):
+      return unquantized_fn()
+    assert rule is not None
+    active = qconfig.is_rule_active_in_context(rule)
+    if isinstance(active, bool):
+      if not active:
+        return unquantized_fn()
+      config = self._create_dot_general_qt_config(rule, op_id, lhs, rhs)  # pyrefly: ignore[bad-argument-type]
+      return dot_general_qt.dot_general_qt(lhs, rhs, dimension_numbers, config)
     config = self._create_dot_general_qt_config(rule, op_id, lhs, rhs)  # pyrefly: ignore[bad-argument-type]
-    return dot_general_qt.dot_general_qt(lhs, rhs, dimension_numbers, config)
+    return jax.lax.cond(
+        active,
+        lambda: dot_general_qt.dot_general_qt(
+            lhs, rhs, dimension_numbers, config
+        ),
+        unquantized_fn,
+    )
 
   def einsum(
       self,
@@ -106,19 +130,24 @@ class QtProvider(qconfig.QuantizationProvider):
       out_sharding=None,
   ) -> jax.Array:
     """QT einsum."""
+    unquantized_fn = lambda: jnp.einsum(
+        einsum_str,
+        *operands,
+        precision=precision,
+        preferred_element_type=preferred_element_type,
+        _dot_general=_dot_general,
+        out_sharding=out_sharding,
+    )
     rule, op_id = self._get_current_rule_and_op_id('einsum')
-    if rule is None or rule.weight_qtype is None:
-      return jnp.einsum(
-          einsum_str,
-          *operands,
-          precision=precision,
-          preferred_element_type=preferred_element_type,
-          _dot_general=_dot_general,
-          out_sharding=out_sharding,
-      )
+    if not self._is_rule_configured(rule):
+      return unquantized_fn()
+    assert rule is not None
     if len(operands) != 2:
       # TODO(jiwonshin): Support N-ary einsum if there is a need in the future.
       raise ValueError(f'Unsupported einsum format: {einsum_str=} {operands=}')
+    active = qconfig.is_rule_active_in_context(rule)
+    if isinstance(active, bool) and not active:
+      return unquantized_fn()
 
     def custom_dot_general(
         lhs,
@@ -130,13 +159,15 @@ class QtProvider(qconfig.QuantizationProvider):
     ):
       # TODO(dangyi): support preferred_element_type.
       del precision, preferred_element_type, kwargs
-      return dot_general_qt.dot_general_qt(
-          lhs,
-          rhs,
-          dimension_numbers,
-          # lhs and rhs might be flipped by einsum so we cannot use the operands
-          # from the einsum call.
-          self._create_dot_general_qt_config(rule, op_id, lhs, rhs),  # pyrefly: ignore[bad-argument-type]
+      cfg = self._create_dot_general_qt_config(rule, op_id, lhs, rhs)  # pyrefly: ignore[bad-argument-type]
+      if isinstance(active, bool):
+        return dot_general_qt.dot_general_qt(lhs, rhs, dimension_numbers, cfg)
+      return jax.lax.cond(
+          active,
+          lambda: dot_general_qt.dot_general_qt(
+              lhs, rhs, dimension_numbers, cfg
+          ),
+          lambda: jax.lax.dot_general(lhs, rhs, dimension_numbers),
       )
 
     with jax.disable_jit():
@@ -165,26 +196,30 @@ class QtProvider(qconfig.QuantizationProvider):
       out_sharding=None,
   ) -> jax.Array:
     """QT conv_general_dilated."""
+    unquantized_fn = lambda: jax.lax.conv_general_dilated(
+        lhs,
+        rhs,
+        window_strides,
+        padding,
+        lhs_dilation=lhs_dilation,
+        rhs_dilation=rhs_dilation,
+        dimension_numbers=dimension_numbers,
+        feature_group_count=feature_group_count,
+        batch_group_count=batch_group_count,
+        precision=precision,
+        preferred_element_type=preferred_element_type,
+        out_sharding=out_sharding,
+    )
     rule, op_id = self._get_current_rule_and_op_id('conv_general_dilated')
     if rule is None or rule.weight_qtype is None:
-      return jax.lax.conv_general_dilated(
-          lhs,
-          rhs,
-          window_strides,
-          padding,
-          lhs_dilation=lhs_dilation,
-          rhs_dilation=rhs_dilation,
-          dimension_numbers=dimension_numbers,
-          feature_group_count=feature_group_count,
-          batch_group_count=batch_group_count,
-          precision=precision,
-          preferred_element_type=preferred_element_type,
-          out_sharding=out_sharding,
-      )
+      return unquantized_fn()
     if rule.tile_size:
       raise ValueError('subchannel is not supported for conv_general_dilated.')
+    active = qconfig.is_rule_active_in_context(rule)
+    if isinstance(active, bool) and not active:
+      return unquantized_fn()
     config = self._create_conv_general_qt_config(rule, op_id, lhs, rhs)  # pyrefly: ignore[bad-argument-type]
-    return conv_general_qt.conv_general_qt(
+    quantized_fn = lambda: conv_general_qt.conv_general_qt(
         lhs,
         rhs,
         config,
@@ -197,6 +232,9 @@ class QtProvider(qconfig.QuantizationProvider):
         batch_group_count,
         out_sharding,
     )
+    if isinstance(active, bool):
+      return quantized_fn()
+    return jax.lax.cond(active, quantized_fn, unquantized_fn)
 
   def ragged_dot(
       self,
@@ -208,18 +246,23 @@ class QtProvider(qconfig.QuantizationProvider):
       group_offset: jax.Array | None = None,
   ) -> jax.Array:
     """QT ragged_dot."""
+    unquantized_fn = lambda: jax.lax.ragged_dot(
+        lhs,
+        rhs,
+        group_sizes,
+        precision=precision,
+        preferred_element_type=preferred_element_type,
+        group_offset=group_offset,
+    )
     rule, _ = self._get_current_rule_and_op_id('ragged_dot')
-    if rule is None or rule.weight_qtype is None:
-      return jax.lax.ragged_dot(
-          lhs,
-          rhs,
-          group_sizes,
-          precision=precision,
-          preferred_element_type=preferred_element_type,
-          group_offset=group_offset,
-      )
+    if not self._is_rule_configured(rule):
+      return unquantized_fn()
+    assert rule is not None
+    active = qconfig.is_rule_active_in_context(rule)
+    if isinstance(active, bool) and not active:
+      return unquantized_fn()
     config = self._create_ragged_dot_qt_config(rule)
-    return ragged_dot_qt.ragged_dot_qt(
+    quantized_fn = lambda: ragged_dot_qt.ragged_dot_qt(
         lhs,
         rhs,
         group_sizes,
@@ -228,6 +271,9 @@ class QtProvider(qconfig.QuantizationProvider):
         preferred_element_type,
         group_offset,
     )
+    if isinstance(active, bool):
+      return quantized_fn()
+    return jax.lax.cond(active, quantized_fn, unquantized_fn)
 
   def get_intercept_map(self):
     """Used for interception."""
