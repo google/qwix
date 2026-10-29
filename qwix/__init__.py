@@ -22,6 +22,16 @@ from qwix._src.core.conv_general import conv_general_dilated
 from qwix._src.core.dot import dot
 from qwix._src.core.dot_general import dot_general
 from qwix._src.core.einsum import einsum
+from qwix._src.core.multipass_dot import (
+    DtypeSpec,
+    MultiPassMode,
+    MultipassConfig,
+    OperandMultipassConfig,
+    decompose_multipass_operand,
+    quantize_to_dtype_spec,
+    reconstruct_multipass_operand,
+    resolve_multipass_config,
+)
 from qwix._src.core.qarray import QArray, dequantize, quantize_api as quantize
 from qwix._src.core.ragged_dot import ragged_dot, ragged_dot_general
 from qwix._src.core.ragged_dot_qt import RaggedDotQtConfig, ragged_dot_qt

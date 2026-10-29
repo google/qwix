@@ -88,8 +88,11 @@ Using fixed power-of-2 scale relationships where applicable provides:
    dynamic residual scaling.
 """
 
+from collections.abc import Collection, Mapping, Sequence
+import dataclasses
 import functools
 import math
+import re
 from typing import Any, Literal, TypeAlias, get_args
 
 import jax
@@ -1077,6 +1080,439 @@ def _hybrid_fp8_4bit_dot_general(
   return (c00 + c01 + c10).astype(target_out_type)
 
 
+@dataclasses.dataclass(slots=True, frozen=True)
+class DtypeSpec:
+  """Parametric or native data type specification for multi-pass quantization."""
+
+  dtype: jax.typing.DTypeLike | None = None
+  exp_bits: int | None = None
+  mantissa_bits: int | None = None
+  int_bits: int | None = None
+  signed: bool = True
+
+  @classmethod
+  def parse(cls, spec: 'str | jax.typing.DTypeLike | DtypeSpec') -> 'DtypeSpec':
+    """Parses a dtype, alias string, or parametric 'eXmY'/'intB' string."""
+    if isinstance(spec, cls):
+      return spec
+    if not isinstance(spec, str):
+      dt = jnp.dtype(spec)
+      if dt == jnp.float8_e4m3fn:
+        return cls(dtype=jnp.float8_e4m3fn, exp_bits=4, mantissa_bits=3)
+      if dt == jnp.float8_e5m2:
+        return cls(dtype=jnp.float8_e5m2, exp_bits=5, mantissa_bits=2)
+      if dt == jnp.float4_e2m1fn:
+        return cls(dtype=jnp.float4_e2m1fn, exp_bits=2, mantissa_bits=1)
+      if dt == jnp.int4:
+        return cls(dtype=jnp.int4, int_bits=4, signed=True)
+      if dt == jnp.int8:
+        return cls(dtype=jnp.int8, int_bits=8, signed=True)
+      if dt == jnp.int16:
+        return cls(dtype=jnp.int16, int_bits=16, signed=True)
+      if dt == jnp.bfloat16:
+        return cls(dtype=jnp.bfloat16, exp_bits=8, mantissa_bits=7)
+      if dt == jnp.float16:
+        return cls(dtype=jnp.float16, exp_bits=5, mantissa_bits=10)
+      if dt == jnp.float32:
+        return cls(dtype=jnp.float32, exp_bits=8, mantissa_bits=23)
+      return cls(dtype=dt)
+
+    s = spec.strip().lower()
+    match s:
+      case 'fp8' | 'e4m3' | 'float8_e4m3' | 'float8_e4m3fn':
+        return cls(dtype=jnp.float8_e4m3fn, exp_bits=4, mantissa_bits=3)
+      case 'e5m2' | 'float8_e5m2':
+        return cls(dtype=jnp.float8_e5m2, exp_bits=5, mantissa_bits=2)
+      case 'fp4' | 'e2m1' | 'float4_e2m1fn':
+        return cls(dtype=jnp.float4_e2m1fn, exp_bits=2, mantissa_bits=1)
+      case 'bf16' | 'bfloat16':
+        return cls(dtype=jnp.bfloat16, exp_bits=8, mantissa_bits=7)
+      case 'fp16' | 'float16':
+        return cls(dtype=jnp.float16, exp_bits=5, mantissa_bits=10)
+      case 'fp32' | 'float32':
+        return cls(dtype=jnp.float32, exp_bits=8, mantissa_bits=23)
+      case (
+          'mxfp8'
+          | 'mxfp8_16'
+          | 'mxfp4'
+          | 'mxint8'
+          | 'mxint4'
+          | 'nvfp4'
+          | 'nf4'
+      ):
+        return cls(dtype=s)
+
+    if m := re.fullmatch(r'e(\d+)m(\d+)', s):
+      e_bits, m_bits = int(m.group(1)), int(m.group(2))
+      if e_bits < 1:
+        raise ValueError(f'exp_bits must be >= 1 in {spec!r}.')
+      return cls(exp_bits=e_bits, mantissa_bits=m_bits)
+
+    if m := re.fullmatch(r'(u?)int(\d+)', s):
+      signed = m.group(1) != 'u'
+      bits = int(m.group(2))
+      if bits < 1:
+        raise ValueError(f'int_bits must be >= 1 in {spec!r}.')
+      dtype: jax.typing.DTypeLike | None = None
+      if signed:
+        if bits == 4:
+          dtype = jnp.int4
+        elif bits == 8:
+          dtype = jnp.int8
+        elif bits == 16:
+          dtype = jnp.int16
+        elif bits in (2, 3, 5, 6, 7):
+          dtype = f'int{bits}'
+      return cls(dtype=dtype, int_bits=bits, signed=signed)
+
+    try:
+      return cls.parse(jnp.dtype(s))
+    except TypeError as exc:
+      raise ValueError(f'Unsupported DtypeSpec: {spec!r}') from exc
+
+
+def _round_values(x: jax.Array, rounding_mode: str) -> jax.Array:
+  """Applies rounding_mode ('nearest', 'rtz', or 'stochastic') to x."""
+  match rounding_mode:
+    case 'nearest':
+      return jnp.round(x)
+    case 'rtz':
+      return jnp.trunc(x)
+    case 'stochastic':
+      bits = jax.lax.bitcast_convert_type(x.astype(jnp.float32), jnp.uint32)
+      hashed = (bits * jnp.uint32(2654435761)) & jnp.uint32(0xFFFF)
+      noise = hashed.astype(jnp.float32) / 65536.0 - 0.5
+      return jnp.round(x + noise)
+    case _:
+      raise ValueError(
+          f'Unknown rounding_mode: {rounding_mode!r}. Expected "nearest",'
+          ' "rtz", or "stochastic".'
+      )
+
+
+def quantize_to_dtype_spec(
+    x: jax.Array,
+    spec: DtypeSpec | str | jax.typing.DTypeLike,
+    *,
+    rounding_mode: str = 'nearest',
+    flush_subnormals: bool = False,
+) -> jax.Array:
+  """Quantizes array x to a native or parametric DtypeSpec."""
+  parsed = DtypeSpec.parse(spec)
+  x_f32 = x.astype(jnp.float32)
+
+  if parsed.int_bits is not None:
+    if parsed.signed:
+      qmin = float(-(1 << (parsed.int_bits - 1)))
+      qmax = float((1 << (parsed.int_bits - 1)) - 1)
+    else:
+      qmin = 0.0
+      qmax = float((1 << parsed.int_bits) - 1)
+    absmax = jnp.max(jnp.abs(x_f32))
+    scale = jnp.where(absmax > 0, absmax / jnp.maximum(qmax, 1.0), 1.0)
+    q = jnp.clip(_round_values(x_f32 / scale, rounding_mode), qmin, qmax)
+    return (q * scale).astype(x.dtype)
+
+  if parsed.exp_bits is not None and parsed.mantissa_bits is not None:
+    if (
+        parsed.dtype is not None
+        and rounding_mode == 'nearest'
+        and not flush_subnormals
+    ):
+      finfo = jnp.finfo(parsed.dtype)
+      return (
+          jnp.clip(x_f32, float(finfo.min), float(finfo.max))
+          .astype(parsed.dtype)
+          .astype(x.dtype)
+      )
+
+    bias = (1 << (parsed.exp_bits - 1)) - 1
+    min_exp = 1 - bias
+    subnormal_threshold = 2.0**min_exp
+    if flush_subnormals:
+      x_f32 = jnp.where(jnp.abs(x_f32) < subnormal_threshold, 0.0, x_f32)
+    abs_x = jnp.abs(x_f32)
+    safe_abs = jnp.maximum(
+        abs_x, 2.0 ** (min_exp - parsed.mantissa_bits - 10)
+    )
+    exp = jnp.floor(jnp.log2(safe_abs))
+    eff_exp = jnp.maximum(exp, float(min_exp))
+    step = 2.0 ** (eff_exp - parsed.mantissa_bits)
+    if parsed.exp_bits == 4 and parsed.mantissa_bits == 3:
+      max_val = 448.0
+    elif parsed.exp_bits == 2 and parsed.mantissa_bits == 1:
+      max_val = 6.0
+    else:
+      max_exp = (1 << parsed.exp_bits) - 2 - bias
+      max_val = (2.0 - 2.0 ** (-parsed.mantissa_bits)) * (2.0**max_exp)
+    q = jnp.sign(x_f32) * _round_values(abs_x / step, rounding_mode) * step
+    q = jnp.clip(q, -max_val, max_val)
+    if flush_subnormals:
+      q = jnp.where(jnp.abs(q) < subnormal_threshold, 0.0, q)
+    if parsed.dtype is not None:
+      q = q.astype(parsed.dtype).astype(x.dtype)
+    return q.astype(x.dtype)
+
+  if parsed.dtype is not None:
+    how = qarray.HowToQuantize(qtype=parsed.dtype)
+    return qarray.dequantize(qarray.quantize(x, how))
+  raise ValueError(f'Invalid DtypeSpec: {parsed!r}')
+
+
+@dataclasses.dataclass(slots=True, frozen=True, kw_only=True)
+class OperandMultipassConfig:
+  """Per-operand configuration for parametric multi-pass decomposition."""
+
+  pass_dtypes: tuple[DtypeSpec | str | jax.typing.DTypeLike, ...] = (
+      jnp.float8_e4m3fn,
+  )
+  tile_size: int | float | Mapping[int, int | float] | None = None
+  rounding_mode: str = 'nearest'
+  flush_subnormals: bool = False
+  calibration_method: str = 'absmax'
+
+
+@dataclasses.dataclass(slots=True, frozen=True, kw_only=True)
+class MultipassConfig:
+  """Parametric multi-pass GEMM configuration."""
+
+  lhs: OperandMultipassConfig = dataclasses.field(
+      default_factory=OperandMultipassConfig
+  )
+  rhs: OperandMultipassConfig = dataclasses.field(
+      default_factory=OperandMultipassConfig
+  )
+  active_terms: tuple[tuple[int, int], ...] | None = None
+  acc_dtype: jax.typing.DTypeLike = jnp.float32
+
+  def get_active_terms(self) -> tuple[tuple[int, int], ...]:
+    """Returns the active (lhs_pass, rhs_pass) index pairs."""
+    if self.active_terms is not None:
+      return self.active_terms
+    return tuple(
+        (i, j)
+        for i in range(len(self.lhs.pass_dtypes))
+        for j in range(len(self.rhs.pass_dtypes))
+    )
+
+
+def resolve_multipass_config(
+    multipass_mode: MultiPassMode | MultipassConfig | None,
+    tile_size: int | float | Mapping[int, int | float] | None = None,
+) -> MultipassConfig | None:
+  """Resolves a string preset or MultipassConfig into a MultipassConfig."""
+  if multipass_mode is None:
+    return None
+  if isinstance(multipass_mode, MultipassConfig):
+    lhs_cfg = multipass_mode.lhs
+    rhs_cfg = multipass_mode.rhs
+    if tile_size is not None:
+      if lhs_cfg.tile_size is None:
+        lhs_cfg = dataclasses.replace(lhs_cfg, tile_size=tile_size)
+      if rhs_cfg.tile_size is None:
+        rhs_cfg = dataclasses.replace(rhs_cfg, tile_size=tile_size)
+    return dataclasses.replace(multipass_mode, lhs=lhs_cfg, rhs=rhs_cfg)
+
+  fp8_2p = OperandMultipassConfig(
+      pass_dtypes=(jnp.float8_e4m3fn, jnp.float8_e4m3fn), tile_size=tile_size
+  )
+  fp8_1p = OperandMultipassConfig(
+      pass_dtypes=(jnp.float8_e4m3fn,), tile_size=tile_size
+  )
+  match multipass_mode:
+    case 'three_pass_fp8':
+      return MultipassConfig(
+          lhs=fp8_2p, rhs=fp8_2p, active_terms=((0, 0), (0, 1), (1, 0))
+      )
+    case 'four_pass_fp8':
+      return MultipassConfig(
+          lhs=fp8_2p,
+          rhs=fp8_2p,
+          active_terms=((0, 0), (0, 1), (1, 0), (1, 1)),
+      )
+    case 'two_pass_lhs_fp8':
+      return MultipassConfig(
+          lhs=fp8_2p, rhs=fp8_1p, active_terms=((0, 0), (1, 0))
+      )
+    case 'two_pass_rhs_fp8':
+      return MultipassConfig(
+          lhs=fp8_1p, rhs=fp8_2p, active_terms=((0, 0), (0, 1))
+      )
+    case _:
+      if isinstance(multipass_mode, str) and (
+          m := re.fullmatch(r'(\d+)x(.+)', multipass_mode.strip())
+      ):
+        n_passes = int(m.group(1))
+        spec = DtypeSpec.parse(m.group(2))
+        op_cfg = OperandMultipassConfig(
+            pass_dtypes=(spec,) * n_passes, tile_size=tile_size
+        )
+        return MultipassConfig(lhs=op_cfg, rhs=op_cfg)
+      return None
+
+
+def _is_native_qarray_spec(spec: DtypeSpec) -> bool:
+  """Returns True if spec maps to a Qwix QArray qtype."""
+  if spec.dtype is None:
+    return False
+  if isinstance(spec.dtype, str):
+    return True
+  dt = jnp.dtype(spec.dtype)
+  return dt not in (jnp.bfloat16, jnp.float16, jnp.float32, jnp.float64)
+
+
+def decompose_multipass_operand(
+    x: jax.Array,
+    config: OperandMultipassConfig,
+    *,
+    dimension_numbers: jax.lax.DotDimensionNumbers = (((1,), (0,)), ((), ())),
+    ndims: tuple[int, int] = (2, 2),
+    for_lhs: bool = True,
+    channelwise_axes: Collection[int] | None = None,
+) -> tuple[qarray.MaybeQArray, ...]:
+  """Decomposes array x into residual passes according to config."""
+  if isinstance(x, qarray.QArray):
+    raise ValueError(
+        'Input to decompose_multipass_operand must strictly be unquantized'
+        f' jax.Array, but got {type(x)}.'
+    )
+  parsed_specs = tuple(DtypeSpec.parse(d) for d in config.pass_dtypes)
+  if not parsed_specs:
+    raise ValueError('OperandMultipassConfig.pass_dtypes must not be empty.')
+
+  # Fast path for homogeneous native QArray formats with standard rounding.
+  if (
+      config.rounding_mode == 'nearest'
+      and not config.flush_subnormals
+      and all(_is_native_qarray_spec(s) for s in parsed_specs)
+      and len({s.dtype for s in parsed_specs}) == 1
+  ):
+    qtype = parsed_specs[0].dtype
+    tile_size = (
+        32
+        if qtype in ('mxfp8', 'mxfp4', 'mxint8', 'mxint4')
+        and config.tile_size is None
+        else config.tile_size
+    )
+    how = dg.get_how_to_quantize(
+        dimension_numbers=dimension_numbers,
+        ndims=ndims,
+        for_lhs=for_lhs,
+        qtype=qtype,
+        tile_size=tile_size,
+        calibration_method=config.calibration_method,
+    )
+    if channelwise_axes is not None:
+      how = dataclasses.replace(how, channelwise_axes=channelwise_axes)
+    return _residual_decompose(x, how, n_passes=len(parsed_specs))
+
+  passes: list[qarray.MaybeQArray] = []
+  current = x
+  for spec in parsed_specs:
+    if (
+        config.rounding_mode == 'nearest'
+        and not config.flush_subnormals
+        and _is_native_qarray_spec(spec)
+    ):
+      qtype = spec.dtype
+      tile_size = (
+          32
+          if qtype in ('mxfp8', 'mxfp4', 'mxint8', 'mxint4')
+          and config.tile_size is None
+          else config.tile_size
+      )
+      how = dg.get_how_to_quantize(
+          dimension_numbers=dimension_numbers,
+          ndims=ndims,
+          for_lhs=for_lhs,
+          qtype=qtype,
+          tile_size=tile_size,
+          calibration_method=config.calibration_method,
+      )
+      if channelwise_axes is not None:
+        how = dataclasses.replace(how, channelwise_axes=channelwise_axes)
+      q = qarray.quantize(current, how)
+      passes.append(q)
+      current = current - qarray.dequantize(q)
+    else:
+      q_arr = quantize_to_dtype_spec(
+          current,
+          spec,
+          rounding_mode=config.rounding_mode,
+          flush_subnormals=config.flush_subnormals,
+      )
+      passes.append(q_arr)
+      current = current - q_arr
+  return tuple(passes)
+
+
+def reconstruct_multipass_operand(
+    passes: Sequence[qarray.MaybeQArray],
+) -> jax.Array:
+  """Reconstructs an array by summing dequantized multi-pass components."""
+  if not passes:
+    raise ValueError('passes must not be empty.')
+  terms = [
+      qarray.dequantize(p) if isinstance(p, qarray.QArray) else p
+      for p in passes
+  ]
+  acc = terms[0].astype(jnp.float32)
+  for t in terms[1:]:
+    acc = acc + t.astype(jnp.float32)
+  return acc.astype(terms[0].dtype)
+
+
+def _parametric_multipass_dot_general(
+    lhs: jax.Array,
+    rhs: jax.Array,
+    dimension_numbers: jax.lax.DotDimensionNumbers,
+    config: MultipassConfig,
+    *,
+    precision: jax.lax.PrecisionLike = None,
+    tile_size: int | float | Mapping[int, int | float] | None = None,
+    preferred_element_type: jax.typing.DTypeLike | None = None,
+) -> jax.Array:
+  """Executes parametric multi-pass GEMM defined by MultipassConfig."""
+  resolved = resolve_multipass_config(config, tile_size=tile_size)
+  assert resolved is not None
+  ndims = (lhs.ndim, rhs.ndim)
+  a_passes = decompose_multipass_operand(
+      lhs,
+      resolved.lhs,
+      dimension_numbers=dimension_numbers,
+      ndims=ndims,
+      for_lhs=True,
+  )
+  b_passes = decompose_multipass_operand(
+      rhs,
+      resolved.rhs,
+      dimension_numbers=dimension_numbers,
+      ndims=ndims,
+      for_lhs=False,
+  )
+  active_terms = resolved.get_active_terms()
+  if not active_terms:
+    raise ValueError('MultipassConfig.active_terms must not be empty.')
+
+  target_out_type = (
+      preferred_element_type
+      if preferred_element_type is not None
+      else jnp.result_type(lhs.dtype, rhs.dtype)
+  )
+  acc = None
+  for i, j in active_terms:
+    term = dg.dot_general(
+        a_passes[i],
+        b_passes[j],
+        dimension_numbers=dimension_numbers,
+        precision=precision,
+        preferred_element_type=resolved.acc_dtype,
+    ).astype(resolved.acc_dtype)
+    acc = term if acc is None else acc + term
+  assert acc is not None
+  return acc.astype(target_out_type)
+
+
 def multipass_dot_general(
     lhs: jax.Array,
     rhs: jax.Array,
@@ -1108,7 +1544,9 @@ def multipass_dot_general(
     )
 
   kwargs = dict(kwargs)
-  multipass_mode: MultiPassMode = kwargs.pop('multipass_mode', None)
+  multipass_mode: MultiPassMode | MultipassConfig = kwargs.pop(
+      'multipass_mode', None
+  )
   if kwargs.get('lhs_qtype') is not None or kwargs.get('rhs_qtype') is not None:
     raise ValueError(
         "When 'multipass_mode' is specified, 'lhs_qtype' and 'rhs_qtype' must"
@@ -1123,7 +1561,17 @@ def multipass_dot_general(
     )
   tile_size = kwargs.pop('tile_size', None)
 
-  if multipass_mode in (
+  if isinstance(multipass_mode, MultipassConfig):
+    return _parametric_multipass_dot_general(
+        lhs,
+        rhs,
+        dimension_numbers=dimension_numbers,
+        config=multipass_mode,
+        precision=precision,
+        tile_size=tile_size,
+        preferred_element_type=preferred_element_type,
+    )
+  elif multipass_mode in (
       'four_pass_int4',
       'three_pass_int4',
       'two_pass_lhs_int4',
@@ -1173,6 +1621,18 @@ def multipass_dot_general(
         rhs,
         multipass_mode=multipass_mode,
         dimension_numbers=dimension_numbers,
+        precision=precision,
+        tile_size=tile_size,
+        preferred_element_type=preferred_element_type,
+    )
+  elif (
+      resolved := resolve_multipass_config(multipass_mode, tile_size=tile_size)
+  ) is not None:
+    return _parametric_multipass_dot_general(
+        lhs,
+        rhs,
+        dimension_numbers=dimension_numbers,
+        config=resolved,
         precision=precision,
         tile_size=tile_size,
         preferred_element_type=preferred_element_type,
