@@ -18,6 +18,7 @@ from typing import Any, Mapping, cast
 
 from absl import logging
 import flax
+from flax import linen as nn
 from flax import nnx
 import jax
 from jax import numpy as jnp
@@ -125,28 +126,84 @@ def _get_sharding(
   return sharding
 
 
+def _resolve_linen_partitioning(
+    box: nn.Partitioned,
+) -> tuple[jax.sharding.PartitionSpec | None, jax.sharding.Mesh]:
+  """Resolves the partitioning metadata of a Linen box like Flax does.
+
+  Args:
+    box: A `nn.Partitioned` or `nn.LogicallyPartitioned` template leaf.
+
+  Returns:
+    A tuple of (spec, mesh). The spec is the mesh axes `PartitionSpec`, or
+    `None` if the box names logical axes but no logical axis rules are set. The
+    mesh is the box's mesh, or else the active mesh.
+  """
+  mesh = box.mesh if box.mesh is not None else jax.sharding.get_mesh()
+  if not isinstance(box, nn.LogicallyPartitioned):
+    return box.get_partition_spec(), mesh
+  # Like Flax, fall back to the nn.logical_axis_rules context.
+  rules = nn.get_logical_axis_rules() if box.rules is None else box.rules
+  if not rules and any(isinstance(name, str) for name in box.names):
+    return None, mesh
+  return nn.logical_to_mesh_axes(box.names, rules), mesh
+
+
+def _has_unresolved_linen_partitioning(template_param: Any) -> bool:
+  """Checks if a template param has unresolved Linen partitioning metadata.
+
+  The metadata of a box around an array without a sharding is unresolved if it
+  names logical axes without logical axis rules, or mesh axes without a mesh.
+
+  Args:
+    template_param: The template param, which may contain Linen boxes.
+
+  Returns:
+    True if the partitioning metadata of any box is unresolved.
+  """
+  boxes = jax.tree.leaves(
+      template_param, is_leaf=lambda x: isinstance(x, nn.Partitioned)
+  )
+  for box in boxes:
+    # Arrays with a sharding are placed with it instead of the metadata.
+    if (
+        not isinstance(box, nn.Partitioned)
+        or getattr(box.value, 'sharding', None) is not None
+    ):
+      continue
+    spec, mesh = _resolve_linen_partitioning(box)
+    if spec is None or (mesh.empty and any(axis is not None for axis in spec)):
+      return True
+  return False
+
+
 def _sharding_from_template_metadata(
     boxed_template_value: Any,
 ) -> jax.sharding.NamedSharding | None:
-  """Recovers a NamedSharding from an nnx template's partitioning metadata.
+  """Recovers a NamedSharding from a template's partitioning metadata.
 
   On older jax versions, `nnx.eval_shape` may drop the sharding from template
   leaves even though the boxed nnx `Variable` still carries its partitioning
   metadata. When a concrete mesh is active, reconstruct the intended
   `NamedSharding` from that metadata, mirroring `nnx.get_named_sharding`.
+  Abstract Linen params never have a sharding, so it is recovered from their
+  `nn.Partitioned` metadata in the same way.
 
   Args:
     boxed_template_value: The template leaf before `flax_util.unbox`.
 
   Returns:
     A concrete `NamedSharding`, or `None` when the template has no real
-    partitioning metadata or no concrete mesh is active (callers then keep the
-    existing un-sharded behavior).
+    partitioning metadata or no concrete mesh or logical axis rules are
+    available (callers then keep the existing un-sharded behavior).
   """
-  if not isinstance(boxed_template_value, nnx.Variable):
+  if isinstance(boxed_template_value, nnx.Variable):
+    spec = nnx.spmd.get_var_pspec(boxed_template_value)
+    concrete_mesh = jax.sharding.get_mesh()
+  elif isinstance(boxed_template_value, nn.Partitioned):
+    spec, concrete_mesh = _resolve_linen_partitioning(boxed_template_value)
+  else:
     return None
-  spec = nnx.spmd.get_var_pspec(boxed_template_value)
-  concrete_mesh = jax.sharding.get_mesh()
   # Re-shard only when the template names a real non-replicated axis and a
   # concrete mesh is active. Empty/all-None specs keep the caller's default.
   if concrete_mesh.empty or spec is None or all(axis is None for axis in spec):
@@ -666,7 +723,10 @@ def process_prequantized_params(
       optional `'zero_point'`.
     template_params: An NNX model, possibly abstract (e.g. from
       `nnx.eval_shape`), or a Linen params dict, possibly abstract (e.g.
-      `jax.eval_shape(model.init, ...)['params']`).
+      `jax.eval_shape(model.init, ...)['params']`). Linen partitioning metadata
+      is resolved with the box's mesh and logical axis rules, or else the active
+      ones. Params whose metadata can't be resolved are placed unsharded with a
+      warning.
     allow_extra_params: If True, ignore payload entries not present in
       `template_params`.
     use_checkpoint_sharding: If True, use sharding from checkpoint_params
@@ -690,6 +750,8 @@ def process_prequantized_params(
 
   # Value: QArray(Case 1) or a JAX array(Case 2 and 3).
   flat_processed = {}
+  # Paths of Linen params that can't be sharded like the template.
+  unresolved_paths = []
   # Value: dict containing 'qvalue'(quantized) or a JAX array(fp). Unfreeze so
   # that _is_leaf recognizes the quantized leaves of FrozenDict payloads.
   flat_checkpoint = flax.traverse_util.flatten_dict(
@@ -715,6 +777,10 @@ def process_prequantized_params(
         raise ValueError(message)
       logging.info('Skipping parameter not in template: %s', resolved_path)
       continue
+    if not use_checkpoint_sharding and _has_unresolved_linen_partitioning(
+        template_param
+    ):
+      unresolved_paths.append(resolved_path)
 
     # Gets the template array, which may be a dict or a QArray.
     # Qwix wraps intercepted operations in WithAux.QArray. For non-intercepted
@@ -785,6 +851,15 @@ def process_prequantized_params(
       )
 
     flat_processed[resolved_path] = processed
+
+  if unresolved_paths:
+    logging.warning(
+        'Could not shard %s because their partitioning metadata names logical'
+        ' axes without logical axis rules or mesh axes without a mesh. Run'
+        ' process_prequantized_params inside nn.logical_axis_rules(...) and'
+        ' jax.set_mesh(...) to shard them.',
+        unresolved_paths,
+    )
 
   if isinstance(template_params, dict):
     return _to_linen_params(flat_processed, template_params)

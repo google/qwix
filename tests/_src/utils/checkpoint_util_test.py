@@ -1385,10 +1385,13 @@ class PrequantizedLinenTest(parameterized.TestCase):
     fp_dense.apply({"params": processed_params}, model_input)
 
   def test_process_prequantized_params_linen_partitioned(self):
+    mesh = jax.make_mesh(
+        (2, 2),
+        ("fsdp", "tp"),
+        axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
+    )
     q_rules = [
-        qconfig.QuantizationRule(
-            module_path=".*", weight_qtype=jnp.int8, tile_size=4
-        ),
+        qconfig.QuantizationRule(module_path=".*", weight_qtype=jnp.int8),
     ]
     model_input = jnp.ones((10, 12))
     ptq_mlp, abs_ptq_params, _, reference_params = _build_linen_reference(
@@ -1404,13 +1407,86 @@ class PrequantizedLinenTest(parameterized.TestCase):
     )
 
     orbax_payload = _to_orbax_payload(reference_params)
-    processed_params = checkpoint_util.process_prequantized_params(
-        orbax_payload, abs_ptq_params
-    )
+    with (
+        jax.set_mesh(mesh),
+        nn.logical_axis_rules((("embed", "fsdp"), ("mlp", "tp"))),
+    ):
+      processed_params = checkpoint_util.process_prequantized_params(
+          orbax_payload, abs_ptq_params
+      )
 
+    # Each QArray field is sharded by its own metadata, which replicates the
+    # size-1 axis of the channelwise scale.
+    qvalue_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("fsdp", "tp")
+    )
+    scale_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec(None, "tp")
+    )
+    for layer in ("partitioned", "logically_partitioned"):
+      kernel = processed_params[layer]["kernel"].array
+      self.assertEqual(kernel.qvalue.sharding, qvalue_sharding)
+      self.assertEqual(kernel.scale.sharding, scale_sharding)
     # The processed params are unboxed, like the ptq.quantize_params reference.
     _assert_trees_allclose(self, processed_params, reference_params)
     ptq_mlp.apply({"params": processed_params}, model_input)
+
+  def test_process_prequantized_params_linen_sharding_without_context(self):
+    box_mesh = jax.make_mesh(
+        (2, 2),
+        ("fsdp", "tp"),
+        axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
+    )
+    abstract_array = jax.ShapeDtypeStruct((8, 4), jnp.float32)
+    abs_params = {
+        # Resolved with its own mesh and rules.
+        "own_mesh_and_rules": nn.LogicallyPartitioned(
+            abstract_array,
+            ("embed", "mlp"),
+            mesh=box_mesh,
+            rules=(("embed", "fsdp"), ("mlp", "tp")),
+        ),
+        # Replicated by its rules.
+        "replicated": nn.LogicallyPartitioned(
+            abstract_array,
+            ("embed", "mlp"),
+            rules=(("embed", None), ("mlp", None)),
+        ),
+        # Placed with the sharding of its array instead of the metadata.
+        "concrete": nn.Partitioned(jnp.zeros((8, 4)), ("fsdp", "tp")),
+        # Unresolved without a mesh.
+        "mesh_axes": nn.Partitioned(abstract_array, ("fsdp", "tp")),
+        # Unresolved without logical axis rules.
+        "logical_axes": nn.LogicallyPartitioned(
+            abstract_array, ("embed", "mlp")
+        ),
+    }
+    payload = {name: np.ones((8, 4), dtype=np.float32) for name in abs_params}
+
+    with self.assertLogs(level="WARNING") as logs:
+      processed_params = checkpoint_util.process_prequantized_params(
+          payload, abs_params
+      )
+
+    # A single warning lists the unresolved params.
+    self.assertLen(logs.output, 1)
+    self.assertIn(str([("mesh_axes",), ("logical_axes",)]), logs.output[0])
+    self.assertEqual(
+        processed_params["own_mesh_and_rules"].sharding,
+        jax.sharding.NamedSharding(
+            box_mesh, jax.sharding.PartitionSpec("fsdp", "tp")
+        ),
+    )
+    # The replicated and unresolved params are placed unsharded.
+    for name in ("replicated", "mesh_axes", "logical_axes"):
+      self.assertEqual(
+          list(processed_params[name].devices()), [jax.devices()[0]]
+      )
+    # The metadata is not used with the checkpoint's sharding.
+    with self.assertNoLogs(level="WARNING"):
+      checkpoint_util.process_prequantized_params(
+          payload, abs_params, use_checkpoint_sharding=True
+      )
 
   def test_process_prequantized_params_linen_manual_dict_template(self):
     # The non-intercepted but pre-quantized kernel is overridden with the
