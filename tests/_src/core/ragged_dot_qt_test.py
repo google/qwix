@@ -167,6 +167,44 @@ class RaggedDotQtTest(parameterized.TestCase):
 
     self.assertEqual(out.shape, (256, 128))
 
+  def test_multipass_ragged_dot_qt(self):
+    lhs = jax.random.normal(jax.random.key(0), (64, 32), jnp.float32)
+    rhs = jax.random.normal(jax.random.key(1), (4, 32, 16), jnp.float32)
+    group_sizes = jnp.array([16, 16, 16, 16], jnp.int32)
+
+    cfg_1p = ragged_dot_qt.RaggedDotQtConfig(
+        lhs_qtype=jnp.float8_e4m3fn,
+        rhs_qtype=jnp.float8_e4m3fn,
+        dlhs_grad_qtype=jnp.float8_e4m3fn,
+        drhs_grad_qtype=jnp.float8_e4m3fn,
+    )
+    cfg_3p = ragged_dot_qt.RaggedDotQtConfig(
+        multipass_mode="three_pass_fp8",
+        dlhs_multipass_mode="three_pass_fp8",
+        drhs_multipass_mode="three_pass_fp8",
+    )
+
+    ref_fn = lambda l, r: jnp.sum(jax.lax.ragged_dot(l, r, group_sizes) ** 2)
+    fn_1p = lambda l, r: jnp.sum(
+        ragged_dot_qt.ragged_dot_qt(l, r, group_sizes, cfg_1p) ** 2
+    )
+    fn_3p = lambda l, r: jnp.sum(
+        ragged_dot_qt.ragged_dot_qt(l, r, group_sizes, cfg_3p) ** 2
+    )
+
+    ref_out = jax.lax.ragged_dot(lhs, rhs, group_sizes)
+    out_1p = ragged_dot_qt.ragged_dot_qt(lhs, rhs, group_sizes, cfg_1p)
+    out_3p = ragged_dot_qt.ragged_dot_qt(lhs, rhs, group_sizes, cfg_3p)
+
+    self.assertLess(_mae(ref_out, out_3p), _mae(ref_out, out_1p))
+
+    ref_dlhs, ref_drhs = jax.grad(ref_fn, argnums=(0, 1))(lhs, rhs)
+    dlhs_1p, drhs_1p = jax.grad(fn_1p, argnums=(0, 1))(lhs, rhs)
+    dlhs_3p, drhs_3p = jax.grad(fn_3p, argnums=(0, 1))(lhs, rhs)
+
+    self.assertLess(_mae(ref_dlhs, dlhs_3p), _mae(ref_dlhs, dlhs_1p))
+    self.assertLess(_mae(ref_drhs, drhs_3p), _mae(ref_drhs, drhs_1p))
+
 
 if __name__ == "__main__":
   absltest.main()
