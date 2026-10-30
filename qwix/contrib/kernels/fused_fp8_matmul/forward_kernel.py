@@ -102,6 +102,23 @@ def pick_tile(dim: int, candidates: tuple[int, ...]) -> int:
   return c
 
 
+def tile_candidates(dim: int, candidates: tuple[int, ...]) -> tuple[int, ...]:
+  """Returns the candidates that divide `dim`, largest-preferred order kept.
+
+  Falls back to `pick_tile`'s power-of-two divisor when none of them divides
+  `dim`, so odd shapes still get a valid tile.
+
+  Args:
+    dim: The array dimension to tile.
+    candidates: Candidate tile sizes, listed largest-preferred.
+
+  Returns:
+    A non-empty tuple of tile sizes, each dividing `dim`.
+  """
+  dividing = tuple(c for c in candidates if c <= dim and dim % c == 0)
+  return dividing or (pick_tile(dim, candidates),)
+
+
 def forward_vmem_bytes(
     bm: int, bk: int, bn: int, k: int, n: int, *, lhs_itemsize: int
 ) -> int:

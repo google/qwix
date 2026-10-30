@@ -21,12 +21,12 @@ Example:
   out = ffm.fused_fp8_matmul(activations, weights)   # (m, k) @ (k, n)
   grads = jax.grad(loss)(activations, weights)       # differentiable
 
-`fused_fp8_matmul` is the training entry point: a `jax.custom_vjp` around the
-forward kernel that accepts a plain or pre-quantized weight. In this version
-the backward pass runs the dLHS kernel for the activation gradient and the
-plain-XLA reference for the weight gradient. Callers that want the kernels
+`fused_fp8_matmul` is the training entry point: a `jax.custom_vjp` that runs
+the forward kernel and, in the backward pass, the dLHS and dRHS kernels,
+accepting a plain or pre-quantized weight. Callers that want the kernels
 themselves, with explicit tile sizes, can import them directly from
-`forward_kernel.py` and `dlhs_kernel.py`; nothing here is needed for that.
+`forward_kernel.py`, `dlhs_kernel.py` and `drhs_kernel.py`; nothing here is
+needed for that.
 
 Chip support: the kernels run on any TPU whose MXU takes FP8 operands. The
 tile heuristics were measured on TPU7x and are only tuned for it; on other
@@ -43,6 +43,7 @@ from typing import Literal
 import jax
 import jax.numpy as jnp
 from qwix.contrib.kernels.fused_fp8_matmul import dlhs_kernel
+from qwix.contrib.kernels.fused_fp8_matmul import drhs_kernel
 from qwix.contrib.kernels.fused_fp8_matmul import forward_kernel
 from qwix.contrib.kernels.fused_fp8_matmul import reference
 
@@ -55,10 +56,15 @@ Config = forward_kernel.Config
 class _Static:
   """Trace-time constants threaded through the `custom_vjp` as a nondiff arg.
 
+  For the dRHS kernel (`drhs = lhs^T @ dout`, contracting over `m`): each m
+  block of the cotangent is quantized against its own column scales, so
+  `block_m == m` gives one scale per column and needs no accumulator.
+
   Attributes:
     implementation: `"pallas"` or `"xla"`.
     config: The forward kernel tiling; `None` means the heuristics choose it.
     dlhs_config: The dLHS kernel tiling; `None` means the heuristics choose it.
+    drhs_config: The dRHS kernel tiling; `None` means the heuristics choose it.
     rhs_dtype: The dtype of a plain `rhs`, which its gradient must be cast to;
       `None` when `rhs` is a `QArray`, which gets no gradient.
   """
@@ -66,6 +72,7 @@ class _Static:
   implementation: str
   config: Config | None
   dlhs_config: Config | None
+  drhs_config: Config | None
   rhs_dtype: jnp.dtype | None
 
 
@@ -75,6 +82,7 @@ def fused_fp8_matmul(
     *,
     config: Config | None = None,
     dlhs_config: Config | None = None,
+    drhs_config: Config | None = None,
     implementation: Literal["pallas", "xla"] = "pallas",
 ) -> jax.Array:
   """Fused FP8 matmul: `lhs @ rhs` with in-op row quantization of `lhs`.
@@ -84,11 +92,13 @@ def fused_fp8_matmul(
   (either here, or beforehand by `qwix.quantize`). The result is
   `(lhs_q @ rhs_q) * (lhs_scale * rhs_scale)` in `lhs.dtype`.
 
-  The kernel quantizes `lhs` per full row only when it takes `k` as a single
-  block, which the default heuristics do for `k <= 4096` with `k % 256 == 0`.
-  Otherwise it splits `k` and quantizes each row per k block, and then agrees
-  with the plain-XLA reference to within FP8 quantization noise rather than
-  exactly.
+  The forward kernel quantizes `lhs` per full row only when it takes `k` as a
+  single block, which the default heuristics do for `k <= 4096` with
+  `k % 256 == 0`. Otherwise it splits `k` and quantizes each row per k block.
+  Likewise the dLHS kernel quantizes the cotangent per n block when it splits
+  `n`, and the dRHS kernel per m block when it splits `m` (always, at training
+  sizes). In those cases a kernel agrees with the plain-XLA reference to within
+  FP8 quantization noise rather than exactly.
 
   The function is differentiable with respect to both operands. The backward
   pass uses FP8 training numerics, see
@@ -105,6 +115,8 @@ def fused_fp8_matmul(
     config: Tiling for the Pallas forward kernel. `None` picks the measured
       heuristics for the shape. Only valid with `implementation="pallas"`.
     dlhs_config: Tiling for the Pallas dLHS kernel in the backward pass. `None`
+      picks the measured heuristics. Only valid with `implementation="pallas"`.
+    drhs_config: Tiling for the Pallas dRHS kernel in the backward pass. `None`
       picks the measured heuristics. Only valid with `implementation="pallas"`.
     implementation: `"pallas"` runs the Pallas kernels and requires a TPU whose
       MXU takes FP8 operands; `m`, `k` and `n` must be multiples of 128. The
@@ -140,16 +152,17 @@ def fused_fp8_matmul(
           " has none. Pass implementation='xla' for the plain-XLA reference."
       )
   elif implementation == "xla":
-    if config is not None or dlhs_config is not None:
+    if config is not None or dlhs_config is not None or drhs_config is not None:
       raise ValueError(
-          "config and dlhs_config only apply to implementation='pallas'."
+          "config, dlhs_config and drhs_config only apply to"
+          " implementation='pallas'."
       )
   else:
     raise ValueError(
         f"implementation must be 'pallas' or 'xla', got {implementation!r}."
     )
   rhs_dtype = None if isinstance(rhs, QArray) else rhs.dtype
-  static = _Static(implementation, config, dlhs_config, rhs_dtype)
+  static = _Static(implementation, config, dlhs_config, drhs_config, rhs_dtype)
   return _fused_fp8_matmul(static, lhs, rhs)
 
 
@@ -217,13 +230,13 @@ def _bwd(
 ) -> tuple[jax.Array, jax.Array | None]:
   """Backward pass. Returns `(dlhs, drhs)`; `drhs` is `None` for a `QArray`."""
   lhs_q, lhs_scale, rhs_q, rhs_scale = residuals
+  m, n = dout.shape
+  k = rhs_q.shape[0]
   # `dout` has the forward output's dtype, which is `lhs.dtype`, so `dlhs`
   # comes out in the right dtype without a cast.
   if static.implementation == "xla":
     dlhs = reference.fused_fp8_dlhs_reference(dout, rhs_q, rhs_scale)
   else:
-    m, n = dout.shape
-    k = rhs_q.shape[0]
     config = static.dlhs_config or dlhs_kernel.get_dlhs_heuristics_config(
         m, k, n, lhs_dtype=dout.dtype
     )
@@ -237,8 +250,22 @@ def _bwd(
     )
   if static.rhs_dtype is None:
     return dlhs, None
-  drhs = reference.fused_fp8_drhs_reference(lhs_q, lhs_scale, dout)
-  return dlhs, drhs.astype(static.rhs_dtype)
+  if static.implementation == "xla":
+    drhs = reference.fused_fp8_drhs_reference(lhs_q, lhs_scale, dout)
+    return dlhs, drhs.astype(static.rhs_dtype)
+  config = static.drhs_config or drhs_kernel.get_drhs_heuristics_config(
+      m, k, n, lhs_dtype=dout.dtype
+  )
+  drhs = drhs_kernel.fused_fp8_drhs_pallas(
+      lhs_q,
+      lhs_scale,
+      dout,
+      bm=config.block_m,
+      bk=config.block_k,
+      bn=config.block_n,
+      out_dtype=static.rhs_dtype,
+  )
+  return dlhs, drhs
 
 
 # `optimize_remat` lets JAX drop the residual outputs when the forward pass is

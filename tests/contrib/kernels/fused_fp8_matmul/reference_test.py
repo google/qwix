@@ -60,7 +60,7 @@ class ReferenceVjpTest(absltest.TestCase):
         test_utils.relative_error(dlhs, expected), test_utils.FP8_NOISE_TOL
     )
 
-  def test_drhs_reference_is_f32_product_of_dequantized_lhs(self):
+  def test_drhs_reference_close_to_f32_matmul(self):
     lhs_q, lhs_scale, _, _ = self.residuals
     drhs = jax.jit(reference.fused_fp8_drhs_reference)(
         lhs_q, lhs_scale, self.dout
@@ -73,10 +73,10 @@ class ReferenceVjpTest(absltest.TestCase):
         self.dout.astype(jnp.float32),
         precision=jax.lax.Precision.HIGHEST,
     )
-    # Nothing is quantized in this product; only bf16 rounding differs.
+    # Only the cotangent is quantized here (the activation is already FP8 in
+    # both products), so the gap is one operand's worth of FP8 rounding.
     self.assertLess(
-        test_utils.relative_error(drhs, expected),
-        test_utils.BF16_ROUNDING_TOL,
+        test_utils.relative_error(drhs, expected), test_utils.FP8_NOISE_TOL
     )
 
 
@@ -97,6 +97,22 @@ class QuantizationTest(absltest.TestCase):
     np.testing.assert_allclose(
         xq_f32 * np.asarray(scale),
         np.asarray(x, np.float32),
+        rtol=test_utils.FP8_RECONSTRUCTION_RTOL,
+    )
+
+  def test_quantize_cols_fp8(self):
+    g = jax.random.normal(jax.random.PRNGKey(0), (256, 64), jnp.bfloat16)
+    gq, scale = reference.quantize_cols_fp8(g)
+    self.assertEqual((gq.shape, gq.dtype), (g.shape, jnp.float8_e4m3fn))
+    self.assertEqual((scale.shape, scale.dtype), ((64,), jnp.float32))
+    gq_f32 = np.asarray(gq.astype(jnp.float32))
+    self.assertTrue(np.all(np.isfinite(gq_f32)))
+    np.testing.assert_allclose(
+        np.abs(gq_f32).max(axis=0), reference.FP8_MAX, rtol=0.08
+    )
+    np.testing.assert_allclose(
+        gq_f32 * np.asarray(scale),
+        np.asarray(g, np.float32),
         rtol=test_utils.FP8_RECONSTRUCTION_RTOL,
     )
 

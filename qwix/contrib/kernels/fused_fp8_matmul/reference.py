@@ -27,10 +27,10 @@ The fused FP8 matmul computes `lhs @ rhs` with both operands in
 The output is `(lhs_q @ rhs_q) * (lhs_scale * rhs_scale)` cast to `lhs.dtype`.
 
 The backward pass uses FP8 training numerics: the activation gradient
-`dlhs = dout @ rhs^T` quantizes the cotangent to FP8 (one scale per row, after
-folding in the weight's column scales) so it runs on the FP8 MXU like the
-forward pass. The weight gradient is accumulated from the FP8 residuals in
-float32.
+`dlhs = dout @ rhs^T` quantizes the cotangent to FP8 with one scale per row
+(after folding in the weight's column scales), and the weight gradient
+`drhs = lhs^T @ dout` quantizes it with one scale per column (after folding in
+the activation's row scales), so both run on the FP8 MXU like the forward pass.
 
 Everything in this module is plain `jax.numpy`. The functions here are the
 reference the Pallas kernels are tested against, and the fallback used where no
@@ -89,6 +89,31 @@ def quantize_rows_fp8(
   scale = (max_abs / FP8_MAX).astype(jnp.float32)
   inv = (FP8_MAX / max_abs).astype(x.dtype)
   return (x * inv).astype(FP8_DTYPE), scale
+
+
+def quantize_cols_fp8(
+    g: jax.Array, eps: float = 1e-7
+) -> tuple[jax.Array, jax.Array]:
+  """Quantizes `g` to FP8 with one absmax scale per column (axis 0 reduced).
+
+  The column-wise twin of `quantize_rows_fp8`, used for the cotangent in the
+  weight gradient (weights themselves go through `qwix.quantize`, see
+  `rhs_as_fp8`). The scaling stays in `g`'s dtype; the dRHS kernel calls this
+  on VMEM blocks.
+
+  Args:
+    g: The array to quantize.
+    eps: Lower bound on the per-column absmax, so an all-zero column gets a
+      finite scale.
+
+  Returns:
+    `(gq, scale)` with `scale` of shape `g.shape[1:]` in float32 such that
+    `g ~= gq * scale`.
+  """
+  max_abs = jnp.maximum(jnp.max(jnp.abs(g), axis=0), eps)
+  scale = (max_abs / FP8_MAX).astype(jnp.float32)
+  inv = (FP8_MAX / max_abs).astype(g.dtype)
+  return (g * inv).astype(FP8_DTYPE), scale
 
 
 def rhs_as_fp8(rhs: jax.Array | QArray) -> tuple[jax.Array, jax.Array]:
@@ -155,21 +180,30 @@ def fused_fp8_dlhs_reference(
 def fused_fp8_drhs_reference(
     lhs_q: jax.Array, lhs_scale: jax.Array, dout: jax.Array
 ) -> jax.Array:
-  """XLA reference for the weight gradient `drhs = lhs^T @ dout`.
+  """XLA reference for the weight gradient `drhs = lhs^T @ dout` in FP8.
 
-  The activation is reconstructed from its FP8 residual and the product is
-  accumulated in float32. The cotangent is not quantized.
+  The contraction runs over `m`, so the activation's per-row scale cannot be
+  factored out of it: it is folded into the cotangent first. The scaled
+  cotangent is then quantized with one scale per column, like the weight in
+  the forward pass, and that column scale is applied to the FP8 product of the
+  activation residual and the quantized cotangent.
 
   Args:
     lhs_q: The `(m, k)` FP8 activation.
     lhs_scale: The `(m, 1)` float32 per-row activation scales.
-    dout: Cotangent of the output, shape `(m, n)`.
+    dout: Cotangent of the output, shape `(m, n)`, `bfloat16` or `float32`.
 
   Returns:
     `drhs` of shape `(k, n)` in `dout.dtype`.
   """
-  lhs = lhs_q.astype(jnp.float32) * lhs_scale
-  return jnp.matmul(lhs.T, dout.astype(jnp.float32)).astype(dout.dtype)
+  dout_q, dout_scale = quantize_cols_fp8(dout * lhs_scale.astype(dout.dtype))
+  acc = jax.lax.dot_general(
+      lhs_q,
+      dout_q,
+      dimension_numbers=(((0,), (0,)), ((), ())),
+      preferred_element_type=jnp.float32,
+  )
+  return (acc * dout_scale).astype(dout.dtype)
 
 
 def fused_fp8_matmul_vjp_reference(

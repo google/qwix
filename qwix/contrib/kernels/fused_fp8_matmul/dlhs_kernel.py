@@ -92,23 +92,6 @@ def dlhs_vmem_bytes(
   )
 
 
-def _tile_candidates(dim: int, candidates: tuple[int, ...]) -> tuple[int, ...]:
-  """Returns the candidates that divide `dim`, largest-preferred order kept.
-
-  Falls back to `forward_kernel.pick_tile`'s power-of-two divisor when none of
-  them divides `dim`, so odd shapes still get a valid tile.
-
-  Args:
-    dim: The array dimension to tile.
-    candidates: Candidate tile sizes, listed largest-preferred.
-
-  Returns:
-    A non-empty tuple of tile sizes, each dividing `dim`.
-  """
-  dividing = tuple(c for c in candidates if c <= dim and dim % c == 0)
-  return dividing or (forward_kernel.pick_tile(dim, candidates),)
-
-
 def fit_dlhs_tiles(
     m: int, k: int, n: int, *, cotangent_itemsize: int
 ) -> tuple[int, int, int]:
@@ -140,9 +123,9 @@ def fit_dlhs_tiles(
   Returns:
     `(bm, bk, bn)`, each dividing its dimension.
   """
-  bns = _tile_candidates(n, (n, 2048, 1024, 512))
-  bks = _tile_candidates(k, (k, 1536, 1024, 512, 256))
-  bms = _tile_candidates(m, (1024, 512, 256, 128))
+  bns = forward_kernel.tile_candidates(n, (n, 2048, 1024, 512))
+  bks = forward_kernel.tile_candidates(k, (k, 1536, 1024, 512, 256))
+  bms = forward_kernel.tile_candidates(m, (1024, 512, 256, 128))
   for bn, bk, bm in itertools.product(bns, bks, bms):
     vmem = dlhs_vmem_bytes(
         bm, bk, bn, k, n, cotangent_itemsize=cotangent_itemsize

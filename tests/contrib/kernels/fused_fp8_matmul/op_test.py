@@ -39,7 +39,7 @@ class XlaImplementationTest(test_utils.FusedFp8MatmulTestBase):
         matmul_fn=functools.partial(ffm.fused_fp8_matmul, implementation="xla"),
     )
 
-  @parameterized.parameters("config", "dlhs_config")
+  @parameterized.parameters("config", "dlhs_config", "drhs_config")
   def test_rejects_config(self, name):
     lhs, rhs = test_utils.random_inputs(256, 256, 256, jnp.bfloat16)
     config = ffm.Config(block_m=256, block_k=256, block_n=256)
@@ -111,11 +111,14 @@ class PallasImplementationTest(test_utils.FusedFp8MatmulTestBase):
     dout = jax.random.normal(jax.random.PRNGKey(3), (m, n), jnp.float32)
     dlhs_config = ffm.Config(block_m=block_m, block_k=block_k, block_n=block_n)
 
+    # Every array is a jit argument: with the constant operands closed over,
+    # the XLA arm's gradient depends on no argument at all and XLA
+    # constant-folds the whole FP8 matmul on the host, which takes minutes.
     def dlhs_of(fn):
-      def loss(a):
-        return jnp.sum(fn(a, rhs).astype(jnp.float32) * dout)
+      def loss(a, b, g):
+        return jnp.sum(fn(a, b).astype(jnp.float32) * g)
 
-      return jax.jit(jax.grad(loss))(lhs)
+      return jax.jit(jax.grad(loss))(lhs, rhs, dout)
 
     actual = dlhs_of(
         functools.partial(ffm.fused_fp8_matmul, dlhs_config=dlhs_config)
@@ -126,6 +129,38 @@ class PallasImplementationTest(test_utils.FusedFp8MatmulTestBase):
     # With `block_n < n` each n block is quantized against its own scale, so
     # the result only agrees with the reference up to FP8 noise.
     if block_n == n:
+      tol = test_utils.SAME_QUANTIZATION_TOL
+    else:
+      tol = test_utils.FP8_NOISE_TOL
+    self.assertLess(test_utils.relative_error(actual, expected), tol)
+
+  @parameterized.parameters(
+      # (block_m, block_k, block_n) at (m, k, n) = (512, 2048, 2048)
+      (512, 512, 512),  # one m block: one scale per column, tiled output
+      (256, 1024, 1024),  # m blocks: accumulator
+      (128, 2048, 2048),  # m blocks with the whole output in one tile
+  )
+  def test_explicit_drhs_config(self, block_m, block_k, block_n):
+    m, k, n = 512, 2048, 2048
+    lhs, rhs = test_utils.random_inputs(m, k, n, jnp.bfloat16)
+    dout = jax.random.normal(jax.random.PRNGKey(3), (m, n), jnp.float32)
+    drhs_config = ffm.Config(block_m=block_m, block_k=block_k, block_n=block_n)
+
+    def drhs_of(fn):  # All arrays are jit arguments; see `dlhs_of` above.
+      def loss(a, b, g):
+        return jnp.sum(fn(a, b).astype(jnp.float32) * g)
+
+      return jax.jit(jax.grad(loss, argnums=1))(lhs, rhs, dout)
+
+    actual = drhs_of(
+        functools.partial(ffm.fused_fp8_matmul, drhs_config=drhs_config)
+    )
+    expected = drhs_of(
+        functools.partial(ffm.fused_fp8_matmul, implementation="xla")
+    )
+    # With `block_m < m` each m block of the cotangent is quantized against
+    # its own column scales, so the result only agrees up to FP8 noise.
+    if block_m == m:
       tol = test_utils.SAME_QUANTIZATION_TOL
     else:
       tol = test_utils.FP8_NOISE_TOL
@@ -144,6 +179,12 @@ class PallasImplementationTest(test_utils.FusedFp8MatmulTestBase):
     self.assertEqual(
         ffm.get_dlhs_heuristics_config(m, k, n, lhs_dtype=jnp.float32).block_m,
         512,
+    )
+    # (2048, 1024, 1024) is the dRHS table entry for this shape in bf16; it is
+    # within the measured cotangent block size in f32 too, so it is kept.
+    self.assertEqual(
+        ffm.get_drhs_heuristics_config(m, k, n, lhs_dtype=jnp.float32).block_m,
+        2048,
     )
 
     def loss(fn, a, b):
@@ -204,6 +245,14 @@ class ArgumentsTest(parameterized.TestCase):
         ),
         forward_kernel.VMEM_BUDGET_BYTES,
     )
+
+  @parameterized.parameters(*test_utils.SHAPES, (32768, 3072, 4096))
+  def test_drhs_heuristics_config_divides_shape(self, m, k, n):
+    config = ffm.get_drhs_heuristics_config(m, k, n)
+    self.assertEqual(
+        (m % config.block_m, k % config.block_k, n % config.block_n), (0, 0, 0)
+    )
+    self.assertEqual(config.block_k % 128, 0)
 
   @parameterized.parameters(*test_utils.SHAPES, (32768, 3072, 4096))
   def test_dlhs_heuristics_config_divides_shape_and_fits(self, m, k, n):
