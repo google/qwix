@@ -23,9 +23,10 @@ Example:
 
 `fused_fp8_matmul` is the training entry point: a `jax.custom_vjp` around the
 forward kernel that accepts a plain or pre-quantized weight. In this version
-the backward pass is the plain-XLA reference. Callers that want the kernel
-itself, with explicit tile sizes, can import it directly from
-`forward_kernel.py`; nothing here is needed for that.
+the backward pass runs the dLHS kernel for the activation gradient and the
+plain-XLA reference for the weight gradient. Callers that want the kernels
+themselves, with explicit tile sizes, can import them directly from
+`forward_kernel.py` and `dlhs_kernel.py`; nothing here is needed for that.
 
 Chip support: the kernels run on any TPU whose MXU takes FP8 operands. The
 tile heuristics were measured on TPU7x and are only tuned for it; on other
@@ -41,6 +42,7 @@ from typing import Literal
 
 import jax
 import jax.numpy as jnp
+from qwix.contrib.kernels.fused_fp8_matmul import dlhs_kernel
 from qwix.contrib.kernels.fused_fp8_matmul import forward_kernel
 from qwix.contrib.kernels.fused_fp8_matmul import reference
 
@@ -55,13 +57,15 @@ class _Static:
 
   Attributes:
     implementation: `"pallas"` or `"xla"`.
-    config: The kernel tiling; `None` means the heuristics choose it.
+    config: The forward kernel tiling; `None` means the heuristics choose it.
+    dlhs_config: The dLHS kernel tiling; `None` means the heuristics choose it.
     rhs_dtype: The dtype of a plain `rhs`, which its gradient must be cast to;
       `None` when `rhs` is a `QArray`, which gets no gradient.
   """
 
   implementation: str
   config: Config | None
+  dlhs_config: Config | None
   rhs_dtype: jnp.dtype | None
 
 
@@ -70,6 +74,7 @@ def fused_fp8_matmul(
     rhs: jax.Array | QArray,
     *,
     config: Config | None = None,
+    dlhs_config: Config | None = None,
     implementation: Literal["pallas", "xla"] = "pallas",
 ) -> jax.Array:
   """Fused FP8 matmul: `lhs @ rhs` with in-op row quantization of `lhs`.
@@ -97,13 +102,15 @@ def fused_fp8_matmul(
       `float8_e4m3fn` with one scale per output column (scale shape `(1, n)`),
       or a plain floating-point array which the op quantizes per column before
       the matmul.
-    config: Tiling for the Pallas kernel. `None` picks the measured heuristics
-      for the shape. Only valid with `implementation="pallas"`.
-    implementation: `"pallas"` runs the Pallas kernel and requires a TPU whose
+    config: Tiling for the Pallas forward kernel. `None` picks the measured
+      heuristics for the shape. Only valid with `implementation="pallas"`.
+    dlhs_config: Tiling for the Pallas dLHS kernel in the backward pass. `None`
+      picks the measured heuristics. Only valid with `implementation="pallas"`.
+    implementation: `"pallas"` runs the Pallas kernels and requires a TPU whose
       MXU takes FP8 operands; `m`, `k` and `n` must be multiples of 128. The
-      kernel and its tile heuristics were measured on TPU7x; other FP8-capable
-      chips run it untuned unless `config` is given. `"xla"` runs the plain-XLA
-      reference on any backend.
+      kernels and their tile heuristics were measured on TPU7x; other
+      FP8-capable chips run them untuned unless configs are given. `"xla"` runs
+      the plain-XLA reference on any backend.
 
   Returns:
     `lhs @ rhs` of shape `(m, n)` in `lhs.dtype`.
@@ -133,14 +140,16 @@ def fused_fp8_matmul(
           " has none. Pass implementation='xla' for the plain-XLA reference."
       )
   elif implementation == "xla":
-    if config is not None:
-      raise ValueError("config only applies to implementation='pallas'.")
+    if config is not None or dlhs_config is not None:
+      raise ValueError(
+          "config and dlhs_config only apply to implementation='pallas'."
+      )
   else:
     raise ValueError(
         f"implementation must be 'pallas' or 'xla', got {implementation!r}."
     )
   rhs_dtype = None if isinstance(rhs, QArray) else rhs.dtype
-  static = _Static(implementation, config, rhs_dtype)
+  static = _Static(implementation, config, dlhs_config, rhs_dtype)
   return _fused_fp8_matmul(static, lhs, rhs)
 
 
@@ -207,10 +216,28 @@ def _bwd(
     static: _Static, residuals: Residuals, dout: jax.Array
 ) -> tuple[jax.Array, jax.Array | None]:
   """Backward pass. Returns `(dlhs, drhs)`; `drhs` is `None` for a `QArray`."""
-  dlhs, drhs = reference.fused_fp8_matmul_vjp_reference(residuals, dout)
-  # `dout` has the forward output's dtype, which is `lhs.dtype`.
+  lhs_q, lhs_scale, rhs_q, rhs_scale = residuals
+  # `dout` has the forward output's dtype, which is `lhs.dtype`, so `dlhs`
+  # comes out in the right dtype without a cast.
+  if static.implementation == "xla":
+    dlhs = reference.fused_fp8_dlhs_reference(dout, rhs_q, rhs_scale)
+  else:
+    m, n = dout.shape
+    k = rhs_q.shape[0]
+    config = static.dlhs_config or dlhs_kernel.get_dlhs_heuristics_config(
+        m, k, n, lhs_dtype=dout.dtype
+    )
+    dlhs = dlhs_kernel.fused_fp8_dlhs_pallas(
+        dout,
+        rhs_q,
+        rhs_scale,
+        bm=config.block_m,
+        bk=config.block_k,
+        bn=config.block_n,
+    )
   if static.rhs_dtype is None:
     return dlhs, None
+  drhs = reference.fused_fp8_drhs_reference(lhs_q, lhs_scale, dout)
   return dlhs, drhs.astype(static.rhs_dtype)
 
 

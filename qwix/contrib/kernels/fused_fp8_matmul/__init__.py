@@ -19,6 +19,7 @@
 # TODO(stellasyan): Export the kernels (`forward_kernel.fused_fp8_matmul_pallas`
 # and the backward ones) here once there is a caller that wants explicit tiles;
 # until then they are importable from their modules.
+from qwix.contrib.kernels.fused_fp8_matmul.dlhs_kernel import get_dlhs_heuristics_config
 from qwix.contrib.kernels.fused_fp8_matmul.forward_kernel import Config
 from qwix.contrib.kernels.fused_fp8_matmul.forward_kernel import fp8_matmul_supported_on
 from qwix.contrib.kernels.fused_fp8_matmul.forward_kernel import get_heuristics_config

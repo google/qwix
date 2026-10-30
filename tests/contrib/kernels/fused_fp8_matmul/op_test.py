@@ -21,6 +21,7 @@ from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
 from qwix.contrib.kernels import fused_fp8_matmul as ffm
+from qwix.contrib.kernels.fused_fp8_matmul import dlhs_kernel
 from qwix.contrib.kernels.fused_fp8_matmul import forward_kernel
 from qwix.contrib.kernels.fused_fp8_matmul import test_utils
 
@@ -38,11 +39,12 @@ class XlaImplementationTest(test_utils.FusedFp8MatmulTestBase):
         matmul_fn=functools.partial(ffm.fused_fp8_matmul, implementation="xla"),
     )
 
-  def test_rejects_config(self):
+  @parameterized.parameters("config", "dlhs_config")
+  def test_rejects_config(self, name):
     lhs, rhs = test_utils.random_inputs(256, 256, 256, jnp.bfloat16)
     config = ffm.Config(block_m=256, block_k=256, block_n=256)
     with self.assertRaisesRegex(ValueError, "implementation='pallas'"):
-      ffm.fused_fp8_matmul(lhs, rhs, config=config, implementation="xla")
+      ffm.fused_fp8_matmul(lhs, rhs, implementation="xla", **{name: config})
 
 
 class PallasImplementationTest(test_utils.FusedFp8MatmulTestBase):
@@ -97,15 +99,51 @@ class PallasImplementationTest(test_utils.FusedFp8MatmulTestBase):
     self.assert_close_to_reference(dlhs, dlhs_ref, k=k)
     self.assert_close_to_reference(drhs, drhs_ref, k=k)
 
+  @parameterized.parameters(
+      # (block_m, block_k, block_n) at (m, k, n) = (512, 2048, 2048)
+      (256, 512, 2048),  # k blocks: cached cotangent
+      (256, 2048, 512),  # n blocks: accumulator
+      (512, 512, 512),  # both
+  )
+  def test_explicit_dlhs_config(self, block_m, block_k, block_n):
+    m, k, n = 512, 2048, 2048
+    lhs, rhs = test_utils.random_inputs(m, k, n, jnp.bfloat16)
+    dout = jax.random.normal(jax.random.PRNGKey(3), (m, n), jnp.float32)
+    dlhs_config = ffm.Config(block_m=block_m, block_k=block_k, block_n=block_n)
+
+    def dlhs_of(fn):
+      def loss(a):
+        return jnp.sum(fn(a, rhs).astype(jnp.float32) * dout)
+
+      return jax.jit(jax.grad(loss))(lhs)
+
+    actual = dlhs_of(
+        functools.partial(ffm.fused_fp8_matmul, dlhs_config=dlhs_config)
+    )
+    expected = dlhs_of(
+        functools.partial(ffm.fused_fp8_matmul, implementation="xla")
+    )
+    # With `block_n < n` each n block is quantized against its own scale, so
+    # the result only agrees with the reference up to FP8 noise.
+    if block_n == n:
+      tol = test_utils.SAME_QUANTIZATION_TOL
+    else:
+      tol = test_utils.FP8_NOISE_TOL
+    self.assertLess(test_utils.relative_error(actual, expected), tol)
+
   def test_grad_with_f32_activations_fits_in_vmem(self):
-    # Differentiating makes the kernel emit residuals, and f32 activation and
-    # output blocks are twice the size of bf16 ones. At this shape the bf16
-    # tiling (bm = 1024) overflows VMEM for f32; the heuristics must see the
-    # dtype and back off.
+    # Differentiating makes the forward kernel emit residuals, and f32
+    # activation, cotangent and output blocks are twice the size of bf16 ones.
+    # At this shape the bf16 tilings (bm = 1024) overflow VMEM for f32; both
+    # kernels' heuristics must see the dtype and back off.
     m, k, n = 2048, 3072, 3072
     lhs, rhs = test_utils.random_inputs(m, k, n, jnp.float32)
     self.assertEqual(
         ffm.get_heuristics_config(m, k, n, lhs_dtype=jnp.float32).block_m, 512
+    )
+    self.assertEqual(
+        ffm.get_dlhs_heuristics_config(m, k, n, lhs_dtype=jnp.float32).block_m,
+        512,
     )
 
     def loss(fn, a, b):
@@ -165,6 +203,24 @@ class ArgumentsTest(parameterized.TestCase):
             config.block_m, config.block_k, config.block_n, k, n, lhs_itemsize=2
         ),
         forward_kernel.VMEM_BUDGET_BYTES,
+    )
+
+  @parameterized.parameters(*test_utils.SHAPES, (32768, 3072, 4096))
+  def test_dlhs_heuristics_config_divides_shape_and_fits(self, m, k, n):
+    config = ffm.get_dlhs_heuristics_config(m, k, n)
+    self.assertEqual(
+        (m % config.block_m, k % config.block_k, n % config.block_n), (0, 0, 0)
+    )
+    self.assertLessEqual(
+        dlhs_kernel.dlhs_vmem_bytes(
+            config.block_m,
+            config.block_k,
+            config.block_n,
+            k,
+            n,
+            cotangent_itemsize=2,
+        ),
+        dlhs_kernel.VMEM_BUDGET_BYTES,
     )
 
 
