@@ -402,11 +402,24 @@ class QtProvider(qconfig.QuantizationProvider):
     """Creates a RaggedDotQtConfig for ragged_dot."""
     assert isinstance(rule, QtRule), '_init_rule should have been called.'
     # Assume LHS is an activation and RHS is a weight.
-    return ragged_dot_qt.RaggedDotQtConfig(
+    qt_config = ragged_dot_qt.RaggedDotQtConfig(
         # fwd configs.
         lhs_qtype=rule.act_qtype,  # pyrefly: ignore[bad-argument-type]
         rhs_qtype=rule.weight_qtype,  # pyrefly: ignore[bad-argument-type]
+        tile_size=rule.tile_size,
         # bwd configs.
         dlhs_grad_qtype=rule.bwd_qtype,
         drhs_grad_qtype=rule.bwd_qtype,
     )
+    if rule.additional_qt_config:
+      valid_fields = {
+          f.name for f in dataclasses.fields(ragged_dot_qt.RaggedDotQtConfig)
+      }
+      overrides = {
+          k: v
+          for k, v in rule.additional_qt_config.items()
+          if k in valid_fields
+      }
+      if overrides:
+        qt_config = dataclasses.replace(qt_config, **overrides)
+    return qt_config
