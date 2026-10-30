@@ -144,7 +144,7 @@ def fused_hadamard_quantize(
     A tuple of the quantized array and the scales.
   """
   # Create the tensor core mesh
-  tc_mesh = pltpu.create_tensorcore_mesh(axis_name=_CORE_AXIS_NAME)
+  tc_mesh = pltpu.TensorCoreMesh(axis_name=_CORE_AXIS_NAME)
 
   # Create the output type
   xq_out_type = jax.core.ShapedArray(x.shape, dtype)
@@ -181,7 +181,7 @@ def fused_hadamard_quantize(
   # Call the kernel
   xq, s = pl.kernel(
       kernel,
-      out_type=[xq_out_type, s_out_type],  # pyrefly: ignore
-      mesh=tc_mesh,  # pyrefly: ignore
+      out_type=[xq_out_type, s_out_type],
+      mesh=tc_mesh,
   )(x, had_mat)
   return xq, s.reshape(sm, sn)

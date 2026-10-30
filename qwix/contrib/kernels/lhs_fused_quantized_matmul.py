@@ -301,7 +301,7 @@ def lhs_fused_quantized_matmul(
     The output array (m, n)
   """
   # Create the tensor core mesh
-  tc_mesh = pltpu.create_tensorcore_mesh(axis_name=_CORE_AXIS_NAME)
+  tc_mesh = pltpu.TensorCoreMesh(axis_name=_CORE_AXIS_NAME)
 
   # Create the output type
   out_type = jax.core.ShapedArray((x.shape[0], y.shape[1]), x.dtype)
