@@ -49,7 +49,7 @@ research and production.
         *   `conv`, `matmul`, and `fully_connected`: per-channel.
         *   Other ops available in LiteRT: per-tensor.
 *   Supported offline quantization modes:
-    *   NNX:
+    *   Flax Linen and NNX models:
         *   QT: `int4`, `int8`, `fp8`
         *   PTQ: `int4`, `int8`, `fp8`
         *   full-precision: `bf16`, `fp32`
