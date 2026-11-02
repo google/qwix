@@ -10,6 +10,9 @@ and continuing training or inference workloads in the desired target numeric.
     full-precision (e.g. BF16) for continued training or full-precision
     inference.
 
+Both Flax Linen and NNX models are supported. The examples below use NNX; see
+[Flax Linen Models](offline_quantization.md#offline-quantization-linen) for the Linen differences.
+
 ## Overview
 
 ### Quantized Training/Inference
@@ -138,6 +141,82 @@ with jax.set_mesh(mesh):
 # Step 4: Ready for continued training or inference!
 ```
 
+(offline-quantization-linen)=
+
+## Flax Linen Models
+
+The Linen flows mirror the NNX flows above, with the following differences:
+
+*   **Generate Abstract Params**: Call `qwix.quantize_model` without model
+    inputs, then generate abstract params with `jax.eval_shape(model.init,
+    ...)['params']`.
+*   **Override Opaque Layers**: Replace the opaque layer leaves in the abstract
+    params dict. See
+    [Overriding Custom Parameters in Opaque Layers](offline_quantization.md#offline-quantization-opaque-layers).
+*   **Process Params**: Pass the abstract `'params'` collection, not the whole
+    variables dict, to `qwix.process_prequantized_params`, then run the model
+    with `model.apply({'params': params}, ...)` instead of calling `nnx.update`.
+
+For the full-precision flow, skip `restore_quantization_rules`,
+`qwix.quantize_model`, and the opaque layer overrides.
+
+```py
+from flax import linen as nn
+import jax
+import qwix
+
+# Step 1: Load and Transform Checkpoint to Linen paths (as above).
+restored_tree = transform_checkpoint_tree(restored_tree)
+
+# Step 2: Generate Abstract Params
+quantization_rules = qwix.restore_quantization_rules(
+    restored_tree,
+    qwix.QuantizationRule,
+    tile_size=64,
+)
+# Linen models are quantized without model inputs.
+model = qwix.quantize_model(MyModel(), qwix.PtqProvider(quantization_rules))
+
+# nn.logical_axis_rules is only needed for nn.LogicallyPartitioned params.
+with jax.set_mesh(mesh), nn.logical_axis_rules(logical_axis_rules):
+  abstract_params = jax.eval_shape(
+      model.init, jax.random.key(0), get_dummy_input()
+  )['params']
+
+  # Step 3: Override Opaque Layers
+  # If applicable, see below section on how to implement this helper.
+  override_opaque_layers(abstract_params)
+
+  # Step 4: Process Params
+  params = qwix.process_prequantized_params(restored_tree, abstract_params)
+
+# Step 5: Ready for continued training or inference!
+outputs = model.apply({'params': params}, inputs)
+```
+
+### Output Params
+
+For Linen, `qwix.process_prequantized_params` returns a nested dict of only the
+checkpoint's params, placed on device inside the template's `WithAux` and
+`QArray` containers with partitioning metadata boxes removed. Template params
+missing from the checkpoint aren't included, so merge those in (e.g. from
+`model.init`) before calling `model.apply`.
+
+(offline-quantization-linen-sharding)=
+
+### Sharding
+
+Linen abstract params carry no sharding, so Qwix shards each param from its
+`nn.Partitioned` or `nn.LogicallyPartitioned` metadata like Flax does: with the
+box's mesh or else the mesh set by `jax.set_mesh`, and with the box's rules or
+else the rules set by `nn.logical_axis_rules`. If the metadata can't be resolved
+this way, Qwix logs a warning and places the param unsharded.
+
+```{note}
+The deprecated `with mesh:` context manager doesn't set the mesh read by Qwix.
+Use `with jax.set_mesh(mesh):` instead.
+```
+
 ## Transforming Checkpoints to Qwix Structure
 
 When loading checkpoints from external formats like Hugging Face SafeTensors,
@@ -153,6 +232,11 @@ Qwix expects checkpoints to be processed into a nested PyTree dictionary
 matching the target model's NNX state paths without `.value` suffixes. The
 quantized parameter leaves must be represented as dictionaries containing
 `qvalue`, `scale`, and optionally `zero_point`.
+
+For Linen models, the checkpoint must instead match the target model's paths
+within the `'params'` collection. Linen names submodules assigned as a list in
+`setup()` as `layers_0`, `layers_1`, etc., so rename the checkpoint's layer keys
+to match (e.g. `layers.0` to `layers_0`) and skip `nnx.restore_int_paths`.
 
 ### Example: Pre-Quantized SafeTensors Checkpoint
 
@@ -170,7 +254,8 @@ transformation utilities.
 4.  **Transpose Layouts**: Transpose PyTorch layouts ([out, in]) to match JAX
     layouts ([in, out]).
 5.  **Unflatten Transform**: Unflatten to match NNX structure.
-6.  **Restore Int Paths**: Convert string digit keys back to integers.
+6.  **Restore Int Paths**: Convert string digit keys back to integers (NNX
+    only).
 
 ```py
 from typing import Any, Dict
@@ -236,7 +321,7 @@ def transform_checkpoint_tree(tree: Dict[str, Any]) -> Dict[str, Any]:
       _transpose_layouts,
       # 5. Unflatten to match NNX structure.
       nesting.unflatten(separator="."),
-      # 6. Convert string digit keys back to integers.
+      # 6. Convert string digit keys back to integers (NNX only).
       nnx.restore_int_paths,
   ]
 
@@ -245,6 +330,8 @@ def transform_checkpoint_tree(tree: Dict[str, Any]) -> Dict[str, Any]:
 
   return tree
 ```
+
+(offline-quantization-opaque-layers)=
 
 ## Overriding Custom Parameters in Opaque Layers
 
@@ -329,4 +416,53 @@ def override_opaque_layers(
     moe.down_proj_weight = _to_quantized_dict(
         moe.down_proj_weight, sharding
     )
+```
+
+For Linen models, override the leaves of the abstract params dict instead, and
+box them with `nn.Partitioned` or `nn.LogicallyPartitioned` to shard them (see
+[Sharding](offline_quantization.md#offline-quantization-linen-sharding)):
+
+```py
+from typing import Any, Dict
+from flax import linen as nn
+import jax
+import jax.numpy as jnp
+
+
+def override_opaque_layers(params: Dict[str, Any], block_size: int = 64):
+  """Overrides params in opaque layers to be quantized dictionaries."""
+
+  def _to_quantized_dict(param: Any) -> Dict[str, Dict[str, nn.Partitioned]]:
+    shape = nn.unbox(param).shape
+    # Adjust scale shape for 2D block quantization.
+    scale_shape = shape[:-2] + (
+        shape[-2] // block_size,
+        shape[-1] // block_size,
+    )
+    names = ("expert", None, None)
+    # Override to the target qtype.
+    return {
+        "array": {
+            "qvalue": nn.Partitioned(
+                jax.ShapeDtypeStruct(shape, jnp.float8_e4m3fn), names=names
+            ),
+            "scale": nn.Partitioned(
+                jax.ShapeDtypeStruct(scale_shape, jnp.bfloat16), names=names
+            ),
+        }
+    }
+
+  # Replace params in opaque layer paths with quantized dictionaries.
+  # The exact paths and partitioning will depend on your model's architecture.
+  for name, layer in params.items():
+    if name.startswith("layers_") and "experts" in layer:
+      experts = layer["experts"]
+      for weight in ("gate_up_proj_weight", "down_proj_weight"):
+        experts[weight] = _to_quantized_dict(experts[weight])
+```
+
+```{note}
+Linen converts dicts assigned as module attributes in `setup()` to
+`FrozenDict`s, so opaque layers that consume these params should accept any
+`Mapping`, not only `dict`.
 ```
