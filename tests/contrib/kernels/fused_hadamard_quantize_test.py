@@ -14,8 +14,8 @@ class LHSFusedHadamardQuantizeTest(parameterized.TestCase):
     if jax.devices()[0].platform != "tpu":
       self.skipTest(
           "Fused Hadamard quantize is a TPU-only Pallas kernel; it requires "
-          "TensorCore mesh setup (pltpu.create_tensorcore_mesh needs "
-          "device.num_cores), which is unavailable on CPU/GPU."
+          "TensorCore mesh setup (pltpu.TensorCoreMesh needs device.num_cores),"
+          "which is unavailable on CPU/GPU."
       )
 
   @parameterized.parameters(
