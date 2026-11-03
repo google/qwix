@@ -65,7 +65,9 @@ def is_ghostfish() -> bool:
     return True
 
 
-def extract_all_equations(jaxpr: jax.core.Jaxpr) -> list[jax.core.JaxprEqn]:
+def extract_all_equations(
+    jaxpr: jax.extend.core.Jaxpr,
+) -> list[jax.extend.core.JaxprEqn]:
   """Recursively extracts all equations from a Jaxpr including nested JIT calls."""
   eqns = []
   for eqn in jaxpr.eqns:
@@ -81,7 +83,7 @@ def extract_all_equations(jaxpr: jax.core.Jaxpr) -> list[jax.core.JaxprEqn]:
 
 def get_graph_gemms_and_casts(
     fn, *args
-) -> tuple[list[jax.core.JaxprEqn], list[jnp.dtype]]:
+) -> tuple[list[jax.extend.core.JaxprEqn], list[jnp.dtype]]:
   """Extracts all GEMM equations and cast target dtypes from a traced JAX function."""
   jaxpr = jax.make_jaxpr(fn)(*args)
   all_eqns = extract_all_equations(
@@ -3000,6 +3002,102 @@ class MultiPassDotTest(parameterized.TestCase):
         self.assertLess(abs(bias_aligned), 2.7e-4)
         if 'mxfp4' in mode:
           self.assertLess(abs(bias_aligned), 1e-4)
+
+  def test_dtype_spec_parse_and_quantize(self):
+    """Verifies DtypeSpec parsing and quantize_to_dtype_spec across formats."""
+    e4m3 = multipass_dot.DtypeSpec.parse('fp8')
+    self.assertEqual(e4m3.dtype, jnp.float8_e4m3fn)
+    self.assertEqual((e4m3.exp_bits, e4m3.mantissa_bits), (4, 3))
+
+    e3m4 = multipass_dot.DtypeSpec.parse('e3m4')
+    self.assertIsNone(e3m4.dtype)
+    self.assertEqual((e3m4.exp_bits, e3m4.mantissa_bits), (3, 4))
+
+    int3 = multipass_dot.DtypeSpec.parse('int3')
+    self.assertEqual(int3.dtype, 'int3')
+    self.assertEqual((int3.int_bits, int3.signed), (3, True))
+
+    uint4 = multipass_dot.DtypeSpec.parse('uint4')
+    self.assertEqual((uint4.int_bits, uint4.signed), (4, False))
+
+    with self.assertRaises(ValueError):
+      multipass_dot.DtypeSpec.parse('e0m4')
+    with self.assertRaises(ValueError):
+      multipass_dot.DtypeSpec.parse('int0')
+
+    x = jax.random.normal(self.rng, (8, 16), dtype=jnp.float32)
+    for mode in ('nearest', 'rtz', 'stochastic'):
+      q_fp = multipass_dot.quantize_to_dtype_spec(
+          x, 'e3m4', rounding_mode=mode
+      )
+      self.assertEqual(q_fp.shape, x.shape)
+      self.assertFalse(jnp.isnan(q_fp).any())
+
+      q_int = multipass_dot.quantize_to_dtype_spec(
+          x, 'int4', rounding_mode=mode
+      )
+      self.assertEqual(q_int.shape, x.shape)
+      self.assertFalse(jnp.isnan(q_int).any())
+
+    # Subnormal flushing for E4M3 (min normal = 2^-6 = 0.015625)
+    tiny = jnp.array([1e-3, -1e-3, 1.0], dtype=jnp.float32)
+    flushed = multipass_dot.quantize_to_dtype_spec(
+        tiny, 'e4m3', flush_subnormals=True
+    )
+    np.testing.assert_array_equal(flushed[:2], 0.0)
+    self.assertEqual(float(flushed[2]), 1.0)
+
+  def test_parametric_multipass_config_and_decomposition(self):
+    """Verifies MultipassConfig matches preset modes and supports heterogeneous passes."""
+    k1, k2 = jax.random.split(self.rng)
+    lhs = jax.random.normal(k1, (8, 32), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (32, 8), dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+
+    # 1. MultipassConfig matching 'three_pass_fp8'
+    cfg_3p = multipass_dot.MultipassConfig(
+        lhs=multipass_dot.OperandMultipassConfig(
+            pass_dtypes=('fp8', 'fp8'),
+        ),
+        rhs=multipass_dot.OperandMultipassConfig(
+            pass_dtypes=('fp8', 'fp8'),
+        ),
+        active_terms=((0, 0), (0, 1), (1, 0)),
+    )
+    out_cfg = multipass_dot.multipass_dot_general(
+        lhs, rhs, dnums, multipass_mode=cfg_3p
+    )
+    out_str = multipass_dot.multipass_dot_general(
+        lhs, rhs, dnums, multipass_mode='three_pass_fp8'
+    )
+    np.testing.assert_allclose(out_cfg, out_str, rtol=1e-5, atol=1e-5)
+
+    # 2. Standalone decompose_multipass_operand + reconstruct_multipass_operand
+    het_op_cfg = multipass_dot.OperandMultipassConfig(
+        pass_dtypes=('fp8', 'int4', 'e3m4'),
+    )
+    passes = multipass_dot.decompose_multipass_operand(lhs, het_op_cfg)
+    self.assertLen(passes, 3)
+    rec_1 = multipass_dot.reconstruct_multipass_operand(passes[:1])
+    rec_3 = multipass_dot.reconstruct_multipass_operand(passes)
+    self.assertGreater(
+        compute_snr_db(lhs, rec_3), compute_snr_db(lhs, rec_1) + 10.0
+    )
+
+    # 3. DotGeneralQtConfig with MultipassConfig in forward and backward
+    qt_cfg = dot_general_qt.DotGeneralQtConfig(
+        multipass_mode=cfg_3p,
+        dlhs_multipass_mode=cfg_3p,
+        drhs_multipass_mode=cfg_3p,
+    )
+    loss_fn = lambda a, b: jnp.sum(
+        dot_general_qt.dot_general_qt(a, b, dnums, qt_cfg) ** 2
+    )
+    ga, gb = jax.grad(loss_fn, argnums=(0, 1))(lhs, rhs)
+    self.assertEqual(ga.shape, lhs.shape)
+    self.assertEqual(gb.shape, rhs.shape)
+    self.assertFalse(jnp.isnan(ga).any())
+    self.assertFalse(jnp.isnan(gb).any())
 
 
 if __name__ == '__main__':

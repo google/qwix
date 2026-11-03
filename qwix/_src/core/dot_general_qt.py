@@ -42,7 +42,7 @@ class DotGeneralQtConfig:
   rhs_collect_quant_stat: Callable[[Any], Any] | None = None
   lhs_disable_channelwise_axes: bool = False
   rhs_disable_channelwise_axes: bool = False
-  multipass_mode: str | None = None
+  multipass_mode: Any = None
 
   # Backward pass (dlhs).
   dlhs_grad_qtype: jax.typing.DTypeLike | None = None  # incoming gradient
@@ -50,7 +50,7 @@ class DotGeneralQtConfig:
   dlhs_tile_size: int | float | None = None
   dlhs_stochastic_rounding_noise_fn: stochastic_rounding.NoiseFn | None = None
   dlhs_grad_disable_channelwise_axes: bool = False
-  dlhs_multipass_mode: str | None = None
+  dlhs_multipass_mode: Any = None
 
   # Backward pass (drhs).
   drhs_grad_qtype: jax.typing.DTypeLike | None = None  # incoming gradient
@@ -58,7 +58,7 @@ class DotGeneralQtConfig:
   drhs_tile_size: int | float | None = None
   drhs_stochastic_rounding_noise_fn: stochastic_rounding.NoiseFn | None = None
   drhs_grad_disable_channelwise_axes: bool = False
-  drhs_multipass_mode: str | None = None
+  drhs_multipass_mode: Any = None
 
   # Whether not to clip the gradients to the calibration ranges of the quantized
   # inputs. Enabling this improves the performance but may decrease the

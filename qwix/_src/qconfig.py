@@ -14,6 +14,7 @@
 """Model-level quantization config."""
 
 from collections.abc import Callable, Collection, Sequence
+import contextlib
 import dataclasses
 import re
 from typing import Any
@@ -22,6 +23,7 @@ from absl import logging
 from flax import linen as nn
 from flax import nnx
 import jax
+from jax import numpy as jnp
 from jax.experimental import pallas as pl
 from qwix._src import aux_data
 from qwix._src import interception
@@ -39,9 +41,22 @@ class QuantizationRule:
   # A regex for matching the module path.
   module_path: str = '.*'
 
+  # Optional regex for excluding module paths that would otherwise match
+  # module_path (e.g. '.*router.*|.*vision.*').
+  exclude_module_path: str | None = None
+
   # The ops this rule applies to, which is a collection of op names, e.g.,
   # einsum. If not set, the rule applies to all ops.
   op_names: Collection[str] = ()
+
+  # Step window [start_step, end_step) during which this rule is active when
+  # evaluated inside flax_util.step_context(step). end_step=-1 means unbounded.
+  start_step: int = 0
+  end_step: int = -1
+
+  # Optional collection of scan layer indices (0-indexed) to target when
+  # evaluated inside flax_util.scan_index_context(scan_idx).
+  target_scan_indices: Collection[int] | None = None
 
   ########################################################
   ### "Configs" that specify the quantization behavior.
@@ -97,6 +112,39 @@ class QuantizationRule:
   act_batch_axes: Collection[int] = (0,)
 
 
+def is_rule_active_in_context(rule: QuantizationRule) -> jax.Array | bool:
+  """Returns whether rule is active under current step and scan_index contexts."""
+  active: jax.Array | bool = True
+  step = flax_util.get_current_step()
+  if step is not None and (rule.start_step > 0 or rule.end_step >= 0):
+    if isinstance(step, int):
+      if rule.start_step > 0 and step < rule.start_step:
+        return False
+      if rule.end_step >= 0 and step >= rule.end_step:
+        return False
+    else:
+      step_arr = jnp.asarray(step)
+      if rule.start_step > 0:
+        active = active & (step_arr >= rule.start_step)
+      if rule.end_step >= 0:
+        active = active & (step_arr < rule.end_step)
+
+  scan_idx = flax_util.get_current_scan_index()
+  if scan_idx is not None and rule.target_scan_indices is not None:
+    targets = tuple(rule.target_scan_indices)
+    if not targets:
+      return False
+    if isinstance(scan_idx, int):
+      if scan_idx not in targets:
+        return False
+    else:
+      in_targets = jnp.isin(
+          jnp.asarray(scan_idx), jnp.asarray(targets, dtype=jnp.int32)
+      )
+      active = active & in_targets
+  return active
+
+
 def get_current_rule(op_name: str) -> QuantizationRule | None:
   """Returns the current quantization rule if intercepted, or None otherwise."""
   del op_name
@@ -137,7 +185,38 @@ class QuantizationProvider:
       rule = dataclasses.replace(rule, act_static_scale=False)
     if rule.act_calibration_method is None:
       rule = dataclasses.replace(rule, act_calibration_method='absmax')
+    if rule.target_scan_indices is not None:
+      rule = dataclasses.replace(
+          rule, target_scan_indices=tuple(rule.target_scan_indices)
+      )
     return rule
+
+  @contextlib.contextmanager
+  def intercept(
+      self,
+      *,
+      step: jax.Array | int | None = None,
+      scan_index: jax.Array | int | None = None,
+  ):
+    """Context manager to activate this provider's interceptors and runtime context."""
+    active_interceptors = []
+    for get_interceptor in self.get_interceptors():
+      interceptor = interception._preprocess_interceptor(  # pylint: disable=protected-access
+          get_interceptor(), self.disable_jit
+      )
+      if not interception.interception_manager.is_active(interceptor):
+        interception.interception_manager.activate_interceptor(interceptor)
+        active_interceptors.append(interceptor)
+    with contextlib.ExitStack() as stack:
+      if step is not None:
+        stack.enter_context(flax_util.step_context(step))
+      if scan_index is not None:
+        stack.enter_context(flax_util.scan_index_context(scan_index))
+      try:
+        yield self
+      finally:
+        for interceptor in reversed(active_interceptors):
+          interception.interception_manager.deactivate_interceptor(interceptor)
 
   def get_intercept_map(self) -> dict[str, Callable[..., Any]]:
     """Returns the intercept map for interception.wrap_func_intercepted."""
@@ -180,7 +259,7 @@ class QuantizationProvider:
   ) -> tuple[Any, Sequence[Any], dict[str, Any]]:
     """Process the model and its inputs before it is called."""
     if isinstance(model, nnx.Module):
-      for _, node in model.iter_modules():
+      for _, node in nnx.iter_modules(model):
         # Clear the op_count which is used in _get_current_rule_and_op_id below.
         aux_data.clear(node)
     return model, model_args, model_kwargs
@@ -211,13 +290,19 @@ class QuantizationProvider:
     Returns:
       A tuple of the quantization rule and a unique op id for the given op.
     """
-    # Lookup the rule.
-    module_path = '/'.join(map(str, flax_util.get_current_module_path()))
+    try:
+      module_path = '/'.join(map(str, flax_util.get_current_module_path()))
+    except ValueError:
+      return None, None
     rule_idx = None
     for idx, rule in enumerate(self._rules):
-      if re.fullmatch(rule.module_path, module_path) and (
-          not rule.op_names or op_name in rule.op_names
+      if not re.fullmatch(rule.module_path, module_path):
+        continue
+      if rule.exclude_module_path and re.search(
+          rule.exclude_module_path, module_path
       ):
+        continue
+      if not rule.op_names or op_name in rule.op_names:
         rule_idx = idx
         break
     rule = self._rules[rule_idx] if rule_idx is not None else None

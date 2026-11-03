@@ -13,16 +13,62 @@
 # limitations under the License.
 """Utility functions to work with Flax linen and nnx modules."""
 
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Iterator, Sequence
+import contextlib
 import dataclasses
 import functools
 import inspect
+import threading
 from typing import Any
 
 import flax
 from flax import linen as nn
 from flax import nnx
 import jax
+
+
+class _RuntimeContext(threading.local):
+  """Thread-local runtime context for training step and scan layer index."""
+
+  def __init__(self):
+    super().__init__()
+    self.step: jax.Array | int | None = None
+    self.scan_index: jax.Array | int | None = None
+
+
+_runtime_context = _RuntimeContext()
+
+
+@contextlib.contextmanager
+def step_context(step: jax.Array | int | None) -> Iterator[None]:
+  """Sets the active training step for step-scheduled quantization rules."""
+  prev = _runtime_context.step
+  _runtime_context.step = step
+  try:
+    yield
+  finally:
+    _runtime_context.step = prev
+
+
+def get_current_step() -> jax.Array | int | None:
+  """Returns the active training step set by step_context, or None."""
+  return _runtime_context.step
+
+
+@contextlib.contextmanager
+def scan_index_context(scan_index: jax.Array | int | None) -> Iterator[None]:
+  """Sets the active scan layer index for scan-targeted quantization rules."""
+  prev = _runtime_context.scan_index
+  _runtime_context.scan_index = scan_index
+  try:
+    yield
+  finally:
+    _runtime_context.scan_index = prev
+
+
+def get_current_scan_index() -> jax.Array | int | None:
+  """Returns the active scan index set by scan_index_context, or None."""
+  return _runtime_context.scan_index
 
 
 @nnx.register_variable_name('quant_stats', overwrite=True)
@@ -39,7 +85,7 @@ def should_update_quant_stats() -> bool:
         return False  # Don't update quant_stats during initialization.
       return module.is_mutable_collection('quant_stats')
     case nnx.Module():
-      return not module.disable_quant_stats_update  # pyrefly: ignore[missing-attribute]
+      return not getattr(module, 'disable_quant_stats_update', False)
 
 
 def get_current_module() -> nn.Module | nnx.Module:
@@ -83,7 +129,7 @@ def get_current_module_path() -> tuple[str, ...]:
       return module.path
     case nnx.Module():
       # Paths of nnx modules are set when they are quantized.
-      return module.qwix_path  # pyrefly: ignore[missing-attribute]
+      return getattr(module, 'qwix_path', (type(module).__name__,))
 
 
 def get_or_create_variable(
