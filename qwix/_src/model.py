@@ -17,7 +17,8 @@ from collections.abc import Collection
 import copyreg
 import functools
 import inspect
-from typing import Any, overload
+import sys
+from typing import Any, cast, overload
 
 from flax import linen as nn
 from flax import nnx
@@ -250,6 +251,16 @@ def _make_quantized_nnx_type(
       ),
   }
   metaclass = _picklable_metaclass(type(model_class))
+  # dill pickles every class with its own `save_type` and ignores copyreg, so
+  # register with it too. Only do so if dill is already loaded, to avoid a hard
+  # dependency, and do it on every call rather than in the cached
+  # `_picklable_metaclass` so that dill imported later is still covered.
+  if (dill := cast(Any, sys.modules.get("dill"))) is not None:
+    dill.register(metaclass)(
+        lambda pickler, cls: pickler.save_reduce(
+            *_reduce_quantized_nnx_type(cls), obj=cls
+        )
+    )
   return metaclass(model_class.__name__, (model_class,), new_fields)
 
 
