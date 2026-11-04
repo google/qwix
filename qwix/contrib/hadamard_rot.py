@@ -26,6 +26,7 @@ x_rot, w_rot, _ = hadamard_rotate_inputs(
 out = jnp.matmul(x_rot, w_rot)
 """
 
+from collections.abc import Callable
 import math
 
 import jax
@@ -130,6 +131,34 @@ def _apply_hadamard_lhs_rhs(
   )
 
 
+def _apply_blocked(
+    apply_fn: Callable[[jax.Array, jax.Array, int], jax.Array],
+    x: jax.Array,
+    had: jax.Array,
+    reduction_dim: int,
+) -> jax.Array:
+  """Applies `apply_fn` blockwise along `reduction_dim`."""
+  block_size = had.shape[0]
+  axis = reduction_dim % x.ndim
+  num_blocks = x.shape[axis] // block_size
+  block_shape = x.shape[:axis] + (num_blocks, block_size) + x.shape[axis + 1 :]
+  return apply_fn(x.reshape(block_shape), had, axis + 1).reshape(x.shape)
+
+
+def _apply_block_hadamard_lhs_rhs(
+    act: jax.Array,
+    weight: jax.Array,
+    had: jax.Array,
+    lhs_reduction_dim: int,
+    rhs_reduction_dim: int,
+) -> tuple[jax.Array, jax.Array]:
+  """Applies a block-diagonal Hadamard matrix along the reduction dimensions."""
+  return (
+      _apply_blocked(_apply_hadamard_lhs, act, had, lhs_reduction_dim),
+      _apply_blocked(_apply_hadamard_rhs, weight, had, rhs_reduction_dim),
+  )
+
+
 def hadamard_rotate_inputs(
     act: jax.Array,
     weight: jax.Array,
@@ -139,23 +168,35 @@ def hadamard_rotate_inputs(
     col_sign_flip: bool,
     lhs_reduction_dim: int,
     rhs_reduction_dim: int,
+    block_size: int | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array | None]:
-  """Constructs a Hadamard matrix and applies it to the inputs of the weight matrix.
+  """Constructs a Hadamard matrix and applies it to activation and weight inputs.
+
+  When block_size is specified (e.g. block_size=256 for a 256x256 TPU MXU tile),
+  applies a block-diagonal Walsh-Hadamard transform of size
+  block_size x block_size across the reduction dimension, supporting
+  non-power-of-2 reduction dimensions (such as K in {1536, 1792, 3072, 3584,
+  7168}) whenever K is divisible by block_size.
 
   Args:
-    act: The activation matrix of shape (batch_size, in_features).
-    weight: The weight matrix of shape (out_features, in_features).
-    key: The random key to use for sign flips.
+    act: The activation tensor.
+    weight: The weight tensor.
+    key: The random key to use for sign flips, or None when sign flips are
+      disabled.
     row_sign_flip: Whether to flip the signs of the rows.
     col_sign_flip: Whether to flip the signs of the columns.
     lhs_reduction_dim: The dimension of the activation matrix to apply the
       Hadamard matrix to.
     rhs_reduction_dim: The dimension of the weight matrix to apply the Hadamard
       matrix to.
+    block_size: Optional power-of-2 block size (e.g. 256) for block-diagonal
+      Hadamard rotation along non-power-of-2 reduction dimensions. If None, uses
+      a single full K x K Hadamard matrix and requires the reduction dimension
+      size K to be a power of 2.
 
   Returns:
     A tuple of the rotated activation matrix, the rotated weight matrix, and
-    the next random key.
+    the next random key (or None if key was None).
   """
   if not isinstance(lhs_reduction_dim, int):
     raise ValueError(
@@ -172,16 +213,42 @@ def hadamard_rotate_inputs(
         'Expected reduction dimension sizes to be the same, but got '
         f'{act.shape[lhs_reduction_dim]} and {weight.shape[rhs_reduction_dim]}'
     )
-  power = int(math.log2(act.shape[lhs_reduction_dim]))
+  reduction_size = act.shape[lhs_reduction_dim]
 
+  if block_size is not None:
+    if (
+        not isinstance(block_size, int)
+        or isinstance(block_size, bool)
+        or block_size <= 0
+        or (block_size & (block_size - 1)) != 0
+    ):
+      raise ValueError(
+          'Expected block_size to be a positive power of 2, but got '
+          f'{block_size}'
+      )
+    if reduction_size % block_size != 0:
+      raise ValueError(
+          f'Expected reduction dimension size {reduction_size} to be divisible '
+          f'by block_size {block_size}'
+      )
+    power = int(math.log2(block_size))
+    had, key = _create_hadamard_matrix(
+        power, key, row_sign_flip=row_sign_flip, col_sign_flip=col_sign_flip
+    )
+    act, weight = _apply_block_hadamard_lhs_rhs(
+        act, weight, had, lhs_reduction_dim, rhs_reduction_dim
+    )
+    return act, weight, key
+
+  power = int(math.log2(reduction_size))
   had, key = _create_hadamard_matrix(
       power, key, row_sign_flip=row_sign_flip, col_sign_flip=col_sign_flip
   )
   had_size = had.shape[0]
-  if had_size != act.shape[lhs_reduction_dim]:
+  if had_size != reduction_size:
     raise ValueError(
         'Expected reduction dimension size to be a power of 2, but got '
-        f'{act.shape[lhs_reduction_dim]}'
+        f'{reduction_size}'
     )
 
   act, weight = _apply_hadamard_lhs_rhs(

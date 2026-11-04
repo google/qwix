@@ -234,6 +234,91 @@ class HadamardRotTest(parameterized.TestCase):
           rhs_reduction_dim=1,
       )
 
+  @parameterized.parameters(
+      (24, 8),
+      (48, 16),
+      (1536, 256),
+      (1792, 256),
+      (3072, 256),
+      (3584, 256),
+  )
+  def test_block_hadamard_rotate_non_power_of_2_dimensions(
+      self, reduction_size, block_size
+  ):
+    key = jax.random.key(7)
+    k1, k2, k3 = jax.random.split(key, 3)
+    lhs = jax.random.normal(k1, (4, reduction_size), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (reduction_size, 8), dtype=jnp.float32)
+
+    lhs_rot, rhs_rot, next_key = hadamard_rot.hadamard_rotate_inputs(
+        lhs,
+        rhs,
+        k3,
+        row_sign_flip=True,
+        col_sign_flip=True,
+        lhs_reduction_dim=1,
+        rhs_reduction_dim=0,
+        block_size=block_size,
+    )
+    self.assertEqual(lhs_rot.shape, lhs.shape)
+    self.assertEqual(rhs_rot.shape, rhs.shape)
+    self.assertIsNotNone(next_key)
+
+    out_rot = jnp.matmul(lhs_rot, rhs_rot)
+    out_ref = jnp.matmul(lhs, rhs)
+    # _create_hadamard_matrix defaults to bf16 (~3e-3 max diff at K=3584).
+    self.assertTrue(jnp.allclose(out_ref, out_rot, rtol=1e-2, atol=1e-2))
+
+  @parameterized.parameters((1, 2), (-2, -1))
+  def test_block_hadamard_rotate_3d_arbitrary_axes(
+      self, lhs_reduction_dim, rhs_reduction_dim
+  ):
+    key = jax.random.key(11)
+    k1, k2, k3 = jax.random.split(key, 3)
+    lhs = jax.random.normal(k1, (2, 24, 4), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (3, 5, 24), dtype=jnp.float32)
+
+    lhs_rot, rhs_rot, _ = hadamard_rot.hadamard_rotate_inputs(
+        lhs,
+        rhs,
+        k3,
+        row_sign_flip=True,
+        col_sign_flip=True,
+        lhs_reduction_dim=lhs_reduction_dim,
+        rhs_reduction_dim=rhs_reduction_dim,
+        block_size=8,
+    )
+    out_rot = jnp.einsum("arb,cdr->abcd", lhs_rot, rhs_rot)
+    out_ref = jnp.einsum("arb,cdr->abcd", lhs, rhs)
+    self.assertTrue(jnp.allclose(out_ref, out_rot, rtol=1e-2, atol=1e-2))
+
+  @parameterized.parameters(0, -8, 12, True)
+  def test_block_hadamard_invalid_block_size(self, invalid_block_size):
+    with self.assertRaisesRegex(ValueError, "positive power of 2"):
+      hadamard_rot.hadamard_rotate_inputs(
+          jnp.ones((2, 24)),
+          jnp.ones((24, 2)),
+          jax.random.key(0),
+          row_sign_flip=True,
+          col_sign_flip=True,
+          lhs_reduction_dim=1,
+          rhs_reduction_dim=0,
+          block_size=invalid_block_size,
+      )
+
+  def test_block_hadamard_non_divisible_reduction_dim(self):
+    with self.assertRaisesRegex(ValueError, "divisible by block_size"):
+      hadamard_rot.hadamard_rotate_inputs(
+          jnp.ones((2, 20)),
+          jnp.ones((20, 2)),
+          jax.random.key(0),
+          row_sign_flip=True,
+          col_sign_flip=True,
+          lhs_reduction_dim=1,
+          rhs_reduction_dim=0,
+          block_size=8,
+      )
+
 
 if __name__ == "__main__":
   absltest.main()
