@@ -101,9 +101,12 @@ from qwix._src.core import qarray
 # subject to change in future releases.
 MultiPassMode: TypeAlias = Literal[
     'three_pass_fp8',
+    'three_pass_fp8_k_packed',
     'four_pass_fp8',
     'two_pass_lhs_fp8',
+    'two_pass_lhs_fp8_k_packed',
     'two_pass_rhs_fp8',
+    'two_pass_rhs_fp8_k_packed',
     'four_pass_int4',
     'three_pass_int4',
     'two_pass_lhs_int4',
@@ -500,6 +503,43 @@ def _int8_multipass_dot_general(
   return res.astype(result_type)
 
 
+def _pack_fp8_passes_along_k(
+    a_terms: tuple[jax.Array, ...],
+    b_terms: tuple[jax.Array, ...],
+    a_base: qarray.QArray,
+    b_base: qarray.QArray,
+    ca_l: int,
+    ca_r: int,
+) -> tuple[qarray.QArray, qarray.QArray]:
+  """Concatenates multi-pass FP8 qvalue tensors along the contracting axis."""
+  n_terms = len(a_terms)
+  a_packed_qval = jnp.concatenate(a_terms, axis=ca_l)
+  b_packed_qval = jnp.concatenate(b_terms, axis=ca_r)
+  a_packed_scale = (
+      a_base.scale
+      if a_base.scale.shape[ca_l] == 1
+      else jnp.concatenate([a_base.scale] * n_terms, axis=ca_l)
+  )
+  b_packed_scale = (
+      b_base.scale
+      if b_base.scale.shape[ca_r] == 1
+      else jnp.concatenate([b_base.scale] * n_terms, axis=ca_r)
+  )
+  a_packed = qarray.QArray(
+      qvalue=a_packed_qval,
+      scale=a_packed_scale,
+      zero_point=a_base.zero_point,
+      qtype=a_base.qtype,
+  )
+  b_packed = qarray.QArray(
+      qvalue=b_packed_qval,
+      scale=b_packed_scale,
+      zero_point=b_base.zero_point,
+      qtype=b_base.qtype,
+  )
+  return a_packed, b_packed
+
+
 def _fp8_multipass_dot_general(
     lhs: jax.Array,
     rhs: jax.Array,
@@ -508,6 +548,7 @@ def _fp8_multipass_dot_general(
     precision: jax.lax.PrecisionLike = None,
     tile_size: int | None = None,
     preferred_element_type: jax.typing.DTypeLike | None = None,
+    k_pack_max_dim: int | None = None,
 ) -> jax.Array:
   """Multipass functions for fp8."""
 
@@ -535,27 +576,96 @@ def _fp8_multipass_dot_general(
         preferred_element_type=preferred_element_type,
     )
 
-  if multipass_mode == 'two_pass_lhs_fp8':
+  # Multi-pass terms are concatenated along the last contracting axis. The
+  # k_pack_max_dim threshold is compared against the total contracting size so
+  # that auto-packing only triggers when all packed passes fit in one MXU tile.
+  (lhs_ca, rhs_ca), _ = dimension_numbers
+  ca_l = lhs_ca[-1] % lhs.ndim
+  ca_r = rhs_ca[-1] % rhs.ndim
+  k_dim = math.prod(lhs.shape[a] for a in lhs_ca)
+  # FP8 E4M3 residual passes use scale * 2^-4 (see _residual_decompose).
+  shift_bits = _get_residual_scale_shift_bits(jnp.float8_e4m3fn)
+  assert shift_bits is not None
+  shift_scale = 2.0 ** (-shift_bits)
+
+  if multipass_mode in ('two_pass_lhs_fp8', 'two_pass_lhs_fp8_k_packed'):
     a_passes = _residual_decompose(lhs, lhs_how, n_passes=2)
     a0, a1 = a_passes[0], a_passes[1]
     b0 = qarray.quantize(rhs, rhs_how)
+    use_k_pack = multipass_mode == 'two_pass_lhs_fp8_k_packed' or (
+        k_pack_max_dim is not None and 2 * k_dim <= k_pack_max_dim
+    )
+    if use_k_pack:
+      b0_shifted = (b0.qvalue.astype(jnp.float32) * shift_scale).astype(
+          jnp.float8_e4m3fn
+      )
+      a_packed, b_packed = _pack_fp8_passes_along_k(
+          (a0.qvalue, a1.qvalue),
+          (b0.qvalue, b0_shifted),
+          a0,
+          b0,
+          ca_l,
+          ca_r,
+      )
+      return _dot(a_packed, b_packed)
     c0 = _dot(a0, b0)
     c1 = _dot(a1, b0)
     return c0 + c1
 
-  elif multipass_mode == 'two_pass_rhs_fp8':
+  elif multipass_mode in ('two_pass_rhs_fp8', 'two_pass_rhs_fp8_k_packed'):
     a0 = qarray.quantize(lhs, lhs_how)
     b_passes = _residual_decompose(rhs, rhs_how, n_passes=2)
     b0, b1 = b_passes[0], b_passes[1]
+    use_k_pack = multipass_mode == 'two_pass_rhs_fp8_k_packed' or (
+        k_pack_max_dim is not None and 2 * k_dim <= k_pack_max_dim
+    )
+    if use_k_pack:
+      a0_shifted = (a0.qvalue.astype(jnp.float32) * shift_scale).astype(
+          jnp.float8_e4m3fn
+      )
+      a_packed, b_packed = _pack_fp8_passes_along_k(
+          (a0.qvalue, a0_shifted),
+          (b0.qvalue, b1.qvalue),
+          a0,
+          b0,
+          ca_l,
+          ca_r,
+      )
+      return _dot(a_packed, b_packed)
     c0 = _dot(a0, b0)
     c1 = _dot(a0, b1)
     return c0 + c1
 
-  elif multipass_mode in ('three_pass_fp8', 'four_pass_fp8'):
+  elif multipass_mode in (
+      'three_pass_fp8',
+      'three_pass_fp8_k_packed',
+      'four_pass_fp8',
+  ):
     a_passes = _residual_decompose(lhs, lhs_how, n_passes=2)
     a0, a1 = a_passes[0], a_passes[1]
     b_passes = _residual_decompose(rhs, rhs_how, n_passes=2)
     b0, b1 = b_passes[0], b_passes[1]
+    use_k_pack = multipass_mode == 'three_pass_fp8_k_packed' or (
+        multipass_mode == 'three_pass_fp8'
+        and k_pack_max_dim is not None
+        and 3 * k_dim <= k_pack_max_dim
+    )
+    if use_k_pack:
+      a0_shifted = (a0.qvalue.astype(jnp.float32) * shift_scale).astype(
+          jnp.float8_e4m3fn
+      )
+      b0_shifted = (b0.qvalue.astype(jnp.float32) * shift_scale).astype(
+          jnp.float8_e4m3fn
+      )
+      a_packed, b_packed = _pack_fp8_passes_along_k(
+          (a0.qvalue, a0_shifted, a1.qvalue),
+          (b0.qvalue, b1.qvalue, b0_shifted),
+          a0,
+          b0,
+          ca_l,
+          ca_r,
+      )
+      return _dot(a_packed, b_packed)
     c00 = _dot(a0, b0)
     c01 = _dot(a0, b1)
     c10 = _dot(a1, b0)
@@ -567,7 +677,9 @@ def _fp8_multipass_dot_general(
   else:
     raise ValueError(
         "_fp8_multipass_dot_general requires mode 'two_pass_lhs_fp8',"
-        " 'two_pass_rhs_fp8', 'three_pass_fp8', or 'four_pass_fp8'"
+        " 'two_pass_lhs_fp8_k_packed', 'two_pass_rhs_fp8',"
+        " 'two_pass_rhs_fp8_k_packed', 'three_pass_fp8',"
+        " 'three_pass_fp8_k_packed', or 'four_pass_fp8'"
     )
 
 
@@ -1122,6 +1234,7 @@ def multipass_dot_general(
         f" automatically by the mode '{multipass_mode}'."
     )
   tile_size = kwargs.pop('tile_size', None)
+  k_pack_max_dim = kwargs.pop('k_pack_max_dim', None)
 
   if multipass_mode in (
       'four_pass_int4',
@@ -1145,9 +1258,12 @@ def multipass_dot_general(
     )
   elif multipass_mode in (
       'three_pass_fp8',
+      'three_pass_fp8_k_packed',
       'four_pass_fp8',
       'two_pass_lhs_fp8',
+      'two_pass_lhs_fp8_k_packed',
       'two_pass_rhs_fp8',
+      'two_pass_rhs_fp8_k_packed',
   ):
     return _fp8_multipass_dot_general(
         lhs,
@@ -1157,6 +1273,7 @@ def multipass_dot_general(
         precision=precision,
         tile_size=tile_size,
         preferred_element_type=preferred_element_type,
+        k_pack_max_dim=k_pack_max_dim,
     )
   elif multipass_mode in (
       'three_pass_fp8_fp4/fp4_fp4/fp4',
