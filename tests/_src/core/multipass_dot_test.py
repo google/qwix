@@ -3001,6 +3001,91 @@ class MultiPassDotTest(parameterized.TestCase):
         if 'mxfp4' in mode:
           self.assertLess(abs(bias_aligned), 1e-4)
 
+  @parameterized.parameters(64, 80, 85, 128)
+  def test_k_packed_fp8_single_gemm_and_sqnr(self, k_dim):
+    k1, k2 = jax.random.split(self.rng)
+    lhs = jax.random.normal(k1, (16, k_dim), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (k_dim, 16), dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+    ref = lax.dot_general(lhs, rhs, dnums)
+
+    how_l = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=True,
+        qtype=jnp.float8_e4m3fn,
+        tile_size=None,
+    )
+    how_r = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=False,
+        qtype=jnp.float8_e4m3fn,
+        tile_size=None,
+    )
+    res_1p = dot_general.dot_general(
+        qarray.quantize(lhs, how_l), qarray.quantize(rhs, how_r), dnums
+    )
+    snr_1p = compute_snr_db(ref, res_1p)
+
+    for mode, expected_factor in (
+        ('three_pass_fp8_k_packed', 3),
+        ('two_pass_lhs_fp8_k_packed', 2),
+        ('two_pass_rhs_fp8_k_packed', 2),
+    ):
+      fn = lambda a, b, m=mode: multipass_dot.multipass_dot_general(
+          a, b, dnums, multipass_mode=m
+      )
+      gemms, _ = get_graph_gemms_and_casts(fn, lhs, rhs)
+      self.assertLen(gemms, 1)
+      self.assertEqual(gemms[0].invars[0].aval.dtype, jnp.float8_e4m3fn)
+      self.assertEqual(gemms[0].invars[1].aval.dtype, jnp.float8_e4m3fn)
+      self.assertEqual(
+          gemms[0].invars[0].aval.shape[1], expected_factor * k_dim
+      )
+      self.assertEqual(
+          gemms[0].invars[1].aval.shape[0], expected_factor * k_dim
+      )
+
+    res_3p_packed = multipass_dot.multipass_dot_general(
+        lhs, rhs, dnums, multipass_mode='three_pass_fp8_k_packed'
+    )
+    res_2p_lhs_packed = multipass_dot.multipass_dot_general(
+        lhs, rhs, dnums, multipass_mode='two_pass_lhs_fp8_k_packed'
+    )
+    snr_2p_packed = compute_snr_db(ref, res_2p_lhs_packed)
+    snr_3p_packed = compute_snr_db(ref, res_3p_packed)
+    self.assertGreater(snr_2p_packed, snr_1p + 2.0)
+    self.assertGreater(snr_3p_packed, snr_2p_packed + 12.0)
+    # Physical TPU7x FP8 MXU accumulation lowers the packed 3-pass ceiling.
+    min_snr = 42.0 if is_ghostfish() else 45.0
+    self.assertGreater(snr_3p_packed, min_snr)
+
+    # Verify k_pack_max_dim=256 auto-packing threshold on 'three_pass_fp8'
+    fn_auto = lambda a, b: multipass_dot.multipass_dot_general(
+        a, b, dnums, multipass_mode='three_pass_fp8', k_pack_max_dim=256
+    )
+    gemms_auto, _ = get_graph_gemms_and_casts(fn_auto, lhs, rhs)
+    res_auto = fn_auto(lhs, rhs)
+    if 3 * k_dim <= 256:
+      self.assertLen(gemms_auto, 1)
+      np.testing.assert_array_equal(res_auto, res_3p_packed)
+    else:
+      self.assertLen(gemms_auto, 3)
+
+  def test_k_packed_fp8_batched_4d_attention_heads(self):
+    k1, k2 = jax.random.split(self.rng)
+    lhs = jax.random.normal(k1, (2, 4, 32, 80), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (2, 4, 32, 80), dtype=jnp.float32)
+    dnums = (((3,), (3,)), ((0, 1), (0, 1)))
+    ref = lax.dot_general(lhs, rhs, dnums)
+    out = dot_general.dot_general(
+        lhs, rhs, dnums, multipass_mode='three_pass_fp8_k_packed'
+    )
+    self.assertEqual(out.shape, (2, 4, 32, 32))
+    min_snr = 42.0 if is_ghostfish() else 45.0
+    self.assertGreater(compute_snr_db(ref, out), min_snr)
+
 
 if __name__ == '__main__':
   absltest.main()
