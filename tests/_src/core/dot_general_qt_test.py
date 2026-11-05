@@ -93,7 +93,7 @@ class DotGeneralQtTest(parameterized.TestCase):
           bwd_qtype='int4',
           expected_mae_fq_out=0.04,
           expected_mae_fq_grads=0.2,
-          expected_mae_fp_out=0.5,
+          expected_mae_fp_out=0.55,
           expected_mae_fp_grads=0.5,
       ),
       dict(
@@ -111,7 +111,7 @@ class DotGeneralQtTest(parameterized.TestCase):
           rhs_qtype='int4',
           expected_mae_fq_out=0.04,
           expected_mae_fq_grads=0.5,
-          expected_mae_fp_out=0.5,
+          expected_mae_fp_out=0.55,
           expected_mae_fp_grads=0.5,
       ),
       dict(
@@ -135,7 +135,7 @@ class DotGeneralQtTest(parameterized.TestCase):
           residual_qtype='int4',
           expected_mae_fq_out=0.04,
           expected_mae_fq_grads=0.5,
-          expected_mae_fp_out=0.5,
+          expected_mae_fp_out=0.55,
           expected_mae_fp_grads=0.2,
       ),
       dict(

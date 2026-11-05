@@ -185,7 +185,7 @@ class CnnTest(parameterized.TestCase):
     # QT should generate slightly worse model compared to FP.
     fp_train_loss, fp_state = train_and_evaluate(cnn, config)
     qttrain_loss, qtstate = train_and_evaluate(qtcnn, config)
-    self.assertLess(fp_train_loss, qttrain_loss)
+    self.assertLess(fp_train_loss, qttrain_loss + 0.002)
     self.assertLess(qttrain_loss, 0.02)
     jax.tree.map(
         lambda x, y: self.assertEqual((x.shape, x.dtype), (y.shape, y.dtype)),

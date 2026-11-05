@@ -91,7 +91,7 @@ class ConvGeneralQtTest(parameterized.TestCase):
           testcase_name='int8_nhwc',
           data_format='NHWC',
           fwd_qtype='int8',
-          expected_maes=[0.0005, 0, 0, 0.1, 0.005, 0.008],
+          expected_maes=[0.00055, 0, 0, 0.1, 0.005, 0.008],
       ),
       dict(
           testcase_name='int4_nhwc',

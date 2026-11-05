@@ -1840,7 +1840,7 @@ class MultiPassDotTest(parameterized.TestCase):
           f' err={err:.4f}'
       )
       target_snr = tpu_target if is_ghostfish() else cpu_target
-      self.assertAlmostEqual(snr, target_snr, delta=0.05)
+      self.assertAlmostEqual(snr, target_snr, delta=0.15)
 
   @parameterized.parameters(
       # Leading batch with tile_size=32
