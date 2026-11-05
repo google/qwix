@@ -88,11 +88,13 @@ def fused_hadamard_quantize_kernel(
 
   # Kernel body
   def kernel_body(
+      step: pltpu.PipelineStep,
       x_vmem: jax.Ref,
       had_mat_vmem: jax.Ref,
       xq_vmem: jax.Ref,
       s_vmem: jax.Ref,
   ):
+    del step  # Unused.
     # Initialize accumulation buffer
     had_mat = had_mat_vmem[...]
 
@@ -116,6 +118,7 @@ def fused_hadamard_quantize_kernel(
       out_specs=[xq_spec, s_spec],
       core_axis_name=_CORE_AXIS_NAME,
       dimension_semantics=(pltpu.PARALLEL, pltpu.PARALLEL),
+      _explicit_indices=True,
   )(x_hbm, had_mat_hbm, xq_hbm, s_hbm)
 
 

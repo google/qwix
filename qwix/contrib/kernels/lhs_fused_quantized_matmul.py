@@ -111,10 +111,14 @@ def lhs_fused_qmm_kernel(
   assert bm % m_subtile_iter_size == 0
 
   def kernel_body_single_k(
-      x_vmem: jax.Ref, y_vmem: jax.Ref, sy_vmem: jax.Ref, o_vmem: jax.Ref
+      step: pltpu.PipelineStep,
+      x_vmem: jax.Ref,
+      y_vmem: jax.Ref,
+      sy_vmem: jax.Ref,
+      o_vmem: jax.Ref,
   ):
     """Quantize then matmul when bk == k."""
-    nind = pl.program_id(1)
+    nind = step.index[1]
 
     # Quantize
     all_xq, all_sx = dict(), dict()
@@ -150,13 +154,14 @@ def lhs_fused_qmm_kernel(
         o_vmem[data_m_slc, data_n_slc] = res.astype(o_vmem.dtype)
 
   def kernel_body_multiple_k(
+      step: pltpu.PipelineStep,
       x_vmem: jax.Ref,
       y_vmem: jax.Ref,
       sy_vmem: jax.Ref,
       o_vmem: jax.Ref,
   ):
     """Quantize then matmul when bk != k."""
-    nind, kind = pl.program_id(1), pl.program_id(2)
+    nind, kind = step.index[1], step.index[2]
 
     @pl.when(kind == 0)
     def _init():
@@ -192,7 +197,7 @@ def lhs_fused_qmm_kernel(
               res += xys
           accum_vmem[data_m_slc, data_n_slc] = res
 
-    @pl.when((kind > 0) & (kind < pl.num_programs(2) - 1))
+    @pl.when((kind > 0) & (kind < grid[2] - 1))
     def _middle():
       # Hadamard and quantize
       all_xq, all_sx = dict(), dict()
@@ -224,7 +229,7 @@ def lhs_fused_qmm_kernel(
           accum_vmem[data_m_slc, data_n_slc] = res
 
     # Write results to output buffer.
-    @pl.when(kind == pl.num_programs(2) - 1)
+    @pl.when(kind == grid[2] - 1)
     def _write():
       # Quantize
       all_xq, all_sx = dict(), dict()
@@ -265,6 +270,7 @@ def lhs_fused_qmm_kernel(
       out_specs=o_spec,
       core_axis_name=_CORE_AXIS_NAME,
       dimension_semantics=(pltpu.PARALLEL, pltpu.ARBITRARY, pltpu.ARBITRARY),
+      _explicit_indices=True,
   )(x_hbm, y_hbm, sy_hbm, o_hbm)
 
 

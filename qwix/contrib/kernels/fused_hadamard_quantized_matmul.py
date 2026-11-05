@@ -110,6 +110,7 @@ def hadamard_quantize_multiply_kernel(
   assert bm % m_subtile_iter_size == 0
 
   def kernel_body_single_k(
+      step: pltpu.PipelineStep,
       x_vmem: jax.Ref,
       y_vmem: jax.Ref,
       sy_vmem: jax.Ref,
@@ -118,7 +119,7 @@ def hadamard_quantize_multiply_kernel(
       o_vmem: jax.Ref,
   ):
     """Hadamard + quantize then matmul when bk == k."""
-    nind, kind = pl.program_id(1), pl.program_id(2)
+    nind, kind = step.index[1], step.index[2]
     key = key_vmem[...]
     had_mat = had_mat_vmem[...]
 
@@ -170,6 +171,7 @@ def hadamard_quantize_multiply_kernel(
         o_vmem[data_m_slc, data_n_slc] = res.astype(o_vmem.dtype)
 
   def kernel_body_multiple_k(
+      step: pltpu.PipelineStep,
       x_vmem: jax.Ref,
       y_vmem: jax.Ref,
       sy_vmem: jax.Ref,
@@ -178,7 +180,7 @@ def hadamard_quantize_multiply_kernel(
       o_vmem: jax.Ref,
   ):
     """Hadamard + quantize then matmul when bk != k."""
-    nind, kind = pl.program_id(1), pl.program_id(2)
+    nind, kind = step.index[1], step.index[2]
     key = key_vmem[...]
     had_mat = had_mat_vmem[...]
 
@@ -234,7 +236,7 @@ def hadamard_quantize_multiply_kernel(
               res += xys
           accum_vmem[data_m_slc, data_n_slc] = res
 
-    @pl.when((kind > 0) & (kind < pl.num_programs(2) - 1))
+    @pl.when((kind > 0) & (kind < grid[2] - 1))
     def _middle():
       # Hadamard and quantize
       all_xq, all_sx = dict(), dict()
@@ -284,7 +286,7 @@ def hadamard_quantize_multiply_kernel(
           accum_vmem[data_m_slc, data_n_slc] = res
 
     # # Write results to output buffer.
-    @pl.when(kind == pl.num_programs(2) - 1)
+    @pl.when(kind == grid[2] - 1)
     def _write():
       # Hadamard and quantize
       all_xq, all_sx = dict(), dict()
@@ -343,6 +345,7 @@ def hadamard_quantize_multiply_kernel(
       out_specs=o_spec,
       core_axis_name=_CORE_AXIS_NAME,
       dimension_semantics=(pltpu.PARALLEL, pltpu.PARALLEL, pltpu.ARBITRARY),
+      _explicit_indices=True,
   )(x_hbm, y_hbm, sy_hbm, had_mat_hbm, key_hbm, o_hbm)
 
 
