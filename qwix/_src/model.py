@@ -14,6 +14,7 @@
 """Flax integration for QWIX."""
 
 from collections.abc import Collection
+import copyreg
 import functools
 import inspect
 from typing import Any, overload
@@ -189,17 +190,7 @@ def quantize_nnx_model(
   # The class method type(model).__call__ will be invoked when calling the
   # instance of the class so we create a new class with the intercepted __call__
   # and the update the class of the model.
-  new_fields = {
-      "_unquantized_type": model_class,
-      call_method: _apply_interceptors(
-          getattr(model_class, call_method),
-          provider,
-          output_transform=functools.partial(
-              _output_transform_nnx, provider, call_method
-          ),
-      ),
-  }
-  model.__class__ = type(model_class.__name__, (model_class,), new_fields)
+  model.__class__ = _make_quantized_nnx_type(model_class, provider, call_method)
 
   rngs = model_inputs_kwargs.pop("rngs", None)
   if rngs is not None and not isinstance(rngs, nnx.Rngs):
@@ -228,6 +219,59 @@ def quantize_nnx_model(
   return model
 
 
+def _make_quantized_nnx_type(
+    model_class: type[nnx.Module],
+    provider: qconfig.QuantizationProvider,
+    call_method: str,
+) -> type[nnx.Module]:
+  """Returns a new subclass of `model_class` with an intercepted `call_method`.
+
+  The class lives in no module, so it cannot be pickled by name. Instead, its
+  metaclass makes pickle store how to rebuild it, so that quantized models and
+  their graphdefs can be pickled as long as `provider` can. The PTQ and
+  LoRA providers are not picklable yet, so models quantized with them cannot
+  be pickled.
+
+  Args:
+    model_class: The unquantized model class.
+    provider: The quantization provider.
+    call_method: The name of the method to intercept.
+  """
+  new_fields = {
+      "_unquantized_type": model_class,
+      "_qwix_provider": provider,
+      "_qwix_call_method": call_method,
+      call_method: _apply_interceptors(
+          getattr(model_class, call_method),
+          provider,
+          output_transform=functools.partial(
+              _output_transform_nnx, provider, call_method
+          ),
+      ),
+  }
+  metaclass = _picklable_metaclass(type(model_class))
+  return metaclass(model_class.__name__, (model_class,), new_fields)
+
+
+@functools.cache
+def _picklable_metaclass(base: type[Any]) -> Any:
+  """Returns a subclass of `base` whose classes pickle via their constructor."""
+  metaclass = type(f"_Picklable{base.__name__}", (base,), {})
+  copyreg.pickle(metaclass, _reduce_quantized_nnx_type)
+  return metaclass
+
+
+def _reduce_quantized_nnx_type(cls: Any) -> tuple[Any, ...]:
+  # Pickles store this call, so the name, module and positional arguments of
+  # `_make_quantized_nnx_type` are part of the format of every pickled quantized
+  # NNX model. Changing them breaks loading existing pickles.
+  return _make_quantized_nnx_type, (
+      cls._unquantized_type,  # pylint: disable=protected-access
+      cls._qwix_provider,  # pylint: disable=protected-access
+      cls._qwix_call_method,  # pylint: disable=protected-access
+  )
+
+
 def _input_transform(provider: qconfig.QuantizationProvider, args, kwargs):
   model, *args = args
   model, args, kwargs = provider.process_model_inputs(model, args, kwargs)
@@ -237,11 +281,15 @@ def _input_transform(provider: qconfig.QuantizationProvider, args, kwargs):
 def _output_transform_nnx(
     provider: qconfig.QuantizationProvider, method_name: str, output: Any
 ):
+  """Applies the provider's output transform for an NNX model method."""
   # Create a frame with a variable named `self` pointing to the model so that
   # flax_util.get_current_module() can work inside the output transform.
   # We cannot use the model in quantize_nnx_model because users may choose to
   # clone the model.
-  args = inspect.currentframe().f_back.f_locals["args"]  # pytype: disable=attribute-error # pyrefly: ignore
+  frame = inspect.currentframe()
+  assert frame is not None and frame.f_back is not None
+  args = frame.f_back.f_locals["args"]
+  del frame  # Avoid reference cycles.
   self = args[0]  # pylint: disable=unused-variable
   return provider.process_model_output(method_name, output)
 
