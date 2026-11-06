@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import itertools
+import os
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import linen as nn
@@ -24,6 +25,8 @@ from qwix._src import qconfig
 from qwix._src.core import sparsity
 from qwix._src.providers import qt
 from qwix._src.utils import flax_util
+
+os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
 
 
 class QtTest(parameterized.TestCase):
@@ -305,6 +308,75 @@ class QtTest(parameterized.TestCase):
 
     grads = train_step(qt_linear, model_input)
     self.assertIsNotNone(grads)
+
+  def test_explicit_sharding_dot_general_and_einsum(self):
+    """Tests QtProvider.dot_general and einsum with explicit out_sharding."""
+    mesh = jax.make_mesh(
+        (2,),
+        ("x",),
+        axis_types=(jax.sharding.AxisType.Explicit,),
+        devices=jax.devices()[:2],
+    )
+    pspec = jax.sharding.PartitionSpec
+    rule = qt.QtRule(
+        module_path=".*",
+        weight_qtype="int8",
+        act_qtype="int8",
+        bwd_qtype="int8",
+    )
+    provider = qt.QtProvider([rule])
+
+    class DotModule(nn.Module):
+
+      @nn.compact
+      def __call__(self, l, r):
+        return jax.lax.dot_general(
+            l, r, (((1,), (0,)), ((), ())), out_sharding=pspec("x", None)
+        )
+
+    class EinsumModule(nn.Module):
+
+      @nn.compact
+      def __call__(self, l, r):
+        return jnp.einsum("ab,bc->ac", l, r, out_sharding=pspec("x", None))
+
+    qt_dot = qwix_model.quantize_model(DotModule(), provider)
+    qt_einsum = qwix_model.quantize_model(EinsumModule(), provider)
+
+    with jax.set_mesh(mesh):
+      lhs = jax.device_put(
+          jnp.ones((4, 8), dtype=jnp.float32), pspec("x", None)
+      )
+      rhs = jax.device_put(
+          jnp.ones((8, 4), dtype=jnp.float32), pspec(None, None)
+      )
+
+      def fn_dot(l, r):
+        out = qt_dot.apply({}, l, r)
+        self.assertEqual(jax.typeof(out).sharding.spec, pspec("x", None))
+        return jnp.sum(out)
+
+      dlhs, drhs = jax.grad(fn_dot, argnums=(0, 1))(lhs, rhs)
+      self.assertEqual(dlhs.sharding.spec, pspec("x", None))
+      self.assertEqual(drhs.sharding.spec, pspec(None, None))
+
+      def fn_einsum(l, r):
+        out = qt_einsum.apply({}, l, r)
+        self.assertEqual(jax.typeof(out).sharding.spec, pspec("x", None))
+        return jnp.sum(out)
+
+      dlhs_ein, drhs_ein = jax.grad(fn_einsum, argnums=(0, 1))(lhs, rhs)
+      self.assertEqual(dlhs_ein.sharding.spec, pspec("x", None))
+      self.assertEqual(drhs_ein.sharding.spec, pspec(None, None))
+
+      rhs_reduced = jax.device_put(
+          jnp.ones((8, 4), dtype=jnp.float32), pspec(None, None, reduced={"x"})
+      )
+      dlhs_red, drhs_red = jax.grad(fn_dot, argnums=(0, 1))(lhs, rhs_reduced)
+      self.assertEqual(dlhs_red.sharding.spec, pspec("x", None))
+      self.assertEqual(
+          drhs_red.sharding.spec, pspec(None, None, unreduced={"x"})
+      )
 
 
 if __name__ == "__main__":

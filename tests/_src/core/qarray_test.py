@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import Collection, Mapping
 
 from absl.testing import absltest
@@ -22,6 +23,7 @@ from qwix._src.core import numerics
 from qwix._src.core import qarray
 from qwix._src.core import sparsity
 
+os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=2'
 jax.config.update('jax_threefry_partitionable', False)
 
 
@@ -694,6 +696,47 @@ class QArrayTest(parameterized.TestCase):
     self.assertGreater(
         sqnr, 15.0, f'mxint4 SQNR {sqnr:.2f} dB is below expected 15 dB'
     )
+
+  @parameterized.parameters('absmax', 'minmax', 'rms,7', 'fixed,-3,3')
+  def test_explicit_sharding_reduced(self, calibration_method: str):
+    mesh = jax.make_mesh(
+        (2,),
+        ('x',),
+        axis_types=(jax.sharding.AxisType.Explicit,),
+        devices=jax.devices()[:2],
+    )
+    reduced_spec = jax.sharding.PartitionSpec(None, None, reduced={'x'})
+    unreduced_spec = jax.sharding.PartitionSpec(None, None, unreduced={'x'})
+    with jax.set_mesh(mesh):
+      w = jax.device_put(
+          self._make_array(
+              (16, 32), asymmetric=(calibration_method == 'minmax')
+          ),
+          reduced_spec,
+      )
+      for tiled_axes in ({}, {0: 8}):
+        how = qarray.HowToQuantize(
+            qtype=jnp.int8,
+            channelwise_axes=[1],
+            tiled_axes=tiled_axes,
+            calibration_method=calibration_method,
+        )
+        qw = qarray.quantize(w, how)
+        self.assertEqual(qw.qvalue.sharding.spec.reduced, frozenset({'x'}))
+        self.assertEqual(qw.scale.sharding.spec.reduced, frozenset({'x'}))
+        if qw.zero_point is not None:
+          self.assertEqual(
+              qw.zero_point.sharding.spec.reduced, frozenset({'x'})
+          )
+        dq = qarray.dequantize(qw)
+        self.assertEqual(dq.sharding.spec.reduced, frozenset({'x'}))
+
+        calibration = qarray.calibrate(w, how)
+        g_unreduced = jax.device_put(jnp.ones_like(w), unreduced_spec)
+        clipped = qarray.clip_gradient_to_calibration(
+            g_unreduced, w, calibration, how.calibration_method
+        )
+        self.assertEqual(clipped.sharding.spec.unreduced, frozenset({'x'}))
 
 
 if __name__ == '__main__':
