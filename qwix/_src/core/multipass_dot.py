@@ -48,7 +48,7 @@ devices with high int4 FLOPs. For the purposes of emulation we do this on the
 fp8 native path. We support the following int8 emulation modes:
     1. 'four_pass_int4': full emulation for int8 x int8 matmul
     2. 'three_pass_int4': Truncated emulation, dropping the low-order cross
-       nibble (a_l * b_l)
+       nibble (a1 * b1)
     3. 'two_pass_lhs_int4': Two passes for the LHS (emulating int8 x int4)
     4. 'two_pass_rhs_int4': Two passes for the RHS (emulating int4 x int8)
     5. 'four_pass_zero_offset_int4': 4-pass zero-offset int4 (radix-16 split
@@ -281,16 +281,14 @@ def _emulated_signed_int8_dot_general(
   )
 
   match multipass_mode:
-    case 'four_pass_int4' | 'three_pass_int4':
+    case 'four_pass_int4':
       a_h, a_l = _prep_int8_parts(a)
       b_h, b_l = _prep_int8_parts(b)
       p11 = _dot(a_h, b_h)
       p10 = _dot(a_h, b_l)
       p01 = _dot(a_l, b_h)
-      xy_product = p11 * 256.0 + (p10 + p01) * 16.0
-      if multipass_mode == 'four_pass_int4':
-        p00 = _dot(a_l, b_l)
-        xy_product = xy_product + p00
+      p00 = _dot(a_l, b_l)
+      xy_product = p11 * 256.0 + (p10 + p01) * 16.0 + p00
 
       k_size = 1
       for d in lhs_ca:
@@ -330,14 +328,16 @@ def _emulated_signed_int8_dot_general(
       )
       res = xy_product + (sum_a * 8.0)
 
-    case 'four_pass_zero_offset_int4':
+    case 'four_pass_zero_offset_int4' | 'three_pass_int4':
       a0, a1 = _prep_zero_offset_int4_parts(a, n_parts=2)
       b0, b1 = _prep_zero_offset_int4_parts(b, n_parts=2)
       p00 = _dot(a0, b0)
       p01 = _dot(a0, b1)
       p10 = _dot(a1, b0)
-      p11 = _dot(a1, b1)
-      res = p00 * 256.0 + (p01 + p10) * 16.0 + p11
+      res = p00 * 256.0 + (p01 + p10) * 16.0
+      if multipass_mode == 'four_pass_zero_offset_int4':
+        p11 = _dot(a1, b1)
+        res = res + p11
 
     case 'six_pass_zero_offset_int4' | 'eight_pass_zero_offset_int4':
       a0, a1, a2 = _prep_zero_offset_int4_parts(a, n_parts=3)
@@ -377,7 +377,7 @@ def _int8_multipass_dot_general(
   scale_mult = 1.0
   quantize_in_f32 = False
   match multipass_mode:
-    case 'four_pass_int4' | 'three_pass_int4':
+    case 'four_pass_int4':
       lhs_qtype = jnp.int8
       rhs_qtype = jnp.int8
     case 'two_pass_lhs_int4':
@@ -386,7 +386,7 @@ def _int8_multipass_dot_general(
     case 'two_pass_rhs_int4':
       lhs_qtype = jnp.int4
       rhs_qtype = jnp.int8
-    case 'four_pass_zero_offset_int4':
+    case 'four_pass_zero_offset_int4' | 'three_pass_int4':
       lhs_qtype = jnp.int8
       rhs_qtype = jnp.int8
       # Override int8 bound (127.5) so scale = max|x| / 119.0

@@ -1100,8 +1100,8 @@ class MultiPassDotTest(parameterized.TestCase):
         f' err={err_eight_pass:.4f}'
     )
 
-    self.assertAlmostEqual(snr_i8_tri, 34.85, delta=1.5)
-    self.assertAlmostEqual(err_i8_tri, 0.0182, delta=0.005)
+    self.assertAlmostEqual(snr_i8_tri, 33.85, delta=1.5)
+    self.assertAlmostEqual(err_i8_tri, 0.0205, delta=0.005)
 
     self.assertAlmostEqual(snr_i8_asym_l, 17.89, delta=1.5)
     self.assertAlmostEqual(err_i8_asym_l, 0.1275, delta=0.02)
@@ -1728,8 +1728,8 @@ class MultiPassDotTest(parameterized.TestCase):
   @parameterized.parameters(
       ('four_pass_int4', 32, 64, (42.51, 42.57), (41.63, 41.18)),
       ('four_pass_int4', 256, 256, (40.13, 40.11), (39.88, 39.69)),
-      ('three_pass_int4', 32, 64, (38.61, 38.63), (38.49, 38.09)),
-      ('three_pass_int4', 256, 256, (35.92, 35.91), (36.32, 36.17)),
+      ('three_pass_int4', 32, 64, (38.22, 38.22), (38.63, 38.64)),
+      ('three_pass_int4', 256, 256, (35.49, 35.48), (35.50, 35.55)),
       ('two_pass_lhs_int4', 32, 64, (20.71, 20.77), (20.80, 20.87)),
       ('two_pass_rhs_int4', 32, 64, (20.29, 20.47), (20.39, 20.12)),
       (
@@ -1979,14 +1979,14 @@ class MultiPassDotTest(parameterized.TestCase):
         self.assertEqual(int(jnp.max(jnp.abs(res - ref))), 0)
 
   def test_triangular_signed_int8_dot(self):
-    """Verifies triangular int8 matmul drops p00 and achieves >33 dB SQNR."""
+    """Verifies triangular int4 matmul drops p11 and avoids offset bias."""
     k1, k2 = jax.random.split(self.rng)
     shape_l = (32, 64)
     shape_r = (64, 32)
-    a = jax.random.randint(k1, shape_l, minval=-128, maxval=128).astype(
+    a = jax.random.randint(k1, shape_l, minval=-119, maxval=120).astype(
         jnp.int32
     )
-    b = jax.random.randint(k2, shape_r, minval=-128, maxval=128).astype(
+    b = jax.random.randint(k2, shape_r, minval=-119, maxval=120).astype(
         jnp.int32
     )
     ref = jnp.matmul(a, b)
@@ -1999,20 +1999,59 @@ class MultiPassDotTest(parameterized.TestCase):
         compute_dtype=jnp.float8_e4m3fn,
     )
 
-    # Algebraic identity check: ref - res must be exactly p00 = a_l * b_l
-    _, a_l = multipass_dot._prep_int8_parts(a)
-    _, b_l = multipass_dot._prep_int8_parts(b)
-    p00 = jnp.matmul(a_l.astype(jnp.int32), b_l.astype(jnp.int32))
+    # Algebraic identity check: ref - res must be exactly p11 = a1 * b1
+    _, a1 = multipass_dot._prep_zero_offset_int4_parts(a, n_parts=2)
+    _, b1 = multipass_dot._prep_zero_offset_int4_parts(b, n_parts=2)
+    p11 = jnp.matmul(a1.astype(jnp.int32), b1.astype(jnp.int32))
     diff = ref - res
     if is_ghostfish():
-      self.assertGreater(compute_snr_db(diff, p00), 45.0)
-      self.assertLessEqual(int(jnp.max(jnp.abs(diff - p00))), 256)
+      self.assertGreater(compute_snr_db(diff, p11), 45.0)
+      self.assertLessEqual(int(jnp.max(jnp.abs(diff - p11))), 256)
     else:
-      np.testing.assert_array_equal(diff, p00)
+      np.testing.assert_array_equal(diff, p11)
 
     # SQNR must exceed 33.0 dB
     sqnr = compute_snr_db(ref, res)
     self.assertGreater(sqnr, 33.0)
+
+    with self.subTest('zero_preservation'):
+      zeros = jnp.zeros_like(a)
+      for rhs_arg in (jnp.zeros_like(b), b):
+        res_zero = multipass_dot._emulated_signed_int8_dot_general(
+            zeros,
+            rhs_arg,
+            dnums,
+            multipass_mode='three_pass_int4',
+            compute_dtype=jnp.float8_e4m3fn,
+        )
+        np.testing.assert_array_equal(res_zero, 0)
+
+    with self.subTest('hardcoded_set'):
+      lhs = jnp.array(
+          [
+              [119.0, 0.0, 0.0, 16.0, -16.0, 7.0],
+              [0.0, 119.0, 1.0, 0.0, 32.0, -8.0],
+          ],
+          dtype=jnp.float32,
+      )
+      rhs = jnp.array(
+          [
+              [119.0, 0.0],
+              [0.0, 119.0],
+              [16.0, -16.0],
+              [32.0, 16.0],
+              [-32.0, -16.0],
+              [16.0, 0.0],
+          ],
+          dtype=jnp.float32,
+      )
+      ref_hc = jnp.matmul(lhs, rhs, precision=lax.Precision.HIGHEST)
+      res_hc = multipass_dot.multipass_dot_general(
+          lhs, rhs, dnums, multipass_mode='three_pass_int4'
+      )
+      np.testing.assert_allclose(
+          ref_hc - res_hc, jnp.array([[49.0, 0.0], [0.0, 49.0]]), atol=1e-2
+      )
 
   def test_emulated_signed_int8_dot_invalid_mode_raises_error(self):
     """Verifies that an unsupported multipass_mode raises ValueError in emulated int8 dot."""
