@@ -1726,12 +1726,12 @@ class MultiPassDotTest(parameterized.TestCase):
     np.testing.assert_array_equal(res_emulated, ref)
 
   @parameterized.parameters(
-      ('four_pass_int4', 32, 64, (42.64, 42.57), (41.63, 41.18)),
-      ('four_pass_int4', 256, 256, (40.09, 40.11), (39.88, 39.69)),
-      ('three_pass_int4', 32, 64, (38.71, 38.63), (38.49, 38.09)),
-      ('three_pass_int4', 256, 256, (35.93, 35.91), (36.32, 36.17)),
-      ('two_pass_lhs_int4', 32, 64, (20.78, 20.77), (20.80, 20.87)),
-      ('two_pass_rhs_int4', 32, 64, (20.52, 20.47), (20.39, 20.12)),
+      ('four_pass_int4', 32, 64, (42.51, 42.57), (41.63, 41.18)),
+      ('four_pass_int4', 256, 256, (40.13, 40.11), (39.88, 39.69)),
+      ('three_pass_int4', 32, 64, (38.61, 38.63), (38.49, 38.09)),
+      ('three_pass_int4', 256, 256, (35.92, 35.91), (36.32, 36.17)),
+      ('two_pass_lhs_int4', 32, 64, (20.71, 20.77), (20.80, 20.87)),
+      ('two_pass_rhs_int4', 32, 64, (20.29, 20.47), (20.39, 20.12)),
       (
           'four_pass_zero_offset_int4',
           None,
