@@ -518,11 +518,20 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
       raise ValueError('The range must contain 0 and be non-empty.')
     # Fixed calibration is always per-tensor.
     shape = tuple(1 for _ in shape)
+    out_sharding = None
+    if array_reduced := _get_reduced(array):
+      out_sharding = jax.sharding.PartitionSpec(
+          *(None,) * len(shape), reduced=array_reduced
+      )
     if args[0] + args[1] == 0:
-      return {'absmax': jnp.full(shape, args[1], array.dtype)}
+      return {
+          'absmax': jnp.full(
+              shape, args[1], array.dtype, out_sharding=out_sharding
+          )
+      }
     return {
-        'min': jnp.full(shape, args[0], array.dtype),
-        'max': jnp.full(shape, args[1], array.dtype),
+        'min': jnp.full(shape, args[0], array.dtype, out_sharding=out_sharding),
+        'max': jnp.full(shape, args[1], array.dtype, out_sharding=out_sharding),
     }
   else:
     raise ValueError(f'Unsupported calibration: {how.calibration_method}')
@@ -603,6 +612,23 @@ def compute_scale_zero_point(
 USE_RECIPROCAL_FOR_QUANTIZATION = False
 
 
+def _get_reduced(x: jax.Array) -> frozenset[str]:
+  """Returns the reduced mesh axes of x if it is a jax.Array."""
+  if isinstance(x, jax.Array):
+    return jax.typeof(x).sharding.spec.reduced
+  return frozenset()
+
+
+def _align_reduced(x: jax.Array, reduced: frozenset[str]) -> jax.Array:
+  """Aligns x's reduced mesh axes with the given reduced set."""
+  if not isinstance(x, jax.Array):
+    return x
+  spec = jax.typeof(x).sharding.spec
+  if spec.reduced != reduced:
+    return jax.sharding.reshard(x, spec.update(reduced=reduced))
+  return x
+
+
 def quantize_with_scale_zero_point(
     array: jax.Array,
     qtype: jax.typing.DTypeLike,
@@ -632,7 +658,10 @@ def quantize_with_scale_zero_point(
 
   # Ensure that the scale has the same dtype as the fp array, because
   # dequantize() uses the scale dtype to reconstruct the original array.
-  scale = scale.astype(array.dtype)
+  array_reduced = _get_reduced(array)
+  scale = _align_reduced(scale.astype(array.dtype), array_reduced)
+  if zero_point is not None:
+    zero_point = _align_reduced(zero_point, array_reduced)
 
   if USE_RECIPROCAL_FOR_QUANTIZATION:
     inv_scale = jnp.reciprocal(scale)
@@ -795,13 +824,17 @@ def clip_gradient_to_calibration(
         f'Got keys: {list(calibration.keys())}'
     )
 
+  array_reduced = _get_reduced(array)
+  lower = _align_reduced(lower, array_reduced)
+  upper = _align_reduced(upper, array_reduced)
+
   # Apply mask using generic broadcasting to handle tiling automatically.
   # call_with_generic_broadcast handles the (N,) vs (N/TileSize,) shape logic.
   mask_lower = call_with_generic_broadcast(jnp.greater_equal, array, lower)
   mask_upper = call_with_generic_broadcast(jnp.less_equal, array, upper)
-  mask = mask_lower & mask_upper
+  mask = _align_reduced(mask_lower & mask_upper, _get_reduced(g))
 
-  return jnp.where(mask, g, 0.0)
+  return jnp.where(mask, g, jnp.zeros_like(g))
 
 
 def get_accumulator_and_result_type(

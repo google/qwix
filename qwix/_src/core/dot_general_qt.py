@@ -85,6 +85,9 @@ class DotGeneralQtConfig:
   drhs_residual_disable_channelwise_axes: bool = False
 
   sparsity_rule: sparsity.SparsityRule | None = None
+  out_sharding: (
+      jax.sharding.NamedSharding | jax.sharding.PartitionSpec | None
+  ) = None
 
   def tree_flatten(self):
     children = (
@@ -332,9 +335,12 @@ def dot_general_qt_fwd(
         dimension_numbers,
         multipass_mode=config.multipass_mode,
         tile_size=config.tile_size,
+        out_sharding=config.out_sharding,
     )
   else:
-    out = dot_general.dot_general(lhs, rhs, dimension_numbers)
+    out = dot_general.dot_general(
+        lhs, rhs, dimension_numbers, out_sharding=config.out_sharding
+    )
   return out, residuals
 
 
@@ -359,6 +365,21 @@ def dot_general_qt_bwd(
     bwd_dnums, transpose_axes = _update_dimension_numbers_for_backward(
         fwd_dimension_numbers, (lhs.ndim, rhs.ndim), for_dlhs=for_dlhs
     )
+    primal = lhs if for_dlhs else rhs
+    x_sharding = jax.typeof(
+        primal.qvalue if isinstance(primal, qarray.QArray) else primal
+    ).sharding
+    bwd_out_sharding = None
+    if jax.sharding.AxisType.Explicit in x_sharding.mesh.axis_types:
+      x_partitions = x_sharding.spec.partitions
+      bwd_out_sharding = jax.sharding.PartitionSpec(
+          *(
+              x_partitions[i] if i < len(x_partitions) else None
+              for i in np.argsort(transpose_axes)
+          ),
+          unreduced=x_sharding.spec.reduced,
+          reduced=x_sharding.spec.unreduced,
+      )
     if for_dlhs:
       g_qtype = config.dlhs_grad_qtype
       g_tile_size = config.dlhs_tile_size
@@ -390,6 +411,7 @@ def dot_general_qt_bwd(
           dimension_numbers=bwd_dnums,
           multipass_mode=multipass_mode,
           tile_size=g_tile_size,
+          out_sharding=bwd_out_sharding,
       )
       return jax.lax.transpose(grad_res, transpose_axes)
 
@@ -436,7 +458,9 @@ def dot_general_qt_bwd(
         y_how = dataclasses.replace(y_how, channelwise_axes=[])
       y = qarray.quantize(y, y_how)
 
-    grad_res = dot_general.dot_general(g, y, bwd_dnums)
+    grad_res = dot_general.dot_general(
+        g, y, bwd_dnums, out_sharding=bwd_out_sharding
+    )
     return jax.lax.transpose(grad_res, transpose_axes)
 
   dlhs = _compute_gradient_for_operand(g, for_dlhs=True)
@@ -479,8 +503,14 @@ def dot_general_qt(
     rhs: jax.Array,
     dimension_numbers: jax.lax.DotDimensionNumbers,
     config: DotGeneralQtConfig,
+    *,
+    out_sharding: (
+        jax.sharding.NamedSharding | jax.sharding.PartitionSpec | None
+    ) = None,
 ) -> jax.Array:
   """Quantized dot_general with backpropagation support."""
+  if out_sharding is not None:
+    config = dataclasses.replace(config, out_sharding=out_sharding)
   lhs_calibration = None
   rhs_calibration = None
 
@@ -495,7 +525,7 @@ def dot_general_qt(
     )
     if config.lhs_disable_channelwise_axes:
       lhs_how = dataclasses.replace(lhs_how, channelwise_axes=[])
-    lhs_calibration = qarray.calibrate(lhs, lhs_how)
+    lhs_calibration = qarray.calibrate(jax.lax.stop_gradient(lhs), lhs_how)
     if config.lhs_collect_quant_stat:
       lhs_calibration = config.lhs_collect_quant_stat(lhs_calibration)
 
@@ -514,7 +544,7 @@ def dot_general_qt(
     )
     if config.rhs_disable_channelwise_axes:
       rhs_how = dataclasses.replace(rhs_how, channelwise_axes=[])
-    rhs_calibration = qarray.calibrate(rhs, rhs_how)
+    rhs_calibration = qarray.calibrate(jax.lax.stop_gradient(rhs), rhs_how)
     if config.rhs_collect_quant_stat:
       rhs_calibration = config.rhs_collect_quant_stat(rhs_calibration)
   return dot_general_qt_fwd_bwd(
