@@ -17,6 +17,7 @@ from absl.testing import parameterized
 import jax
 from jax import numpy as jnp
 import metrax
+from qwix._src import interception
 from qwix._src.core import dot_general
 from qwix._src.core import dot_general_qt
 from qwix._src.core import qarray
@@ -347,6 +348,184 @@ class DotGeneralQtTest(parameterized.TestCase):
         ],
     )
 
+  @parameterized.named_parameters(
+      dict(testcase_name='lhs', quantize_lhs=True),
+      dict(testcase_name='rhs', quantize_lhs=False),
+  )
+  def test_caller_quantized_operand(self, quantize_lhs):
+    """A caller-quantized QArray with a None calibration is used as is."""
+    dnum = (((1,), (0,)), ((), ()))
+    config = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='int8',
+        rhs_qtype='int8',
+        dlhs_grad_qtype='int8',
+        drhs_grad_qtype='int8',
+    )
+    x = jax.random.normal(jax.random.key(0), (16, 256), jnp.bfloat16)
+    w = jax.random.normal(jax.random.key(1), (256, 64), jnp.bfloat16)
+    g = jax.random.normal(jax.random.key(2), (16, 64), jnp.bfloat16)
+    calibrate = lambda a, for_lhs: dot_general_qt.calibrate_operand(
+        a, for_lhs=for_lhs, dimension_numbers=dnum, ndims=(2, 2), config=config
+    )
+
+    def fwd_bwd(lhs, rhs):
+      out, res = dot_general_qt.dot_general_qt_fwd(
+          lhs, rhs, calibrate(lhs, True), calibrate(rhs, False), dnum, config
+      )
+      dlhs, drhs = dot_general_qt.dot_general_qt_bwd(res, g)
+      return out, dlhs, drhs
+
+    if quantize_lhs:
+      args = (qarray.quantize_api(x, 'int8', channelwise_axes=(0,)), w)
+    else:
+      args = (x, qarray.quantize_api(w, 'int8', channelwise_axes=(1,)))
+    for expected, actual in zip(fwd_bwd(x, w), fwd_bwd(*args)):
+      self.assertTrue(jnp.array_equal(expected, actual))
+
+    # Also verify that `DotGeneralQtResiduals` keeps `dimension_numbers` static
+    # when wrapped in a `custom_vjp` with `optimize_remat=True` under
+    # `jax.checkpoint` (regression test for traced axis indices).
+    @jax.custom_vjp
+    def wrapped(lhs, rhs):
+      out, _ = wrapped_fwd(lhs, rhs)
+      return out
+
+    def wrapped_fwd(lhs, rhs):
+      q_lhs = qarray.quantize_api(lhs, 'int8', channelwise_axes=(0,))
+      return dot_general_qt.dot_general_qt_fwd(
+          q_lhs, rhs, None, calibrate(rhs, False), dnum, config
+      )
+
+    def wrapped_bwd(res, dout):
+      return dot_general_qt.dot_general_qt_bwd(res, dout)
+
+    wrapped.defvjp(wrapped_fwd, wrapped_bwd, optimize_remat=True)
+
+    def run_remat(a, b):
+      _, vjp_fn = jax.vjp(jax.checkpoint(wrapped), a, b)
+      return vjp_fn(g)
+
+    remat_grads = jax.jit(run_remat)(x, w)
+    _, expected_dlhs, expected_drhs = jax.jit(fwd_bwd)(x, w)
+    self.assertTrue(jnp.array_equal(expected_dlhs, remat_grads[0]))
+    self.assertTrue(jnp.array_equal(expected_drhs, remat_grads[1]))
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='lhs_calibration',
+          quantize_lhs=True,
+          keep_calibration=True,
+          error='lhs_calibration must be None',
+      ),
+      dict(
+          testcase_name='rhs_calibration',
+          quantize_lhs=False,
+          keep_calibration=True,
+          error='rhs_calibration must be None',
+      ),
+      dict(
+          testcase_name='use_original_residuals',
+          quantize_lhs=True,
+          config_kwargs=dict(use_original_residuals=True),
+          error='requires the unquantized lhs',
+      ),
+      dict(
+          testcase_name='multipass',
+          quantize_lhs=False,
+          config_kwargs=dict(drhs_multipass_mode='three_pass_fp8'),
+          error='requires the unquantized rhs',
+      ),
+      dict(
+          testcase_name='block_scales',
+          quantize_lhs=True,
+          tiled_axes={1: 128},
+          error='requires the unquantized lhs',
+      ),
+  )
+  def test_caller_quantized_operand_rejects_incompatible_config(
+      self,
+      quantize_lhs,
+      error,
+      keep_calibration=False,
+      config_kwargs=None,
+      tiled_axes=None,
+  ):
+    """A caller-quantized QArray that cannot be used as is raises."""
+    dnum = (((1,), (0,)), ((), ()))
+    config = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='int8', rhs_qtype='int8', **(config_kwargs or {})
+    )
+    lhs = jnp.ones((16, 256), jnp.bfloat16)
+    rhs = jnp.ones((256, 64), jnp.bfloat16)
+    calibrate = lambda a, for_lhs: dot_general_qt.calibrate_operand(
+        a, for_lhs=for_lhs, dimension_numbers=dnum, ndims=(2, 2), config=config
+    )
+    lhs_calibration = calibrate(lhs, True)
+    rhs_calibration = calibrate(rhs, False)
+    if quantize_lhs:
+      lhs = qarray.quantize_api(
+          lhs, 'int8', channelwise_axes=(0,), tiled_axes=tiled_axes
+      )
+      lhs_calibration = lhs_calibration if keep_calibration else None
+    else:
+      rhs = qarray.quantize_api(
+          rhs, 'int8', channelwise_axes=(1,), tiled_axes=tiled_axes
+      )
+      rhs_calibration = rhs_calibration if keep_calibration else None
+
+    with self.assertRaisesRegex(ValueError, error):
+      dot_general_qt.dot_general_qt_fwd(
+          lhs, rhs, lhs_calibration, rhs_calibration, dnum, config
+      )
+
+  def test_fwd_bwd_not_reintercepted(self):
+    """Forward and backward contractions are not re-intercepted."""
+
+    def fail(*args, **kwargs):
+      del args, kwargs
+      raise AssertionError('Internal dot_general was intercepted.')
+
+    interceptor = lambda: interception.Interceptor(
+        mapping={'jax.lax.dot_general': fail}, id=1
+    )
+    dnum = (((1,), (0,)), ((), ()))
+    config = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype='int8',
+        rhs_qtype='int8',
+        dlhs_grad_qtype='int8',
+        drhs_grad_qtype='int8',
+    )
+    x = jax.random.normal(jax.random.key(0), (16, 256), jnp.bfloat16)
+    w = jax.random.normal(jax.random.key(1), (256, 64), jnp.bfloat16)
+    g = jax.random.normal(jax.random.key(2), (16, 64), jnp.bfloat16)
+
+    def run_inside_interception(lhs, rhs):
+      out1, vjp_fn = jax.vjp(
+          lambda a, b: dot_general_qt.dot_general_qt(a, b, dnum, config),
+          lhs,
+          rhs,
+      )
+      dlhs1, drhs1 = vjp_fn(g)
+      q_lhs = qarray.quantize_api(lhs, 'int8', channelwise_axes=(0,))
+      rhs_cal = dot_general_qt.calibrate_operand(
+          rhs,
+          for_lhs=False,
+          dimension_numbers=dnum,
+          ndims=(2, 2),
+          config=config,
+      )
+      out2, res = dot_general_qt.dot_general_qt_fwd(
+          q_lhs, rhs, None, rhs_cal, dnum, config
+      )
+      dlhs2, drhs2 = dot_general_qt.dot_general_qt_bwd(res, g)
+      return (out1, dlhs1, drhs1), (out2, dlhs2, drhs2)
+
+    via_vjp, via_fwd_bwd = interception.wrap_func_intercepted(
+        run_inside_interception, interceptor, disable_jit=True
+    )(x, w)
+    for expected, actual in zip(via_vjp, via_fwd_bwd):
+      self.assertTrue(jnp.array_equal(expected, actual))
+
   def test_gradient_clipping_integration(self):
     """Verifies that calibration scaling triggers gradient masking (STE)."""
     lhs = jnp.array([[-2.0, 0.0, 2.0]], dtype=jnp.float32)
@@ -490,10 +669,10 @@ class DotGeneralQtTest(parameterized.TestCase):
     _, res = dot_general_qt.dot_general_qt_fwd_bwd.fwd(
         lhs, rhs, lhs_cal, rhs_cal, dnums, config
     )
-    self.assertNotIsInstance(res[0], qarray.QArray)
-    self.assertNotIsInstance(res[1], qarray.QArray)
-    self.assertIsNotNone(res[0])
-    self.assertIsNotNone(res[1])
+    self.assertNotIsInstance(res.lhs_in, qarray.QArray)
+    self.assertNotIsInstance(res.rhs_in, qarray.QArray)
+    self.assertIsNotNone(res.lhs_in)
+    self.assertIsNotNone(res.rhs_in)
 
   def test_unquantized_residuals_freed_when_unused(self):
     """Verifies unquantized inputs are not stored when not needed."""
@@ -528,11 +707,11 @@ class DotGeneralQtTest(parameterized.TestCase):
         lhs, rhs, lhs_cal, rhs_cal, dnums, config
     )
     # lhs_in and rhs_in should be None to prevent memory pinning
-    self.assertIsNone(res[0])
-    self.assertIsNone(res[1])
+    self.assertIsNone(res.lhs_in)
+    self.assertIsNone(res.rhs_in)
     # Quantized residuals should be retained
-    self.assertIsInstance(res[2], qarray.QArray)
-    self.assertIsInstance(res[3], qarray.QArray)
+    self.assertIsInstance(res.lhs, qarray.QArray)
+    self.assertIsInstance(res.rhs, qarray.QArray)
 
     # Verify end-to-end grad computation works
     def f(l, r):
@@ -577,9 +756,9 @@ class DotGeneralQtTest(parameterized.TestCase):
         lhs, rhs, lhs_cal, rhs_cal, dnums, config
     )
     # lhs_in retained because absmax,0.5 requires clipping against bounds
-    self.assertIsNotNone(res[0])
+    self.assertIsNotNone(res.lhs_in)
     # rhs_in is None because standard absmax does not require clipping
-    self.assertIsNone(res[1])
+    self.assertIsNone(res.rhs_in)
 
     def f(l, r):
       return dot_general_qt.dot_general_qt(l, r, dnums, config=config).sum()
@@ -622,8 +801,8 @@ class DotGeneralQtTest(parameterized.TestCase):
     _, res = dot_general_qt.dot_general_qt_fwd_bwd.fwd(
         lhs, rhs, lhs_cal, rhs_cal, dnums, config
     )
-    self.assertIsNotNone(res[0])
-    self.assertIsNotNone(res[1])
+    self.assertIsNotNone(res.lhs_in)
+    self.assertIsNotNone(res.rhs_in)
 
   def test_mxfp8_sqnr(self):
     """Verifies that mxfp8 and mxfp8_16 dot_general_qt achieve expected SQNR.
