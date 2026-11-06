@@ -308,6 +308,11 @@ class QuantizedOp:
     obj = sys.modules[name_parts[0]]
     for attr in name_parts[1:]:
       obj = getattr(obj, attr)
+    if isinstance(
+        obj,
+        jax._src.lib._jax.PjitFunction,  # pylint: disable=protected-access
+    ):
+      obj = obj._fun  # pylint: disable=protected-access  # pyrefly: ignore[missing-attribute]
     return obj(*args, **kwargs)  # pyrefly: ignore[not-callable]
 
   def _fake_quant_inputs(
