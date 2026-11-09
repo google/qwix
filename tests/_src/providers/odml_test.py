@@ -1320,6 +1320,69 @@ class OdmlTest(parameterized.TestCase):
     self.assertIn('quant.fake_quant', str(jaxpr))
     self.assertNotIn('nan', str(jaxpr))
 
+  def test_scanned_dense_init_and_apply(self):
+    """Tests ODML interception on scanned layers using truncated normal init."""
+    prev_accurate_erf_inv = jax.config.jax_accurate_erf_inv  # pyrefly: ignore[missing-attribute]
+    jax.config.update('jax_accurate_erf_inv', True)
+    self.addCleanup(
+        jax.config.update, 'jax_accurate_erf_inv', prev_accurate_erf_inv
+    )
+
+    class StepCell(nn.Module):
+
+      @nn.compact
+      def __call__(self, carry, x):
+        y = nn.Dense(4)(x)
+        return carry, y
+
+    class ScannedModel(nn.Module):
+
+      @nn.compact
+      def __call__(self, xs):
+        variable_broadcast = ['params']
+        variable_carry = []
+        if self.is_mutable_collection('quant_stats'):
+          variable_carry.append('quant_stats')
+        else:
+          variable_broadcast.append('quant_stats')
+        scanned = nn.scan(
+            StepCell,
+            variable_broadcast=variable_broadcast,
+            variable_carry=variable_carry,
+            split_rngs={'params': False},
+            in_axes=1,
+            out_axes=1,
+        )()
+        _, ys = scanned(None, xs)
+        return ys
+
+    rules = [
+        qconfig.QuantizationRule(
+            module_path='.*',
+            weight_qtype=jnp.int8,
+            act_qtype=jnp.int8,
+        )
+    ]
+    xs = jnp.ones((2, 3, 4), dtype=jnp.float32)
+    qat_model = qwix_model.quantize_model(
+        ScannedModel(), odml.OdmlQatProvider(rules, strict=False)
+    )
+    variables = qat_model.init(jax.random.key(0), xs)
+    qat_res, new_vars = qat_model.apply(variables, xs, mutable=True)
+    self.assertEqual(qat_res.shape, (2, 3, 4))
+    variables = {**variables, **new_vars}
+    conversion_model = qwix_model.quantize_model(
+        ScannedModel(),
+        odml.OdmlConversionProvider(
+            rules,
+            variables['params'],
+            variables.get('quant_stats', {}),
+            strict=False,
+        ),
+    )
+    conversion_res = conversion_model.apply(variables, xs)
+    self.assertTrue(jnp.allclose(qat_res, conversion_res))
+
 
 if __name__ == '__main__':
   absltest.main()
