@@ -17,6 +17,7 @@ from jax import numpy as jnp
 from qwix._src import model as qwix_model
 from qwix._src import qconfig
 from qwix._src.core import qarray
+from qwix._src.core import sparsity
 from qwix._src.providers import boxed_param
 from qwix._src.providers import lora
 from qwix._src.providers import ptq
@@ -132,6 +133,44 @@ class QconfigTest(absltest.TestCase):
         issubclass(lora.LoraProvider, boxed_param.BoxedParamProvider)
     )
     self.assertFalse(issubclass(lora.LoraProvider, ptq.PtqProvider))
+
+  def test_weight_sparsity_rule_validation(self):
+    with self.assertRaisesRegex(
+        ValueError, "weight_sparsity_prune=True requires weight_sparsity"
+    ):
+      qconfig.QuantizationProvider(
+          [qconfig.QuantizationRule(weight_sparsity_prune=True)]
+      )
+    with self.assertRaisesRegex(
+        ValueError, "weight_sparsity.dimension must be None"
+    ):
+      qconfig.QuantizationProvider([
+          qconfig.QuantizationRule(
+              weight_sparsity=sparsity.StructuredSparsity(1, 4, dimension=-1)
+          )
+      ])
+    rule = qconfig.QuantizationRule(
+        weight_qtype="int8",
+        weight_sparsity=sparsity.StructuredSparsity(1, 4),
+        weight_sparsity_prune=True,
+    )
+    lora_rule = lora.LoraRule(
+        rank=4,
+        alpha=8.0,
+        weight_qtype="int8",
+        weight_sparsity=sparsity.StructuredSparsity(1, 4),
+    )
+    for provider_cls, rules in (
+        (qconfig.QuantizationProvider, [rule]),
+        (ptq.PtqProvider, [rule]),
+        (lora.LoraProvider, [lora_rule]),
+    ):
+      with self.subTest(provider=provider_cls.__name__):
+        with self.assertRaisesRegex(
+            NotImplementedError,
+            f"{provider_cls.__name__} does not support weight_sparsity",
+        ):
+          provider_cls(rules)
 
 
 if __name__ == "__main__":
