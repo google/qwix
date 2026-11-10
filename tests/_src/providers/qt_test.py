@@ -306,6 +306,16 @@ class QtTest(parameterized.TestCase):
     grads = train_step(qt_linear, model_input)
     self.assertIsNotNone(grads)
 
+  def test_weight_sparsity_not_implemented(self):
+    rule = qconfig.QuantizationRule(
+        weight_qtype=jnp.float8_e4m3fn,
+        weight_sparsity=sparsity.StructuredSparsity(1, 4),
+    )
+    with self.assertRaisesRegex(
+        NotImplementedError, "QtProvider does not support weight_sparsity"
+    ):
+      qt.QtProvider([rule])
+
 
 if __name__ == "__main__":
   absltest.main()
