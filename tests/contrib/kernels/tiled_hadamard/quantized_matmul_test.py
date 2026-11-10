@@ -5,7 +5,7 @@ from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
 import numpy as np
-from qwix.contrib.kernels import fused_hadamard_quantized_matmul as had_kernel
+from qwix.contrib.kernels.tiled_hadamard import quantized_matmul as had_kernel
 
 
 def _absmax_quantize(
