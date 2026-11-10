@@ -49,7 +49,7 @@ def _round_to_bfloat16(v: np.ndarray) -> np.ndarray:
   return np.ldexp(np.round(mantissa * 256.0), exponent - 8)
 
 
-class HadamardOpTest(parameterized.TestCase):
+class OpTest(parameterized.TestCase):
   """Functional tests executed against both `"xla"` and `"pallas"`."""
 
   def _require_backend(self, implementation: op.Implementation) -> None:
