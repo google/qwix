@@ -378,6 +378,74 @@ class QtTest(parameterized.TestCase):
           drhs_red.sharding.spec, pspec(None, None, unreduced={"x"})
       )
 
+  @parameterized.named_parameters(
+      dict(testcase_name="unquantized_none", rules=[], reduction_order=None),
+      dict(
+          testcase_name="unquantized_linear",
+          rules=[],
+          reduction_order="linear",
+      ),
+      dict(
+          testcase_name="quantized_none",
+          rules=[qt.QtRule(weight_qtype=jnp.int8)],
+          reduction_order=None,
+      ),
+  )
+  def test_dot_general_with_reduction_order(self, rules, reduction_order):
+    class Module(nn.Module):
+      provider: qt.QtProvider
+
+      @nn.compact
+      def __call__(self, x, y):
+        dnums = (((1,), (0,)), ((), ()))
+        return self.provider.dot_general(
+            x, y, dnums, reduction_order=reduction_order
+        )
+
+    provider = qt.QtProvider(rules)
+    mod = Module(provider)
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((3, 4), dtype=jnp.float32)
+    res = mod.apply({}, x, y)
+    self.assertEqual(res.shape, (2, 4))
+
+  def test_quantized_dot_general_rejects_reduction_order(self):
+    class Module(nn.Module):
+      provider: qt.QtProvider
+
+      @nn.compact
+      def __call__(self, x, y):
+        dnums = (((1,), (0,)), ((), ()))
+        return self.provider.dot_general(x, y, dnums, reduction_order="linear")
+
+    provider = qt.QtProvider([qt.QtRule(weight_qtype=jnp.int8)])
+    mod = Module(provider)
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((3, 4), dtype=jnp.float32)
+    with self.assertRaisesRegex(
+        NotImplementedError, "reduction_order is not supported"
+    ):
+      mod.apply({}, x, y)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="dot", op=jnp.dot),
+      dict(testcase_name="matmul", op=jnp.matmul),
+  )
+  def test_quantized_jnp_dot_and_matmul(self, op):
+    class OpModule(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, y):
+        return op(x, y)
+
+    qt_mod = qwix_model.quantize_model(
+        OpModule(), qt.QtProvider([qt.QtRule(weight_qtype=jnp.int8)])
+    )
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((3, 4), dtype=jnp.float32)
+    res = qt_mod.apply({}, x, y)
+    self.assertEqual(res.shape, (2, 4))
+
 
 if __name__ == "__main__":
   absltest.main()
