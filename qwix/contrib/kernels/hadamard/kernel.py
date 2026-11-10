@@ -398,7 +398,8 @@ def _hadamard_single_panel_kernel(
     (out_hbm,) = refs
     out_spec = pl.BlockSpec((bm, k), lambda a: (a, 0))
 
-    def body_unquantized(x_vmem, h_vmem, *vmem_refs):
+    def body_unquantized(step: pltpu.PipelineStep, x_vmem, h_vmem, *vmem_refs):
+      del step  # Unused.
       s_vmem, (o_vmem,) = _split_signs(vmem_refs, has_signs)
       o_vmem[...] = rotate(x_vmem, h_vmem[...], s_vmem)
 
@@ -409,13 +410,15 @@ def _hadamard_single_panel_kernel(
         out_specs=out_spec,
         core_axis_name=_CORE_AXIS_NAME,
         dimension_semantics=(pltpu.PARALLEL,),
+        _explicit_indices=True,
     )(*in_refs, out_hbm)
   else:
     xq_hbm, sx_hbm = refs
     xq_spec = pl.BlockSpec((bm, k), lambda a: (a, 0))
     sx_spec = pl.BlockSpec((bm, SX_LANES), lambda a: (a, 0))
 
-    def body_quantized(x_vmem, h_vmem, *vmem_refs):
+    def body_quantized(step: pltpu.PipelineStep, x_vmem, h_vmem, *vmem_refs):
+      del step  # Unused.
       s_vmem, (xq_vmem, sx_vmem) = _split_signs(vmem_refs, has_signs)
       y = rotate(x_vmem, h_vmem[...], s_vmem)
       xq_t, sx_f32 = reference.quantize_rows_2d(y, qdtype)
@@ -429,6 +432,7 @@ def _hadamard_single_panel_kernel(
         out_specs=[xq_spec, sx_spec],
         core_axis_name=_CORE_AXIS_NAME,
         dimension_semantics=(pltpu.PARALLEL,),
+        _explicit_indices=True,
     )(*in_refs, xq_hbm, sx_hbm)
 
 
@@ -466,7 +470,8 @@ def _hadamard_multi_panel_kernel(
     (out_hbm,) = refs
     out_spec = pl.BlockSpec((bm, bn), lambda a, b: (a, b))
 
-    def body_unquantized(x_vmem, h_vmem, *vmem_refs):
+    def body_unquantized(step: pltpu.PipelineStep, x_vmem, h_vmem, *vmem_refs):
+      del step  # Unused.
       s_vmem, (o_vmem,) = _split_signs(vmem_refs, has_signs)
       o_vmem[...] = rotate(x_vmem, h_vmem[...], s_vmem)
 
@@ -477,15 +482,16 @@ def _hadamard_multi_panel_kernel(
         out_specs=out_spec,
         core_axis_name=_CORE_AXIS_NAME,
         dimension_semantics=(pltpu.PARALLEL, pltpu.PARALLEL),
+        _explicit_indices=True,
     )(*in_refs, out_hbm)
   else:
     xq_hbm, sx_hbm, rot_cache = refs
     xq_spec = pl.BlockSpec((bm, k), lambda a, b: (a, 0))
     sx_spec = pl.BlockSpec((bm, SX_LANES), lambda a, b: (a, 0))
 
-    def body_quantized(x_vmem, h_vmem, *vmem_refs):
+    def body_quantized(step: pltpu.PipelineStep, x_vmem, h_vmem, *vmem_refs):
       s_vmem, (xq_vmem, sx_vmem) = _split_signs(vmem_refs, has_signs)
-      nind = pl.program_id(1)
+      nind = step.index[1]
       rot_cache[nind] = rotate(x_vmem, h_vmem[...], s_vmem)
 
       @pl.when(nind == grid_n - 1)
@@ -512,6 +518,7 @@ def _hadamard_multi_panel_kernel(
         out_specs=[xq_spec, sx_spec],
         core_axis_name=_CORE_AXIS_NAME,
         dimension_semantics=(pltpu.PARALLEL, pltpu.ARBITRARY),
+        _explicit_indices=True,
     )(*in_refs, xq_hbm, sx_hbm)
 
 
@@ -563,7 +570,8 @@ def _hadamard_block_kernel(
     (out_hbm,) = refs
     out_spec = pl.BlockSpec((bm, k), lambda a: (a, 0))
 
-    def body_unquantized(x_vmem, h_vmem, *vmem_refs):
+    def body_unquantized(step: pltpu.PipelineStep, x_vmem, h_vmem, *vmem_refs):
+      del step  # Unused.
       s_vmem, (o_vmem,) = _split_signs(vmem_refs, has_signs)
       _rotate_blocks_into(x_vmem, h_vmem, s_vmem, o_vmem)
 
@@ -574,13 +582,15 @@ def _hadamard_block_kernel(
         out_specs=out_spec,
         core_axis_name=_CORE_AXIS_NAME,
         dimension_semantics=(pltpu.PARALLEL,),
+        _explicit_indices=True,
     )(*in_refs, out_hbm)
   else:
     xq_hbm, sx_hbm, y_scratch = refs
     xq_spec = pl.BlockSpec((bm, k), lambda a: (a, 0))
     sx_spec = pl.BlockSpec((bm, SX_LANES), lambda a: (a, 0))
 
-    def body_quantized(x_vmem, h_vmem, *vmem_refs):
+    def body_quantized(step: pltpu.PipelineStep, x_vmem, h_vmem, *vmem_refs):
+      del step  # Unused.
       s_vmem, (xq_vmem, sx_vmem) = _split_signs(vmem_refs, has_signs)
       _rotate_blocks_into(x_vmem, h_vmem, s_vmem, y_scratch)
       xq_t, sx_f32 = reference.quantize_rows_2d(y_scratch[...], qdtype)
@@ -594,6 +604,7 @@ def _hadamard_block_kernel(
         out_specs=[xq_spec, sx_spec],
         core_axis_name=_CORE_AXIS_NAME,
         dimension_semantics=(pltpu.PARALLEL,),
+        _explicit_indices=True,
     )(*in_refs, xq_hbm, sx_hbm)
 
 
@@ -700,7 +711,8 @@ def _hadamard_two_stage_kernel(
     out_hbm, acc_scratch = refs
     out_spec = pl.BlockSpec((bm, k), lambda a: (a, 0))
 
-    def body_unquantized(x_vmem, h_vmem, *vmem_refs):
+    def body_unquantized(step: pltpu.PipelineStep, x_vmem, h_vmem, *vmem_refs):
+      del step  # Unused.
       s_vmem, (o_vmem,) = _split_signs(vmem_refs, has_signs)
       o_vmem[...] = _rotate_tile(x_vmem, h_vmem, s_vmem, acc_scratch)
 
@@ -711,13 +723,15 @@ def _hadamard_two_stage_kernel(
         out_specs=out_spec,
         core_axis_name=_CORE_AXIS_NAME,
         dimension_semantics=(pltpu.PARALLEL,),
+        _explicit_indices=True,
     )(*in_refs, out_hbm)
   else:
     xq_hbm, sx_hbm, acc_scratch = refs
     xq_spec = pl.BlockSpec((bm, k), lambda a: (a, 0))
     sx_spec = pl.BlockSpec((bm, SX_LANES), lambda a: (a, 0))
 
-    def body_quantized(x_vmem, h_vmem, *vmem_refs):
+    def body_quantized(step: pltpu.PipelineStep, x_vmem, h_vmem, *vmem_refs):
+      del step  # Unused.
       s_vmem, (xq_vmem, sx_vmem) = _split_signs(vmem_refs, has_signs)
       y = _rotate_tile(x_vmem, h_vmem, s_vmem, acc_scratch)
       xq_t, sx_f32 = reference.quantize_rows_2d(y, qdtype)
@@ -731,6 +745,7 @@ def _hadamard_two_stage_kernel(
         out_specs=[xq_spec, sx_spec],
         core_axis_name=_CORE_AXIS_NAME,
         dimension_semantics=(pltpu.PARALLEL,),
+        _explicit_indices=True,
     )(*in_refs, xq_hbm, sx_hbm)
 
 

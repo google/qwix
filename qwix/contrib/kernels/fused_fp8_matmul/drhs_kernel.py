@@ -236,15 +236,16 @@ def _drhs_kernel(
   g_spec = pl.BlockSpec((bm, bn), lambda ki, ni, mi: (mi, ni))
   o_spec = pl.BlockSpec((bk, bn), lambda ki, ni, mi: (ki, ni))
 
-  def body_single_m(xq_vmem, sx_vmem, g_vmem, o_vmem):
+  def body_single_m(step: pltpu.PipelineStep, xq_vmem, sx_vmem, g_vmem, o_vmem):
     """Direct write when `bm == m`: no accumulator needed."""
+    del step  # Unused.
     o_vmem[...] = _partial_product(xq_vmem, sx_vmem, g_vmem).astype(
         o_vmem.dtype
     )
 
-  def body_multi_m(xq_vmem, sx_vmem, g_vmem, o_vmem):
+  def body_multi_m(step: pltpu.PipelineStep, xq_vmem, sx_vmem, g_vmem, o_vmem):
     """Pipelined reduction over m blocks when `bm < m`."""
-    m_index = pl.program_id(2)
+    m_index = step.index[2]
 
     @pl.when(m_index == 0)
     def _init():
@@ -254,7 +255,7 @@ def _drhs_kernel(
     # product comes back from `_partial_product` already rescaled.
     accum_vmem[...] += _partial_product(xq_vmem, sx_vmem, g_vmem)
 
-    @pl.when(m_index == pl.num_programs(2) - 1)
+    @pl.when(m_index == grid[2] - 1)
     def _write():
       o_vmem[...] = accum_vmem[...].astype(o_vmem.dtype)
 
@@ -269,6 +270,7 @@ def _drhs_kernel(
           pltpu.PARALLEL,
           pltpu.PARALLEL if single_m else pltpu.ARBITRARY,
       ),
+      _explicit_indices=True,
   )(xq_hbm, sx_hbm, g_hbm, o_hbm)
 
 
