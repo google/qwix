@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
+import functools
+import os
+
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
@@ -22,6 +26,8 @@ from qwix._src.core import dot_general
 from qwix._src.core import dot_general_qt
 from qwix._src.core import qarray
 from qwix._src.core import sparsity
+
+os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
 
 
 def _fake_quant(
@@ -1026,6 +1032,111 @@ class DotGeneralQtTest(parameterized.TestCase):
         12.0,
         f'mxint4 drhs weight gradient SQNR {drhs_sqnr:.2f} dB is below 12 dB',
     )
+
+  def test_explicit_sharding_grad(self):
+    """Verifies dot_general_qt fwd and bwd under JAX explicit sharding."""
+    num_devices = min(len(jax.devices()), 2)
+    mesh = jax.make_mesh(
+        (num_devices,),
+        ('x',),
+        axis_types=(jax.sharding.AxisType.Explicit,),
+        devices=jax.devices()[:num_devices],
+    )
+    pspec = jax.sharding.PartitionSpec
+    dnums = (((1,), (0,)), ((), ()))
+
+    with jax.set_mesh(mesh):
+      # 1. Sharded contracting axis in drhs + out_sharding in fwd.
+      lhs = jax.device_put(
+          jnp.ones((8, 16), dtype=jnp.float32), pspec('x', None)
+      )
+      rhs = jax.device_put(
+          jnp.ones((16, 8), dtype=jnp.float32), pspec(None, None)
+      )
+      config = dot_general_qt.DotGeneralQtConfig(
+          lhs_qtype='int8',
+          rhs_qtype='int8',
+          dlhs_grad_qtype='int8',
+          drhs_grad_qtype='int8',
+          out_sharding=pspec('x', None),
+      )
+      out = dot_general_qt.dot_general_qt(lhs, rhs, dnums, config)
+      self.assertEqual(out.sharding.spec, pspec('x', None))
+
+      def loss_sharded_contracting(l, r):
+        y = dot_general_qt.dot_general_qt(l, r, dnums, config)
+        return jnp.sum(y)
+
+      dlhs, drhs = jax.grad(loss_sharded_contracting, argnums=(0, 1))(lhs, rhs)
+      self.assertEqual(dlhs.sharding.spec, pspec('x', None))
+      self.assertEqual(drhs.sharding.spec, pspec(None, None))
+
+      # 2. Duplicate non-contracting mesh axes in dlhs / sharded rhs.
+      rhs_sharded = jax.device_put(
+          jnp.ones((16, 8), dtype=jnp.float32), pspec(None, 'x')
+      )
+      dlhs2, drhs2 = jax.grad(loss_sharded_contracting, argnums=(0, 1))(
+          lhs, rhs_sharded
+      )
+      self.assertEqual(dlhs2.sharding.spec, pspec('x', None))
+      self.assertEqual(drhs2.sharding.spec, pspec(None, 'x'))
+
+      rhs_dup = jax.device_put(
+          jnp.ones((16, 8), dtype=jnp.float32), pspec('x', None)
+      )
+      dlhs_dup, drhs_dup = jax.grad(loss_sharded_contracting, argnums=(0, 1))(
+          lhs, rhs_dup
+      )
+      self.assertEqual(dlhs_dup.sharding.spec, pspec('x', None))
+      self.assertEqual(drhs_dup.sharding.spec, pspec('x', None))
+
+      # 3. Reduced-typed rhs weights producing unreduced drhs cotangents
+      # (both channelwise and subchannel tiled with gradient clipping).
+      lhs_raw = jax.random.normal(
+          jax.random.key(0), (512, 512), dtype=jnp.float32
+      )
+      rhs_raw = jax.random.normal(
+          jax.random.key(1), (512, 16), dtype=jnp.float32
+      )
+      lhs_tiled = jax.device_put(lhs_raw, pspec('x', None))
+      rhs_reduced = jax.device_put(
+          rhs_raw,
+          pspec(None, None, reduced={'x'}),
+      )
+      for tile_size, cal_method in ((None, 'absmax'), (256, 'absmax,0.8')):
+        cfg_reduced = dot_general_qt.DotGeneralQtConfig(
+            lhs_qtype='int8',
+            rhs_qtype='int8',
+            dlhs_grad_qtype='int8',
+            drhs_grad_qtype='int8',
+            drhs_residual_qtype='int8',
+            tile_size=tile_size,
+            drhs_tile_size=tile_size,
+            lhs_calibration_method=cal_method,
+            rhs_calibration_method=cal_method,
+            out_sharding=pspec('x', None),
+        )
+        cfg_unsharded = dataclasses.replace(cfg_reduced, out_sharding=None)
+
+        def loss_reduced(l, r, cfg=cfg_reduced):
+          y = dot_general_qt.dot_general_qt(l, r, dnums, cfg)
+          return jnp.sum(y)
+
+        dlhs_red, drhs_red = jax.grad(loss_reduced, argnums=(0, 1))(
+            lhs_tiled, rhs_reduced
+        )
+        self.assertEqual(dlhs_red.sharding.spec, pspec('x', None))
+        self.assertEqual(
+            drhs_red.sharding.spec, pspec(None, None, unreduced={'x'})
+        )
+        dlhs_ref, drhs_ref = jax.grad(
+            functools.partial(loss_reduced, cfg=cfg_unsharded), argnums=(0, 1)
+        )(lhs_raw, rhs_raw)
+        self.assertTrue(jnp.allclose(dlhs_red, dlhs_ref, rtol=1e-5, atol=1e-5))
+        drhs_resolved = jax.sharding.reshard(drhs_red, pspec(None, None))
+        self.assertTrue(
+            jnp.allclose(drhs_resolved, drhs_ref, rtol=1e-5, atol=1e-5)
+        )
 
 
 if __name__ == '__main__':

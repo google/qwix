@@ -28,7 +28,7 @@ def pallas_call(
     kernel: Callable[..., None],
     out_shape: Any,
     *,
-    grid_spec: pl.GridSpec | None = None,
+    grid_spec: Any = None,
     grid=(),
     in_specs=pl.no_block_spec,
     out_specs=pl.no_block_spec,
@@ -55,32 +55,44 @@ def pallas_call(
     A function that can be called on a number of positional array arguments to
     invoke the Pallas kernel.
   """
-  if grid_spec is None:
-    grid_spec = pl.GridSpec(grid, in_specs, out_specs, scratch_shapes)
+
+  if isinstance(in_specs, list):
+    in_specs = tuple(in_specs)
 
   def wrapper(*args):
     num_scalar_prefetch = getattr(grid_spec, "num_scalar_prefetch", 0)
+    orig_in_specs = grid_spec.in_specs if grid_spec is not None else in_specs
 
-    in_specs = update_block_specs_for_qarray(
-        grid_spec.in_specs, args[num_scalar_prefetch:]
+    new_in_specs = update_block_specs_for_qarray(
+        orig_in_specs, args[num_scalar_prefetch:]
     )
-    in_specs, new_args, restore_fn = transform_block_specs_for_tpu(
-        in_specs, args[num_scalar_prefetch:]
+    new_in_specs, new_args, restore_fn = transform_block_specs_for_tpu(
+        new_in_specs, args[num_scalar_prefetch:]
     )
     args = args[:num_scalar_prefetch] + new_args
 
-    # pl.GridSpec doesn't support dataclasses.replace.
-    new_grid_spec = copy.copy(grid_spec)
-    new_grid_spec.in_specs = in_specs
-
+    kernel_wrapper = lambda *kernel_args: kernel(
+        *kernel_args[:num_scalar_prefetch],
+        *restore_fn(kernel_args[num_scalar_prefetch : len(args)]),
+        *kernel_args[len(args) :],
+    )
+    if grid_spec is not None:
+      # GridSpec doesn't support dataclasses.replace.
+      new_grid_spec = copy.copy(grid_spec)
+      new_grid_spec.in_specs = new_in_specs
+      return pl.pallas_call(
+          kernel_wrapper,
+          out_shape,
+          grid_spec=new_grid_spec,
+          **kwargs,
+      )(*args)
     return pl.pallas_call(
-        lambda *kernel_args: kernel(
-            *kernel_args[:num_scalar_prefetch],
-            *restore_fn(kernel_args[num_scalar_prefetch : len(args)]),
-            *kernel_args[len(args) :],
-        ),
+        kernel_wrapper,
         out_shape,
-        grid_spec=new_grid_spec,
+        grid=grid,
+        in_specs=new_in_specs,
+        out_specs=out_specs,
+        scratch_shapes=scratch_shapes,
         **kwargs,
     )(*args)
 
@@ -194,7 +206,7 @@ def transform_block_specs_for_tpu(
       if i in reverse_transposes:
         # Use pallas-friendly transpose.
         kernel_args[i] = qarray.transpose_array(
-            kernel_arg[...], reverse_transposes[i]  # pyrefly: ignore
+            kernel_arg[...], reverse_transposes[i]  # pyrefly: ignore[bad-argument-type]
         )
       elif i in reverse_reshapes:
         kernel_args[i] = kernel_arg[...].reshape(reverse_reshapes[i])

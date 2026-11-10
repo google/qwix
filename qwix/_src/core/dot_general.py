@@ -90,6 +90,31 @@ def _get_scale_transpose(
   )
 
 
+def _align_scale_reduced(target: jax.Array, scale: jax.Array) -> jax.Array:
+  """Aligns scale's sharding with target's sharding under explicit sharding."""
+  target_sharding = jax.typeof(target).sharding
+  target_spec = target_sharding.spec
+  scale_spec = jax.typeof(scale).sharding.spec
+  desired_reduced = target_spec.unreduced or target_spec.reduced
+  new_partitions = list(scale_spec.partitions)
+  if (
+      isinstance(target_sharding, jax.sharding.NamedSharding)
+      and jax.sharding.AxisType.Explicit in target_sharding.mesh.axis_types
+  ):
+    for i, s_p in enumerate(new_partitions):
+      t_p = (
+          target_spec.partitions[i] if i < len(target_spec.partitions) else None
+      )
+      if s_p is not None and s_p != t_p:
+        new_partitions[i] = None
+  new_spec = scale_spec.update(
+      partitions=tuple(new_partitions), reduced=desired_reduced
+  )
+  if new_spec != scale_spec:
+    scale = jax.sharding.reshard(scale, new_spec)
+  return scale
+
+
 def fold_scale_into(
     x: jax.Array,
     scale: jax.Array,
@@ -123,6 +148,7 @@ def fold_scale_into(
   x_scale = qarray.transpose_array(
       scale, [x_axes_to_scale.get(a) for a in range(x.ndim)]
   )
+  x_scale = _align_scale_reduced(x, x_scale)
   return qarray.call_with_generic_broadcast(jnp.multiply, x, x_scale)
 
 
@@ -253,12 +279,59 @@ def _fast_dot_general(
       lhs, rhs, preferred_element_type=preferred_element_type
   )
 
+  dot_kwargs = kwargs
+  if sum_axes and (out_sharding := kwargs.get('out_sharding')) is not None:
+    spec = (
+        out_sharding.spec
+        if isinstance(out_sharding, jax.sharding.NamedSharding)
+        else out_sharding
+    )
+    lhs_spec = jax.typeof(lhs_value).sharding.spec
+    rhs_spec = jax.typeof(rhs_value).sharding.spec
+    sum_partitions = []
+    sum_mesh_axes = set()
+    for s in sum_axes:
+      l_p = (
+          lhs_spec.partitions[lhs_ba[s]]
+          if lhs_ba[s] < len(lhs_spec.partitions)
+          else None
+      )
+      r_p = (
+          rhs_spec.partitions[rhs_ba[s]]
+          if rhs_ba[s] < len(rhs_spec.partitions)
+          else None
+      )
+      l_axes = () if l_p is None else (l_p,) if isinstance(l_p, str) else l_p
+      r_axes = () if r_p is None else (r_p,) if isinstance(r_p, str) else r_p
+      s_axes = tuple(dict.fromkeys(l_axes + r_axes))
+      sum_mesh_axes.update(s_axes)
+      sum_partitions.append(
+          None if not s_axes else s_axes[0] if len(s_axes) == 1 else s_axes
+      )
+    padded = spec.partitions + (None,) * max(
+        0, sum_axes[0] - len(spec.partitions)
+    )
+    dot_partitions = (
+        padded[: sum_axes[0]] + tuple(sum_partitions) + padded[sum_axes[0] :]
+    )
+    dot_spec = jax.sharding.PartitionSpec(
+        *dot_partitions,
+        unreduced=spec.unreduced - sum_mesh_axes,
+        reduced=spec.reduced,
+    )
+    dot_out_sharding = (
+        out_sharding.update(spec=dot_spec)
+        if isinstance(out_sharding, jax.sharding.NamedSharding)
+        else dot_spec
+    )
+    dot_kwargs = kwargs | {'out_sharding': dot_out_sharding}
+
   res = jax.lax.dot_general(
       lhs_value,
       rhs_value,
       dimension_numbers=dimension_numbers,
       preferred_element_type=preferred_element_type,
-      **kwargs,
+      **dot_kwargs,
   )
 
   if lhs_zero_point is not None:
@@ -271,7 +344,7 @@ def _fast_dot_general(
             rhs_value,
             dimension_numbers=dimension_numbers,
             preferred_element_type=preferred_element_type,
-            **kwargs,
+            **dot_kwargs,
         ),
     )
 
@@ -284,16 +357,22 @@ def _fast_dot_general(
             _broadcast_axes(rhs_zero_point, rhs_value.shape, rhs_ca + rhs_ba),
             dimension_numbers=dimension_numbers,
             preferred_element_type=preferred_element_type,
-            **kwargs,
+            **dot_kwargs,
         ),
     )
 
   if lhs_scale is not None:
+    lhs_scale = _align_scale_reduced(res, lhs_scale)
     res = qarray.call_with_generic_broadcast(jnp.multiply, res, lhs_scale)
   if rhs_scale is not None:
+    rhs_scale = _align_scale_reduced(res, rhs_scale)
     res = qarray.call_with_generic_broadcast(jnp.multiply, res, rhs_scale)
   if sum_axes:
-    res = jnp.sum(res, axis=sum_axes)
+    if res.dtype in (jnp.bfloat16, jnp.float16):
+      res = res.astype(jnp.float32)
+    res = jax.lax.reduce_sum(
+        res, axes=sum_axes, out_sharding=kwargs.get('out_sharding')
+    )
   return res.astype(result_type)
 
 
