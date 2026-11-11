@@ -749,12 +749,14 @@ def dot_general(
         **kwargs,
     )
 
-  # Try hardware-accelerated MXFP dot.
-  mxfp_result = mxfp_dot.mxfp_dot_general(
-      lhs, rhs, dimension_numbers, preferred_element_type
-  )
-  if mxfp_result is not None:
-    return mxfp_result
+  # The MXFP kernels cannot honor out_sharding, whereas the regular impls
+  # forward it, so skip the MXFP path when out_sharding is set.
+  if kwargs.get('out_sharding') is None:
+    mxfp_result = mxfp_dot.mxfp_dot_general(
+        lhs, rhs, dimension_numbers, preferred_element_type
+    )
+    if mxfp_result is not None:
+      return mxfp_result
 
   impl = _choose_dot_general_impl(lhs, rhs, dimension_numbers)
   return impl(

@@ -252,6 +252,63 @@ class DotGeneralTest(parameterized.TestCase):
 
     mock_scaled_dot.assert_not_called()
 
+  @parameterized.product(
+      qtypes=(('mxfp8', 'mxfp8'), (jnp.float8_e4m3fn, 'mxfp4')),
+      sharding_pair=(
+          (
+              jax.sharding.PartitionSpec(),
+              jax.sharding.PartitionSpec(None, None),
+          ),
+          (
+              jax.sharding.PartitionSpec(None, 'x'),
+              jax.sharding.PartitionSpec(None, 'x'),
+          ),
+      ),
+  )
+  def test_out_sharding_skips_mxfp(self, qtypes, sharding_pair):
+    lhs_qtype, rhs_qtype = qtypes
+    out_spec, expected_spec = sharding_pair
+    lhs = qarray.QArray(
+        jnp.ones((8, 32), jnp.float8_e4m3fn),
+        jnp.ones((8, 1), jnp.bfloat16),
+        qtype=lhs_qtype,
+    )
+    rhs_dtype = jnp.float4_e2m1fn if rhs_qtype == 'mxfp4' else jnp.float8_e4m3fn
+    rhs = qarray.QArray(
+        jnp.ones((32, 16), rhs_dtype),
+        jnp.ones((1, 16), jnp.bfloat16),
+        qtype=rhs_qtype,
+    )
+    dnums = (((1,), (0,)), ((), ()))
+    mesh = jax.make_mesh(
+        (1,),
+        ('x',),
+        axis_types=(jax.sharding.AxisType.Explicit,),
+        devices=jax.devices()[:1],
+    )
+    pspec = jax.sharding.PartitionSpec
+    with jax.set_mesh(mesh):
+      sharded_lhs = jax.tree.map(
+          lambda x: jax.device_put(x, pspec('x', None)), lhs
+      )
+      sharded_rhs = jax.tree.map(
+          lambda x: jax.device_put(x, pspec(None, None)), rhs
+      )
+      with mock.patch.object(
+          dot_general.mxfp_dot,
+          'mxfp_dot_general',
+          wraps=dot_general.mxfp_dot.mxfp_dot_general,
+      ) as mock_mxfp:
+        res = dot_general.dot_general(
+            sharded_lhs, sharded_rhs, dnums, out_sharding=out_spec
+        )
+        mock_mxfp.assert_not_called()
+        self.assertEqual(jax.typeof(res).sharding.spec, expected_spec)
+        dot_general.dot_general(
+            sharded_lhs, sharded_rhs, dnums, out_sharding=None
+        )
+        mock_mxfp.assert_called_once()
+
   def test_innermost_tiling_heuristic(self):
     """Verifies that multi-dimensional dot_general picks the innermost contracting reduction axis."""
     dnums = (((2, 3), (0, 1)), ((), ()))

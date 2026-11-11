@@ -20,6 +20,11 @@ import jax
 from jax import numpy as jnp
 from qwix._src.core import qarray
 
+_MXFP4_BLOCK_SIZE = 32
+# 6 * 2**13 fits float8_e5m2; blocks more than 2**26 below the column max
+# become e5m2 subnormals (or zero where the backend flushes subnormals).
+_E5M2_HEADROOM = 2.0**13
+
 
 def mxfp_dot_general(
     lhs: qarray.MaybeQArray,
@@ -35,8 +40,9 @@ def mxfp_dot_general(
 
   Note that `scaled_dot` is supported when BOTH operands are microscaled
   formats (MXFP8, MXFP4, or NVFP4) with matching batch and contracting scale
-  dimensions. One-sided microscaled operations or mismatched scale dimensions
-  will cleanly return `None` to fall back to standard float emulation.
+  dimensions. `mxfp4` weights with per-token/per-tensor FP8 activations are
+  re-encoded to `float8_e5m2` for an FP8 matmul; other cases return `None` to
+  fall back to standard float emulation.
 
   Note: `jax.lax.scaled_dot` only supports floating-point microscaled formats
   and does not support integer microscaled formats (e.g. mxint8). Integer
@@ -57,7 +63,9 @@ def mxfp_dot_general(
     A jax.Array with the result, or None to fall back to emulation.
   """
   if not (_is_mxfp(lhs) and _is_mxfp(rhs)):
-    return None
+    return _mxfp4_weight_dot_general(
+        lhs, rhs, dimension_numbers, preferred_element_type
+    )
 
   (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dimension_numbers
 
@@ -105,6 +113,84 @@ def mxfp_dot_general(
     return None
 
   return _unflatten_from_3d(out_3d, lhs, rhs, dimension_numbers)
+
+
+def _mxfp4_weight_dot_general(
+    lhs: qarray.MaybeQArray,
+    rhs: qarray.MaybeQArray,
+    dimension_numbers: jax.lax.DotDimensionNumbers,
+    preferred_element_type: jax.typing.DTypeLike | None,
+) -> jax.Array | None:
+  """Re-encodes MXFP4 weights to float8_e5m2 for FP8 matmul."""
+  if not (isinstance(lhs, qarray.QArray) and isinstance(rhs, qarray.QArray)):
+    return None
+  # Re-encodes act[..., K] @ weight[K, ...]; einsum may swap them.
+  swapped = lhs.qtype == "mxfp4"
+  act, w = (rhs, lhs) if swapped else (lhs, rhs)
+  if (
+      w.qtype != "mxfp4"
+      or act.qvalue.dtype not in (jnp.float8_e4m3fn, jnp.float8_e5m2)
+      or act.zero_point is not None
+      or w.zero_point is not None
+      or 0 in (*act.shape, *w.shape)
+  ):
+    return None
+
+  (lhs_ca, rhs_ca), (lhs_ba, rhs_ba) = dimension_numbers
+  act_ca, w_ca = (rhs_ca, lhs_ca) if swapped else (lhs_ca, rhs_ca)
+  c = len(w_ca)
+  if (
+      c == 0
+      or lhs_ba
+      or rhs_ba
+      or set(w_ca) != set(range(c))
+      or tuple(act_ca) != tuple(act.ndim - c + a for a in w_ca)
+  ):
+    return None
+
+  qarray.validate_qarray(act)
+  qarray.validate_qarray(w)
+  if (
+      qarray.get_tiled_axes(act)
+      or act.scale.shape[-c:] != (1,) * c
+      or qarray.get_tiled_axes(w).keys() - {c - 1}
+      or w.scale.shape[c - 1] * _MXFP4_BLOCK_SIZE != w.shape[c - 1]
+  ):
+    return None
+
+  act_free, w_free = act.shape[:-c], w.shape[c:]
+  m, k, n = math.prod(act_free), math.prod(w.shape[:c]), math.prod(w_free)
+  _, out_dtype = qarray.get_accumulator_and_result_type(
+      lhs, rhs, preferred_element_type=preferred_element_type
+  )
+  act_scale = jnp.broadcast_to(act.scale, (*act_free, *(1,) * c)).reshape(m, 1)
+  w_scale = (
+      jnp.broadcast_to(
+          w.scale, (*w.shape[: c - 1], w.scale.shape[c - 1], *w_free)
+      )
+      .reshape(k // _MXFP4_BLOCK_SIZE, n)
+      .astype(jnp.bfloat16)
+  )
+  # Keep 2D operands behind a barrier so XLA does not hoist weight re-encoding,
+  # fuse activation quantization into the dot, or relayout 3D weights.
+  act_q, w_q, w_scale = jax.lax.optimization_barrier(
+      (act.qvalue.reshape(m, k), w.qvalue.reshape(k, n), w_scale)
+  )
+  # Shift each column's max scale to _E5M2_HEADROOM so w * ratio fits in e5m2
+  # without rounding (dividing by a power of two only changes the exponent).
+  s_max = jnp.max(w_scale, axis=0)
+  s_max = jnp.where(s_max == 0, 1.0, s_max)
+  ratio = w_scale * (_E5M2_HEADROOM / s_max)
+  w_q = w_q.astype(jnp.bfloat16).reshape(
+      k // _MXFP4_BLOCK_SIZE, _MXFP4_BLOCK_SIZE, n
+  )
+  w_e5m2 = (w_q * ratio[:, None, :]).reshape(k, n).astype(jnp.float8_e5m2)
+  out = jnp.dot(act_q, w_e5m2, preferred_element_type=jnp.float32)
+  out = out * (s_max.astype(jnp.float32) / _E5M2_HEADROOM) * act_scale
+  out = out.astype(out_dtype)
+  if swapped:  # dot_general puts the lhs free axes first.
+    return out.T.reshape(*w_free, *act_free)
+  return out.reshape(*act_free, *w_free)
 
 
 def _is_mxfp(operand: Any) -> TypeGuard[qarray.QArray]:

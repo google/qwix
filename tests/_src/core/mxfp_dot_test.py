@@ -35,9 +35,11 @@ emulation/decomposition.
 import functools
 from absl import logging
 from absl.testing import absltest
+from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
 import numpy as np
+from qwix._src.core import dot_general
 from qwix._src.core import mxfp_dot
 from qwix._src.core import qarray
 
@@ -400,6 +402,149 @@ class MxfpDotTest(absltest.TestCase):
         lhs, rhs, dimension_numbers=(((1,), (1,)), ((), ()))
     )
     self.assertIsNone(res)
+
+
+class Mxfp4WeightDotTest(parameterized.TestCase):
+  """Tests float8_e5m2 re-encoding for MXFP4 weights x FP8 activations."""
+
+  def _make_operands(
+      self,
+      act_shape,
+      w_shape,
+      num_contracting=1,
+      act_qtype=jnp.float8_e4m3fn,
+  ):
+    act = jax.random.normal(jax.random.key(0), act_shape, jnp.bfloat16)
+    w = jax.random.normal(jax.random.key(1), w_shape, jnp.bfloat16)
+    dnums = (
+        (
+            tuple(range(len(act_shape) - num_contracting, len(act_shape))),
+            tuple(range(num_contracting)),
+        ),
+        ((), ()),
+    )
+    ndims = (len(act_shape), len(w_shape))
+    act_q = qarray.quantize(
+        act,
+        dot_general.get_how_to_quantize(
+            dimension_numbers=dnums,
+            ndims=ndims,
+            for_lhs=True,
+            qtype=act_qtype,
+            tile_size=None,
+        ),
+    )
+    w_q = qarray.quantize(
+        w,
+        dot_general.get_how_to_quantize(
+            dimension_numbers=dnums,
+            ndims=ndims,
+            for_lhs=False,
+            qtype="mxfp4",
+            tile_size=32,
+        ),
+    )
+    return act_q, w_q
+
+  @parameterized.named_parameters(
+      dict(testcase_name="2d", act_shape=(8, 256), w_shape=(256, 128)),
+      dict(testcase_name="3d", act_shape=(2, 8, 256), w_shape=(256, 4, 32)),
+      dict(
+          testcase_name="multi_contracting",
+          act_shape=(8, 4, 64),
+          w_shape=(4, 64, 128),
+          act_ca=(2, 1),
+          w_ca=(1, 0),
+      ),
+      # einsum may pass the weight as lhs.
+      dict(
+          testcase_name="swapped_e5m2_act",
+          act_shape=(2, 8, 256),
+          w_shape=(256, 4, 32),
+          swapped=True,
+          act_qtype=jnp.float8_e5m2,
+      ),
+  )
+  def test_dispatch(
+      self,
+      act_shape,
+      w_shape,
+      swapped=False,
+      act_ca=None,
+      w_ca=(0,),
+      act_qtype=jnp.float8_e4m3fn,
+  ):
+    if act_ca is None:
+      act_ca = (len(act_shape) - 1,)
+    act, w = self._make_operands(
+        act_shape, w_shape, num_contracting=len(w_ca), act_qtype=act_qtype
+    )
+    lhs, rhs = (w, act) if swapped else (act, w)
+    dnums = ((w_ca, act_ca) if swapped else (act_ca, w_ca), ((), ()))
+    fn = functools.partial(
+        mxfp_dot.mxfp_dot_general,
+        dimension_numbers=dnums,
+        preferred_element_type=jnp.float32,
+    )
+    self.assertRegex(
+        jax.jit(fn).lower(lhs, rhs).as_text(),
+        r"stablehlo\.optimization_barrier.*tensor<256x128xf4E2M1FN>,"
+        r" tensor<8x128xbf16>",
+    )
+    res = fn(lhs, rhs)
+    self.assertIsNotNone(res)
+    np.testing.assert_array_equal(
+        dot_general.dot_general(
+            lhs, rhs, dnums, preferred_element_type=jnp.float32
+        ),
+        res,
+    )
+    ref = jax.lax.dot_general(
+        qarray.dequantize(lhs.astype(jnp.float32)),
+        qarray.dequantize(rhs.astype(jnp.float32)),
+        dnums,
+        precision=jax.lax.Precision.HIGHEST,
+    )
+    # Max error / max |ref|: f32 rounding on CPU, <= 0.7% on TPU/GPU where the
+    # FP8 matrix unit rounds products like bf16.
+    scale = 1e-5 if jax.devices()[0].platform == "cpu" else 1e-2
+    np.testing.assert_allclose(res, ref, atol=scale * np.max(np.abs(ref)))
+
+  def test_zero_scale_channel_and_bf16_out(self):
+    act, w = self._make_operands((8, 256), (256, 128))
+    w = w.replace(
+        qvalue=w.qvalue.at[:, 0].set(0),
+        scale=w.scale.at[:, 0].set(0),
+    )
+    res = mxfp_dot.mxfp_dot_general(act, w, (((1,), (0,)), ((), ())))
+    self.assertIsNotNone(res)
+    self.assertEqual(res.dtype, jnp.bfloat16)
+    self.assertTrue(jnp.isfinite(res).all())
+    np.testing.assert_array_equal(res[:, 0], 0)
+
+  def test_fallback(self):
+    act, w = self._make_operands((8, 256), (256, 128))
+    dnums = (((1,), (0,)), ((), ()))
+    for lhs, rhs, dn in [
+        (jnp.ones((8, 256), jnp.bfloat16), w, dnums),  # bf16 activation
+        (act.replace(qvalue=act.qvalue.astype(jnp.int8)), w, dnums),  # int8 act
+        (act.replace(scale=jnp.ones((8, 8))), w, dnums),  # tiled activation
+        (act, w.replace(qtype="mxfp8"), dnums),  # non-mxfp4 weight
+        (act, w.replace(scale=jnp.ones((16, 128))), dnums),  # tile size != 32
+        (act.T, w, (((0,), (0,)), ((), ()))),  # act contracting on first axis
+        (act, w.T, (((1,), (1,)), ((), ()))),  # weight contracting on last axis
+    ]:
+      self.assertIsNone(mxfp_dot.mxfp_dot_general(lhs, rhs, dn))
+    # Batch axes.
+    act, w = self._make_operands((2, 8, 256), (256, 2, 128))
+    self.assertIsNone(
+        mxfp_dot.mxfp_dot_general(act, w, (((2,), (0,)), ((0,), (1,))))
+    )
+    # Contracting axes paired in a different order than the weight's layout.
+    act, w = self._make_operands((8, 64, 4), (4, 64, 128), num_contracting=2)
+    self.assertIsNone(
+        mxfp_dot.mxfp_dot_general(act, w, (((2, 1), (0, 1)), ((), ())))
+    )
 
 
 if __name__ == "__main__":
