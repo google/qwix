@@ -178,7 +178,8 @@ class QArrayTest(parameterized.TestCase):
     self.assertEqual(q_array.qvalue.shape, array_shape)
 
     mae = jnp.abs(array - dq_array).mean() / jnp.abs(array).mean()
-    self.assertAlmostEqual(mae, expected_mae, places=5)
+    # 1-2 bfloat16 ULPs (~4.9e-4 at 0.12) across uniform PRNG grid shifts.
+    self.assertAlmostEqual(mae, expected_mae, delta=1e-3)
 
   @parameterized.named_parameters(
       dict(
