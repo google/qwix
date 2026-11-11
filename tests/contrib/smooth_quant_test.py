@@ -343,6 +343,62 @@ class SqTest(parameterized.TestCase):
     sq_y = model_sq.apply({'params': sq_params}, x)
     self.assertEqual(sq_y.shape, (5, 64))
 
+  def test_dot_general_with_reduction_order(self):
+    class Model(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, reduction_order=None):
+        w = self.param('kernel', nn.initializers.ones, (4, 8), jnp.float32)
+        return jax.lax.dot_general(
+            x,
+            w,
+            (((1,), (0,)), ((), ())),
+            reduction_order=reduction_order,
+        )
+
+    model = Model()
+    x = jnp.ones((2, 4), dtype=jnp.float32)
+    variables = model.init(jax.random.key(0), x)
+
+    unquantized = qwix_model.quantize_model(model, sq.SqInferenceProvider([]))
+    for order in (None, 'linear'):
+      self.assertEqual(
+          unquantized.apply(variables, x, reduction_order=order).shape, (2, 8)
+      )
+      with jax.disable_jit():
+        jaxpr = jax.make_jaxpr(
+            lambda a, ro=order: unquantized.apply(
+                variables, a, reduction_order=ro
+            )
+        )(x)
+      dot_eqns = [e for e in jaxpr.eqns if e.primitive.name == 'dot_general']
+      self.assertLen(dot_eqns, 1)
+      if order is None:
+        self.assertNotIn('reduction_order', dot_eqns[0].params)
+      else:
+        self.assertEqual(dot_eqns[0].params['reduction_order'], order)
+
+    rules = [sq.SqRule(weight_qtype=jnp.int8, act_qtype=jnp.int8)]
+    cal_model = qwix_model.quantize_model(
+        model, sq.SqCalibrationProvider(rules)
+    )
+    _, new_vars = cal_model.apply(variables, x, mutable='quant_stats')
+    ptq_model = qwix_model.quantize_model(model, ptq.PtqProvider(rules))
+    abs_vars = jax.eval_shape(ptq_model.init, jax.random.key(1), x)
+    sq_params = sq.quantize_params(
+        variables['params'], abs_vars['params'], new_vars['quant_stats']
+    )
+    self.assertIsInstance(sq_params['kernel'], sq.WithSqScale)
+    sq_model = qwix_model.quantize_model(model, sq.SqInferenceProvider(rules))
+    self.assertEqual(
+        sq_model.apply({'params': sq_params}, x, reduction_order=None).shape,
+        (2, 8),
+    )
+    with self.assertRaisesRegex(
+        NotImplementedError, 'reduction_order is not supported in SmoothQuant'
+    ):
+      sq_model.apply({'params': sq_params}, x, reduction_order='linear')
+
 
 if __name__ == '__main__':
   absltest.main()

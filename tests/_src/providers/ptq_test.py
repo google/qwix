@@ -35,6 +35,62 @@ os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 
 class PtqTest(parameterized.TestCase):
 
+  @parameterized.named_parameters(
+      dict(testcase_name="unquantized_none", rules=[], reduction_order=None),
+      dict(
+          testcase_name="unquantized_linear",
+          rules=[],
+          reduction_order="linear",
+      ),
+      dict(
+          testcase_name="quantized_none",
+          rules=[qconfig.QuantizationRule(weight_qtype=jnp.int8)],
+          reduction_order=None,
+      ),
+  )
+  def test_dot_general_with_reduction_order(self, rules, reduction_order):
+    class Module(nn.Module):
+      provider: ptq.PtqProvider
+
+      @nn.compact
+      def __call__(self, x, y):
+        dnums = (((1,), (0,)), ((), ()))
+        return self.provider.dot_general(
+            x, y, dnums, reduction_order=reduction_order
+        )
+
+    mod = Module(ptq.PtqProvider(rules))
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((3, 4), dtype=jnp.float32)
+    self.assertEqual(mod.apply({}, x, y).shape, (2, 4))
+    if not rules:
+      jaxpr = jax.make_jaxpr(lambda a, b: mod.apply({}, a, b))(x, y)
+      dot_eqns = [e for e in jaxpr.eqns if e.primitive.name == "dot_general"]
+      self.assertLen(dot_eqns, 1)
+      if reduction_order is None:
+        self.assertNotIn("reduction_order", dot_eqns[0].params)
+      else:
+        self.assertEqual(dot_eqns[0].params["reduction_order"], reduction_order)
+
+  def test_quantized_dot_general_rejects_reduction_order(self):
+    class Module(nn.Module):
+      provider: ptq.PtqProvider
+
+      @nn.compact
+      def __call__(self, x, y):
+        dnums = (((1,), (0,)), ((), ()))
+        return self.provider.dot_general(x, y, dnums, reduction_order="linear")
+
+    mod = Module(
+        ptq.PtqProvider([qconfig.QuantizationRule(weight_qtype=jnp.int8)])
+    )
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((3, 4), dtype=jnp.float32)
+    with self.assertRaisesRegex(
+        NotImplementedError, "reduction_order is not supported in quantized"
+    ):
+      mod.apply({}, x, y)
+
   def test_nn_ptq(self):
     dense = nn.Dense(
         features=5,

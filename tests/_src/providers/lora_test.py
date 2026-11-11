@@ -163,6 +163,89 @@ class LoraTest(parameterized.TestCase):
     model_output = lora_linear(model_input)
     self.assertTrue(jnp.allclose(model_output, expected_model_output))
 
+  def test_lora_with_jnp_matmul_nnx(self):
+    """jnp.matmul passes reduction_order to the intercepted dot_general."""
+
+    class LinearThenMatmul(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.linear = nnx.Linear(12, 10, rngs=rngs)
+        self.basis = jnp.arange(40, dtype=jnp.float32).reshape(10, 4) / 40
+
+      def __call__(self, x):
+        # Like Gemma4's audio mel projection: `x @ constant` via jnp.matmul.
+        return self.linear(x) @ self.basis
+
+    module = LinearThenMatmul(nnx.Rngs(0))
+    lora_provider = lora.LoraProvider([
+        lora.LoraRule(
+            module_path=".*",
+            rank=3,
+            alpha=0.5,
+            lora_b_initializer=nnx.initializers.ones,
+        ),
+    ])
+    model_input = jnp.ones((10, 12))
+    base_linear_output = module.linear(model_input)
+    lora_module = lora.apply_lora_to_model(module, lora_provider, model_input)
+    variables = nnx.variables(lora_module.linear, nnx.LoRAParam)
+    expected_model_output = (
+        base_linear_output
+        + model_input
+        @ variables["kernel_lora_a"].value
+        @ variables["kernel_lora_b"].value
+        * 0.5
+        / 3
+    ) @ module.basis
+    self.assertTrue(
+        jnp.allclose(lora_module(model_input), expected_model_output)
+    )
+
+  def test_lora_dot_general_forwards_reduction_order_on_non_weight(self):
+    class MatmulWithReductionOrder(nnx.Module):
+
+      def __init__(self):
+        self.basis = jnp.ones((4, 3), dtype=jnp.float32)
+
+      def __call__(self, x):
+        return jax.lax.dot_general(
+            x,
+            self.basis,
+            (((1,), (0,)), ((), ())),
+            reduction_order="linear",
+        )
+
+    x = jnp.ones((2, 4), dtype=jnp.float32)
+    lora_module = lora.apply_lora_to_model(
+        MatmulWithReductionOrder(), lora.LoraProvider(rank=2, alpha=1.0), x
+    )
+    with jax.disable_jit():
+      jaxpr = jax.make_jaxpr(lora_module)(x)
+    dot_eqns = [e for e in jaxpr.eqns if e.primitive.name == "dot_general"]
+    self.assertLen(dot_eqns, 1)
+    self.assertEqual(dot_eqns[0].params["reduction_order"], "linear")
+
+  def test_lora_dot_general_rejects_reduction_order_on_weight(self):
+    class ReductionOrderLinear(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.kernel = nnx.Param(jax.random.normal(rngs.params(), (4, 3)))
+
+      def __call__(self, x):
+        return jax.lax.dot_general(
+            x,
+            self.kernel.value,
+            (((1,), (0,)), ((), ())),
+            reduction_order="linear",
+        )
+
+    module = ReductionOrderLinear(nnx.Rngs(0))
+    lora_provider = lora.LoraProvider(rank=2, alpha=1.0)
+    with self.assertRaisesRegex(
+        NotImplementedError, "reduction_order is not supported in LoRA"
+    ):
+      lora.apply_lora_to_model(module, lora_provider, jnp.ones((2, 4)))
+
   @parameterized.parameters(0.0, 1.0)
   def test_lora_einsum_nnx(self, dropout_rate):
     """Test LoRA on nnx.Einsum module."""

@@ -495,6 +495,64 @@ class AwqTest(parameterized.TestCase):
     mae = lambda x, y: jnp.mean(jnp.abs(x - y))
     self.assertLessEqual(mae(fp_y, awq_y), mae(fp_y, ptq_y))
 
+  def test_dot_general_with_reduction_order(self):
+    class Model(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, reduction_order=None):
+        w = self.param('kernel', nn.initializers.ones, (4, 8), jnp.float32)
+        return jax.lax.dot_general(
+            x,
+            w,
+            (((1,), (0,)), ((), ())),
+            reduction_order=reduction_order,
+        )
+
+    model = Model()
+    x = jnp.ones((2, 4), dtype=jnp.float32)
+    variables = model.init(jax.random.key(0), x)
+
+    unquantized = qwix_model.quantize_model(model, awq.AwqInferenceProvider([]))
+    for order in (None, 'linear'):
+      self.assertEqual(
+          unquantized.apply(variables, x, reduction_order=order).shape, (2, 8)
+      )
+      with jax.disable_jit():
+        jaxpr = jax.make_jaxpr(
+            lambda a, ro=order: unquantized.apply(
+                variables, a, reduction_order=ro
+            )
+        )(x)
+      dot_eqns = [e for e in jaxpr.eqns if e.primitive.name == 'dot_general']
+      self.assertLen(dot_eqns, 1)
+      if order is None:
+        self.assertNotIn('reduction_order', dot_eqns[0].params)
+      else:
+        self.assertEqual(dot_eqns[0].params['reduction_order'], order)
+
+    rules = [awq.AwqRule(weight_qtype=jnp.int8)]
+    cal_model = qwix_model.quantize_model(
+        model, awq.AwqCalibrationProvider(rules)
+    )
+    _, new_vars = cal_model.apply(variables, x, mutable='quant_stats')
+    ptq_model = qwix_model.quantize_model(model, ptq.PtqProvider(rules))
+    abs_vars = jax.eval_shape(ptq_model.init, jax.random.key(1), x)
+    awq_params = awq.quantize_params(
+        variables['params'], abs_vars['params'], new_vars['quant_stats']
+    )
+    self.assertIsInstance(awq_params['kernel'], awq.WithAwqScale)
+    awq_model = qwix_model.quantize_model(
+        model, awq.AwqInferenceProvider(rules)
+    )
+    self.assertEqual(
+        awq_model.apply({'params': awq_params}, x, reduction_order=None).shape,
+        (2, 8),
+    )
+    with self.assertRaisesRegex(
+        NotImplementedError, 'reduction_order is not supported in quantized'
+    ):
+      awq_model.apply({'params': awq_params}, x, reduction_order='linear')
+
 
 if __name__ == '__main__':
   absltest.main()

@@ -271,7 +271,14 @@ class SqInferenceProvider(ptq.PtqProvider):
       preferred_element_type: jax.typing.DTypeLike | None = None,
       *,
       out_sharding: jax.sharding.NamedSharding | None = None,
+      reduction_order: Any = None,
   ) -> jax.Array:
+    if isinstance(rhs, (WithSqScale, boxed_param.WithAux, qarray.QArray)):
+      if reduction_order is not None:
+        raise NotImplementedError(
+            "reduction_order is not supported in SmoothQuant dot_general, got"
+            f" {reduction_order=}"
+        )
     # Handle SQ-quantized weights with per-channel scale compensation.
     if isinstance(rhs, WithSqScale):
       lhs = self._apply_sq_scale(lhs, rhs.inv_sq_scale)
@@ -284,6 +291,7 @@ class SqInferenceProvider(ptq.PtqProvider):
         precision=precision,
         preferred_element_type=preferred_element_type,
         out_sharding=out_sharding,
+        reduction_order=reduction_order,
     )
 
   def get_intercept_map(self):
