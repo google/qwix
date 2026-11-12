@@ -35,6 +35,7 @@ class DotGeneralQtConfig:
   # Forward pass.
   lhs_qtype: jax.typing.DTypeLike | None = None
   rhs_qtype: jax.typing.DTypeLike | None = None
+  # If None, microscaled operands use their block size and others stay untiled.
   tile_size: int | float | None = None
   lhs_calibration_method: str = 'absmax'
   rhs_calibration_method: str = 'absmax'
@@ -47,6 +48,7 @@ class DotGeneralQtConfig:
   # Backward pass (dlhs).
   dlhs_grad_qtype: jax.typing.DTypeLike | None = None  # incoming gradient
   dlhs_grad_calibration_method: str = 'absmax'
+  # Tiles both the incoming gradient and the residual; same None rule as above.
   dlhs_tile_size: int | float | None = None
   dlhs_stochastic_rounding_noise_fn: stochastic_rounding.NoiseFn | None = None
   dlhs_grad_disable_channelwise_axes: bool = False
@@ -55,7 +57,7 @@ class DotGeneralQtConfig:
   # Backward pass (drhs).
   drhs_grad_qtype: jax.typing.DTypeLike | None = None  # incoming gradient
   drhs_grad_calibration_method: str = 'absmax'
-  drhs_tile_size: int | float | None = None
+  drhs_tile_size: int | float | None = None  # incoming gradient and residual
   drhs_stochastic_rounding_noise_fn: stochastic_rounding.NoiseFn | None = None
   drhs_grad_disable_channelwise_axes: bool = False
   drhs_multipass_mode: str | None = None
@@ -561,7 +563,7 @@ def dot_general_qt_bwd(
           ndims=(g.ndim, y.ndim),
           for_lhs=True,
           qtype=g_qtype,
-          tile_size=g_tile_size,
+          tile_size=numerics.resolve_tile_size(g_tile_size, g_qtype),
           calibration_method=g_calibration_method,
           noise_fn=g_noise_fn,
       )
@@ -580,7 +582,7 @@ def dot_general_qt_bwd(
           ndims=(g.ndim, y.ndim),
           for_lhs=False,
           qtype=y_qtype,
-          tile_size=g_tile_size,
+          tile_size=numerics.resolve_tile_size(g_tile_size, y_qtype),
           calibration_method=y_calibration_method,
       )
       if y_disable_channelwise_axes:
@@ -684,7 +686,7 @@ def calibrate_operand(
       ndims=ndims,
       for_lhs=for_lhs,
       qtype=qtype,
-      tile_size=config.tile_size,
+      tile_size=numerics.resolve_tile_size(config.tile_size, qtype),
       calibration_method=calibration_method,
   )
   if disable_channelwise_axes:

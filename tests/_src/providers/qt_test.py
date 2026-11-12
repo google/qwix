@@ -14,6 +14,7 @@
 
 import itertools
 import os
+from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import linen as nn
@@ -174,14 +175,96 @@ class QtTest(parameterized.TestCase):
     )
     self.assertEqual(quant_stats["dot_general0_lhs"]["count"], 2)
 
-  def test_mxfp4_requires_tile_size(self):
-    """QT does not default the tile size of microscaled formats (yet)."""
-    rule = qt.QtRule(module_path=".*", weight_qtype="mxfp4")
-    linear = nnx.Linear(64, 16, rngs=nnx.Rngs(0))
-    with self.assertRaisesRegex(ValueError, "requires `tiled_axes`"):
-      qwix_model.quantize_model(
-          linear, qt.QtProvider([rule]), jnp.ones((2, 64))
+  @parameterized.named_parameters(
+      (
+          "nnx_linear_fwd_and_bwd",
+          lambda: nnx.Linear(64, 96, use_bias=False, rngs=nnx.Rngs(0)),
+          dict(
+              weight_qtype="mxfp4",
+              act_qtype=jnp.float8_e4m3fn,
+              bwd_qtype="mxfp8",
+              additional_qt_config={"dlhs_residual_qtype": "mxfp4"},
+          ),
+          [((64, 1), (2, 96)), ((64, 3), (64, 3)), ((2, 96), (64, 64))],
+      ),
+      (
+          "linen_einsum_fwd_and_bwd",
+          lambda: nn.Einsum((64, 96), "ij,jk->ik", use_bias=False),
+          dict(
+              weight_qtype="mxfp4",
+              act_qtype=jnp.float8_e4m3fn,
+              bwd_qtype="mxfp8",
+              additional_qt_config={"dlhs_residual_qtype": "mxfp4"},
+          ),
+          [((64, 1), (2, 96)), ((64, 3), (64, 3)), ((2, 96), (64, 64))],
+      ),
+      (
+          "mxfp8_act_int8_weight",
+          lambda: nnx.Linear(64, 16, use_bias=False, rngs=nnx.Rngs(0)),
+          dict(weight_qtype=jnp.int8, act_qtype="mxfp8"),
+          [((64, 2), (1, 16))],
+      ),
+      (
+          "mxfp8_16_act_mxfp4_weight",
+          lambda: nnx.Linear(64, 16, use_bias=False, rngs=nnx.Rngs(0)),
+          dict(weight_qtype="mxfp4", act_qtype="mxfp8_16"),
+          [((64, 4), (2, 16))],
+      ),
+      (
+          "explicit_tile_size",
+          lambda: nnx.Linear(64, 16, use_bias=False, rngs=nnx.Rngs(0)),
+          dict(weight_qtype="mxfp4", act_qtype=jnp.float8_e4m3fn, tile_size=32),
+          [((64, 2), (2, 16))],
+      ),
+  )
+  def test_microscaled_tile_size_per_operand(
+      self, make_model, rule_kwargs, expected_scales
+  ):
+    """Without tile_size, MX operands use their block size and others do not."""
+    rule = qt.QtRule(**rule_kwargs)
+    x = jnp.ones((64, 64))
+    dot_mod = qt.dot_general_qt.dot_general
+    with mock.patch.object(
+        dot_mod, "dot_general", wraps=dot_mod.dot_general
+    ) as mock_dot:
+      model = make_model()
+      if isinstance(model, nn.Module):
+        qt_mod = qwix_model.quantize_model(model, qt.QtProvider([rule]))
+        params = qt_mod.init(jax.random.key(0), x)["params"]
+        mock_dot.reset_mock()
+        jax.grad(lambda p, i: jnp.sum(qt_mod.apply({"params": p}, i)), (0, 1))(
+            params, x
+        )
+      else:
+        qt_mod = qwix_model.quantize_model(model, qt.QtProvider([rule]), x)
+        mock_dot.reset_mock()
+        nnx.grad(lambda m, i: jnp.sum(m(i)), argnums=(0, 1))(qt_mod, x)
+    shapes = [
+        (a.scale.shape, getattr(b, "scale", b).shape)
+        for (a, b, *_), _ in mock_dot.call_args_list[: len(expected_scales)]
+    ]
+    self.assertEqual(shapes, expected_scales)
+
+  @parameterized.named_parameters(
+      ("fwd", dict(weight_qtype="mxfp4", tile_size=128)),
+      (
+          "bwd",
+          dict(
+              weight_qtype=jnp.int8,
+              bwd_qtype="mxfp8",
+              bwd_weight_grad_tile_size=128,
+          ),
+      ),
+  )
+  def test_microscaled_invalid_tile_size(self, rule_kwargs):
+    x = jnp.ones((128, 128))
+    with self.assertRaisesRegex(ValueError, "requires a tile size of 32"):
+      qt_layer = qwix_model.quantize_model(
+          nnx.Linear(128, 32, rngs=nnx.Rngs(0)),
+          qt.QtProvider([qt.QtRule(**rule_kwargs)]),
+          x,
       )
+      nnx.grad(lambda m, i: jnp.sum(m(i)))(qt_layer, x)
 
   def test_dot_general_with_sparsity(self):
     """Tests that dot_general applies sparsity to rhs."""
@@ -220,16 +303,8 @@ class QtTest(parameterized.TestCase):
         weight_qtype="mxfp4",
         act_qtype="mxfp4",
         bwd_qtype="mxfp4",
-        tile_size=32,
-        bwd_weight_grad_tile_size=32,
         disable_channelwise_axes=False,
         act_static_scale=False,
-        additional_qt_config={
-            "dlhs_grad_qtype": "mxfp4",
-            "dlhs_tile_size": 32,
-            "drhs_grad_qtype": "mxfp4",
-            "drhs_tile_size": 32,
-        },
     )
     model_input = jnp.ones((2, 32, 64), dtype=jnp.float32)
     mha = nnx.MultiHeadAttention(

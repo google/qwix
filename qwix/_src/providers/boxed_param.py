@@ -81,24 +81,6 @@ class WithAux(Generic[ArrayTypeVar]):
 nnx.register_data_type(WithAux)
 
 
-def _get_tile_size(
-    tile_size: int | float | None, qtype: jax.typing.DTypeLike
-) -> int | float | None:
-  """Returns the tile size, or the block size of a microscaled qtype if unset.
-
-  Microscaled formats have a fixed block size, so `tile_size` can stay unset
-  for them; it then also stays unset for the other operand, e.g. per-token
-  activations with MXFP4 weights.
-
-  Args:
-    tile_size: The tile size from the quantization rule.
-    qtype: The qtype of the operand being quantized.
-  """
-  if tile_size is None:
-    return numerics.get_microscaled_block_size(qtype)
-  return tile_size
-
-
 class BoxedParamProvider(qconfig.QuantizationProvider):
   """Base provider for runtime ops that substitute boxed parameters.
 
@@ -156,7 +138,7 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
       return dot_general.get_how_to_quantize(
           dimension_numbers=dimension_numbers,
           ndims=(len(lhs.shape), len(rhs.shape)),
-          tile_size=_get_tile_size(rule.tile_size, qtype),
+          tile_size=numerics.resolve_tile_size(rule.tile_size, qtype),
           qtype=qtype,
           **kwargs,
       )
@@ -225,7 +207,7 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
       return einsum.get_how_to_quantize(
           einsum_str=einsum_str,
           ndims=(len(lhs.shape), len(rhs.shape)),
-          tile_size=_get_tile_size(rule.tile_size, qtype),
+          tile_size=numerics.resolve_tile_size(rule.tile_size, qtype),
           qtype=qtype,
           **kwargs,
       )

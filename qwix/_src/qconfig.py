@@ -58,10 +58,9 @@ class QuantizationRule:
   # If it's a float, it must be "1 / tile_count" and the actual tile size will
   # be round(axis_size * tile_size).
   # Microscaled formats (mxfp8, mxfp4, ...) have a fixed block size, which
-  # tile_size must equal if set. In PTQ and QLoRA it can stay unset: each
+  # tile_size must equal if set. In PTQ, QLoRA, and QT it can stay unset: each
   # microscaled operand uses its block size and the other operand is not
   # tiled, e.g. per-token activations with MXFP4 weights.
-  # TODO(siyuez): Apply the same default in QT.
   tile_size: int | float | None = None
 
   # If set, enable static-range quantization for input activations. Quantization
