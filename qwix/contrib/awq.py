@@ -191,7 +191,7 @@ class AwqInferenceProvider(ptq.PtqProvider):
       preferred_element_type: jax.typing.DTypeLike | None = None,
       *,
       out_sharding: jax.sharding.NamedSharding | None = None,
-      reduction_order: Any = None,
+      **kwargs: Any,
   ) -> jax.Array:
     # Handle AWQ-quantized weights with per-channel scale compensation.
     if isinstance(rhs, WithAwqScale):
@@ -205,7 +205,7 @@ class AwqInferenceProvider(ptq.PtqProvider):
         precision=precision,
         preferred_element_type=preferred_element_type,
         out_sharding=out_sharding,
-        reduction_order=reduction_order,
+        **kwargs,
     )
 
   def einsum(

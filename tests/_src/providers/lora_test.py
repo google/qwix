@@ -13,6 +13,7 @@
 # limitations under the License.
 import functools
 import os
+from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -201,50 +202,59 @@ class LoraTest(parameterized.TestCase):
         jnp.allclose(lora_module(model_input), expected_model_output)
     )
 
-  def test_lora_dot_general_forwards_reduction_order_on_non_weight(self):
-    class MatmulWithReductionOrder(nnx.Module):
+  def test_lora_dot_general_passes_options_through_on_non_weight(self):
+    """Options unknown to Qwix, e.g. from a newer JAX, reach JAX unchanged."""
 
-      def __init__(self):
-        self.basis = jnp.ones((4, 3), dtype=jnp.float32)
+    class Module(nn.Module):
 
-      def __call__(self, x):
-        return jax.lax.dot_general(
-            x,
-            self.basis,
-            (((1,), (0,)), ((), ())),
-            reduction_order="linear",
-        )
+      @nn.compact
+      def __call__(self, x, y, **options):
+        return jax.lax.dot_general(x, y, (((1,), (0,)), ((), ())), **options)
 
-    x = jnp.ones((2, 4), dtype=jnp.float32)
-    lora_module = lora.apply_lora_to_model(
-        MatmulWithReductionOrder(), lora.LoraProvider(rank=2, alpha=1.0), x
+    mod = Module()
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((3, 4), dtype=jnp.float32)
+    # JAX itself rejects the made-up option, with or without Qwix.
+    with self.assertRaises(TypeError) as jax_error:
+      mod.apply({}, x, y, new_option="x")
+    lora_mod = lora.apply_lora_to_model(
+        mod, lora.LoraProvider(rank=2, alpha=1.0)
     )
-    with jax.disable_jit():
-      jaxpr = jax.make_jaxpr(lora_module)(x)
-    dot_eqns = [e for e in jaxpr.eqns if e.primitive.name == "dot_general"]
-    self.assertLen(dot_eqns, 1)
-    self.assertEqual(dot_eqns[0].params["reduction_order"], "linear")
+    with self.assertRaises(TypeError) as lora_error:
+      lora_mod.apply({}, x, y, new_option="x")
+    self.assertEqual(str(lora_error.exception), str(jax_error.exception))
 
-  def test_lora_dot_general_rejects_reduction_order_on_weight(self):
-    class ReductionOrderLinear(nnx.Module):
+  def test_lora_dot_general_options_on_weight(self):
+    class Module(nn.Module):
+      provider: lora.LoraProvider
 
-      def __init__(self, rngs: nnx.Rngs):
-        self.kernel = nnx.Param(jax.random.normal(rngs.params(), (4, 3)))
+      @nn.compact
+      def __call__(self, x, **options):
+        w = self.param("w", nn.initializers.ones, (3, 4))
+        dnums = (((1,), (0,)), ((), ()))
+        return self.provider.dot_general(x, w, dnums, **options)
 
-      def __call__(self, x):
-        return jax.lax.dot_general(
-            x,
-            self.kernel.value,
-            (((1,), (0,)), ((), ())),
-            reduction_order="linear",
-        )
+    mod = Module(lora.LoraProvider(rank=2, alpha=1.0))
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    jax_dot_general = jax.lax.dot_general
 
-    module = ReductionOrderLinear(nnx.Rngs(0))
-    lora_provider = lora.LoraProvider(rank=2, alpha=1.0)
-    with self.assertRaisesRegex(
-        NotImplementedError, "reduction_order is not supported in LoRA"
-    ):
-      lora.apply_lora_to_model(module, lora_provider, jnp.ones((2, 4)))
+    def dot_general(*args, new_option=None, reduction_order=None, **kwargs):
+      del new_option, reduction_order  # The JAX under test may not have them.
+      return jax_dot_general(*args, **kwargs)
+
+    with mock.patch.object(
+        jax.lax, "dot_general", side_effect=dot_general
+    ) as mock_dot_general:
+      y, _ = mod.init_with_output(jax.random.key(0), x, new_option="x")
+      self.assertEqual(y.shape, (2, 4))
+      # Only the base contraction passes the option on to JAX: the two
+      # contractions of the LoRA delta ignore it.
+      self.assertEqual(
+          ["new_option" in c.kwargs for c in mock_dot_general.call_args_list],
+          [True, False, False],
+      )
+      with self.assertRaisesRegex(NotImplementedError, "reduction_order"):
+        mod.init(jax.random.key(0), x, reduction_order="linear")
 
   @parameterized.parameters(0.0, 1.0)
   def test_lora_einsum_nnx(self, dropout_rate):

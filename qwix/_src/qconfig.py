@@ -103,6 +103,25 @@ def get_current_rule(op_name: str) -> QuantizationRule | None:
   return None
 
 
+def check_unsupported_options(op: str, options: dict[str, Any]) -> None:
+  """Raises if `options` sets an option that a quantized op must not ignore.
+
+  A provider op takes the options of the intercepted JAX function that it does
+  not implement as `**kwargs`, so that options added by newer JAX versions need
+  no change in Qwix. It passes them through to JAX when not quantizing. When
+  quantizing, it calls this function and ignores the rest, like `precision`:
+  Qwix cannot tell whether the user set an option that it does not know, as
+  JAX's own callers also pass computed values, e.g. `jnp.dot` does so for
+  `preferred_element_type`.
+
+  Args:
+    op: The description of the op for the error message.
+    options: The options that the op does not implement.
+  """
+  if options.get('reduction_order') is not None:
+    raise NotImplementedError(f'{op} does not support reduction_order.')
+
+
 class QuantizationProvider:
   """Interface for model integration.
 

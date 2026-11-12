@@ -81,7 +81,7 @@ class QtProvider(qconfig.QuantizationProvider):
       preferred_element_type: jax.typing.DTypeLike | None = None,
       *,
       out_sharding=None,
-      reduction_order: Any = None,
+      **kwargs: Any,
   ) -> jax.Array:
     """QT dot_general."""
     rule, op_id = self._get_current_rule_and_op_id('dot_general')
@@ -93,13 +93,9 @@ class QtProvider(qconfig.QuantizationProvider):
           precision=precision,
           preferred_element_type=preferred_element_type,
           out_sharding=out_sharding,
-          reduction_order=reduction_order,
+          **kwargs,
       )
-    if reduction_order is not None:
-      raise NotImplementedError(
-          'reduction_order is not supported in quantized dot_general, got'
-          f' {reduction_order=}'
-      )
+    qconfig.check_unsupported_options('Quantized dot_general', kwargs)
     config = self._create_dot_general_qt_config(rule, op_id, lhs, rhs)  # pyrefly: ignore[bad-argument-type]
     return dot_general_qt.dot_general_qt(
         lhs, rhs, dimension_numbers, config, out_sharding=out_sharding

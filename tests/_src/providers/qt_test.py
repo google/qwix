@@ -14,6 +14,8 @@
 
 import itertools
 import os
+from unittest import mock
+
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import linen as nn
@@ -378,54 +380,63 @@ class QtTest(parameterized.TestCase):
           drhs_red.sharding.spec, pspec(None, None, unreduced={"x"})
       )
 
-  @parameterized.named_parameters(
-      dict(testcase_name="unquantized_none", rules=[], reduction_order=None),
-      dict(
-          testcase_name="unquantized_linear",
-          rules=[],
-          reduction_order="linear",
-      ),
-      dict(
-          testcase_name="quantized_none",
-          rules=[qt.QtRule(weight_qtype=jnp.int8)],
-          reduction_order=None,
-      ),
-  )
-  def test_dot_general_with_reduction_order(self, rules, reduction_order):
+  def test_unquantized_dot_general_passes_no_unset_options(self):
+    """JAX versions that predate an option must not get it from Qwix."""
+
     class Module(nn.Module):
       provider: qt.QtProvider
 
       @nn.compact
       def __call__(self, x, y):
-        dnums = (((1,), (0,)), ((), ()))
-        return self.provider.dot_general(
-            x, y, dnums, reduction_order=reduction_order
-        )
+        return self.provider.dot_general(x, y, (((1,), (0,)), ((), ())))
 
-    provider = qt.QtProvider(rules)
-    mod = Module(provider)
     x = jnp.ones((2, 3), dtype=jnp.float32)
     y = jnp.ones((3, 4), dtype=jnp.float32)
-    res = mod.apply({}, x, y)
-    self.assertEqual(res.shape, (2, 4))
+    with mock.patch.object(
+        jax.lax, "dot_general", wraps=jax.lax.dot_general
+    ) as jax_dot_general:
+      Module(qt.QtProvider([])).apply({}, x, y)
+    self.assertEqual(
+        jax_dot_general.call_args.kwargs,
+        dict(precision=None, preferred_element_type=None, out_sharding=None),
+    )
 
-  def test_quantized_dot_general_rejects_reduction_order(self):
+  def test_unquantized_dot_general_passes_options_through(self):
+    """Options unknown to Qwix, e.g. from a newer JAX, reach JAX unchanged."""
+
     class Module(nn.Module):
-      provider: qt.QtProvider
 
       @nn.compact
-      def __call__(self, x, y):
-        dnums = (((1,), (0,)), ((), ()))
-        return self.provider.dot_general(x, y, dnums, reduction_order="linear")
+      def __call__(self, x, y, **options):
+        return jax.lax.dot_general(x, y, (((1,), (0,)), ((), ())), **options)
 
-    provider = qt.QtProvider([qt.QtRule(weight_qtype=jnp.int8)])
-    mod = Module(provider)
+    mod = Module()
     x = jnp.ones((2, 3), dtype=jnp.float32)
     y = jnp.ones((3, 4), dtype=jnp.float32)
-    with self.assertRaisesRegex(
-        NotImplementedError, "reduction_order is not supported"
-    ):
-      mod.apply({}, x, y)
+    # JAX itself rejects the made-up option, with or without Qwix.
+    with self.assertRaises(TypeError) as jax_error:
+      mod.apply({}, x, y, new_option="x")
+    qt_mod = qwix_model.quantize_model(mod, qt.QtProvider([]))
+    with self.assertRaises(TypeError) as qt_error:
+      qt_mod.apply({}, x, y, new_option="x")
+    self.assertEqual(str(qt_error.exception), str(jax_error.exception))
+
+  def test_quantized_dot_general_options(self):
+    class Module(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, y, **options):
+        return jax.lax.dot_general(x, y, (((1,), (0,)), ((), ())), **options)
+
+    mod = qwix_model.quantize_model(
+        Module(), qt.QtProvider([qt.QtRule(weight_qtype=jnp.int8)])
+    )
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((3, 4), dtype=jnp.float32)
+    # Options that Qwix does not know are ignored, like precision.
+    self.assertEqual(mod.apply({}, x, y, new_option="x").shape, (2, 4))
+    with self.assertRaisesRegex(NotImplementedError, "reduction_order"):
+      mod.apply({}, x, y, reduction_order="linear")
 
   @parameterized.named_parameters(
       dict(testcase_name="dot", op=jnp.dot),

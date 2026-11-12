@@ -35,61 +35,64 @@ os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 
 class PtqTest(parameterized.TestCase):
 
-  @parameterized.named_parameters(
-      dict(testcase_name="unquantized_none", rules=[], reduction_order=None),
-      dict(
-          testcase_name="unquantized_linear",
-          rules=[],
-          reduction_order="linear",
-      ),
-      dict(
-          testcase_name="quantized_none",
-          rules=[qconfig.QuantizationRule(weight_qtype=jnp.int8)],
-          reduction_order=None,
-      ),
-  )
-  def test_dot_general_with_reduction_order(self, rules, reduction_order):
+  def test_unquantized_dot_general_passes_no_unset_options(self):
+    """JAX versions that predate an option must not get it from Qwix."""
+
     class Module(nn.Module):
       provider: ptq.PtqProvider
 
       @nn.compact
       def __call__(self, x, y):
-        dnums = (((1,), (0,)), ((), ()))
-        return self.provider.dot_general(
-            x, y, dnums, reduction_order=reduction_order
-        )
+        return self.provider.dot_general(x, y, (((1,), (0,)), ((), ())))
 
-    mod = Module(ptq.PtqProvider(rules))
     x = jnp.ones((2, 3), dtype=jnp.float32)
     y = jnp.ones((3, 4), dtype=jnp.float32)
-    self.assertEqual(mod.apply({}, x, y).shape, (2, 4))
-    if not rules:
-      jaxpr = jax.make_jaxpr(lambda a, b: mod.apply({}, a, b))(x, y)
-      dot_eqns = [e for e in jaxpr.eqns if e.primitive.name == "dot_general"]
-      self.assertLen(dot_eqns, 1)
-      if reduction_order is None:
-        self.assertNotIn("reduction_order", dot_eqns[0].params)
-      else:
-        self.assertEqual(dot_eqns[0].params["reduction_order"], reduction_order)
+    with mock.patch.object(
+        jax.lax, "dot_general", wraps=jax.lax.dot_general
+    ) as jax_dot_general:
+      Module(ptq.PtqProvider([])).apply({}, x, y)
+    self.assertEqual(
+        jax_dot_general.call_args.kwargs,
+        dict(precision=None, preferred_element_type=None, out_sharding=None),
+    )
 
-  def test_quantized_dot_general_rejects_reduction_order(self):
+  def test_unquantized_dot_general_passes_options_through(self):
+    """Options unknown to Qwix, e.g. from a newer JAX, reach JAX unchanged."""
+
     class Module(nn.Module):
-      provider: ptq.PtqProvider
 
       @nn.compact
-      def __call__(self, x, y):
-        dnums = (((1,), (0,)), ((), ()))
-        return self.provider.dot_general(x, y, dnums, reduction_order="linear")
+      def __call__(self, x, y, **options):
+        return jax.lax.dot_general(x, y, (((1,), (0,)), ((), ())), **options)
 
-    mod = Module(
-        ptq.PtqProvider([qconfig.QuantizationRule(weight_qtype=jnp.int8)])
+    mod = Module()
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((3, 4), dtype=jnp.float32)
+    # JAX itself rejects the made-up option, with or without Qwix.
+    with self.assertRaises(TypeError) as jax_error:
+      mod.apply({}, x, y, new_option="x")
+    ptq_mod = qwix_model.quantize_model(mod, ptq.PtqProvider([]))
+    with self.assertRaises(TypeError) as ptq_error:
+      ptq_mod.apply({}, x, y, new_option="x")
+    self.assertEqual(str(ptq_error.exception), str(jax_error.exception))
+
+  def test_quantized_dot_general_options(self):
+    class Module(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, y, **options):
+        return jax.lax.dot_general(x, y, (((1,), (0,)), ((), ())), **options)
+
+    mod = qwix_model.quantize_model(
+        Module(),
+        ptq.PtqProvider([qconfig.QuantizationRule(weight_qtype=jnp.int8)]),
     )
     x = jnp.ones((2, 3), dtype=jnp.float32)
     y = jnp.ones((3, 4), dtype=jnp.float32)
-    with self.assertRaisesRegex(
-        NotImplementedError, "reduction_order is not supported in quantized"
-    ):
-      mod.apply({}, x, y)
+    # Options that Qwix does not know are ignored, like precision.
+    self.assertEqual(mod.apply({}, x, y, new_option="x").shape, (2, 4))
+    with self.assertRaisesRegex(NotImplementedError, "reduction_order"):
+      mod.apply({}, x, y, reduction_order="linear")
 
   def test_nn_ptq(self):
     dense = nn.Dense(

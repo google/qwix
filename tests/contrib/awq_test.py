@@ -495,41 +495,37 @@ class AwqTest(parameterized.TestCase):
     mae = lambda x, y: jnp.mean(jnp.abs(x - y))
     self.assertLessEqual(mae(fp_y, awq_y), mae(fp_y, ptq_y))
 
-  def test_dot_general_with_reduction_order(self):
+  def test_dot_general_passes_options_through(self):
+    """Options unknown to Qwix, e.g. from a newer JAX, reach JAX unchanged."""
+
+    class Module(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, y, **options):
+        return jax.lax.dot_general(x, y, (((1,), (0,)), ((), ())), **options)
+
+    mod = Module()
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((3, 4), dtype=jnp.float32)
+    # JAX itself rejects the made-up option, with or without Qwix.
+    with self.assertRaises(TypeError) as jax_error:
+      mod.apply({}, x, y, new_option='x')
+    awq_mod = qwix_model.quantize_model(mod, awq.AwqInferenceProvider([]))
+    with self.assertRaises(TypeError) as awq_error:
+      awq_mod.apply({}, x, y, new_option='x')
+    self.assertEqual(str(awq_error.exception), str(jax_error.exception))
+
+  def test_quantized_dot_general_options(self):
     class Model(nn.Module):
 
       @nn.compact
-      def __call__(self, x, reduction_order=None):
+      def __call__(self, x, **options):
         w = self.param('kernel', nn.initializers.ones, (4, 8), jnp.float32)
-        return jax.lax.dot_general(
-            x,
-            w,
-            (((1,), (0,)), ((), ())),
-            reduction_order=reduction_order,
-        )
+        return jax.lax.dot_general(x, w, (((1,), (0,)), ((), ())), **options)
 
     model = Model()
     x = jnp.ones((2, 4), dtype=jnp.float32)
     variables = model.init(jax.random.key(0), x)
-
-    unquantized = qwix_model.quantize_model(model, awq.AwqInferenceProvider([]))
-    for order in (None, 'linear'):
-      self.assertEqual(
-          unquantized.apply(variables, x, reduction_order=order).shape, (2, 8)
-      )
-      with jax.disable_jit():
-        jaxpr = jax.make_jaxpr(
-            lambda a, ro=order: unquantized.apply(
-                variables, a, reduction_order=ro
-            )
-        )(x)
-      dot_eqns = [e for e in jaxpr.eqns if e.primitive.name == 'dot_general']
-      self.assertLen(dot_eqns, 1)
-      if order is None:
-        self.assertNotIn('reduction_order', dot_eqns[0].params)
-      else:
-        self.assertEqual(dot_eqns[0].params['reduction_order'], order)
-
     rules = [awq.AwqRule(weight_qtype=jnp.int8)]
     cal_model = qwix_model.quantize_model(
         model, awq.AwqCalibrationProvider(rules)
@@ -544,14 +540,11 @@ class AwqTest(parameterized.TestCase):
     awq_model = qwix_model.quantize_model(
         model, awq.AwqInferenceProvider(rules)
     )
-    self.assertEqual(
-        awq_model.apply({'params': awq_params}, x, reduction_order=None).shape,
-        (2, 8),
-    )
-    with self.assertRaisesRegex(
-        NotImplementedError, 'reduction_order is not supported in quantized'
-    ):
-      awq_model.apply({'params': awq_params}, x, reduction_order='linear')
+    awq_vars = {'params': awq_params}
+    # Options that Qwix does not know are ignored, like precision.
+    self.assertEqual(awq_model.apply(awq_vars, x, new_option='x').shape, (2, 8))
+    with self.assertRaisesRegex(NotImplementedError, 'reduction_order'):
+      awq_model.apply(awq_vars, x, reduction_order='linear')
 
 
 if __name__ == '__main__':
