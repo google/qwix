@@ -650,10 +650,14 @@ def quantize_with_scale_zero_point(
     The quantized array.
   """
   if not numerics.should_quantize(array.dtype):
-    raise ValueError(f'Refuse to quantize: {array.dtype}')
+    raise ValueError(
+        f'Cannot quantize array of dtype {array.dtype}. Supported input dtypes'
+        ' for quantization are bfloat16, float16, float32, and float64.'
+    )
   if zero_point is not None and zero_point.shape != scale.shape:
     raise ValueError(
-        f'Expect zero_point shape {scale.shape} but got {zero_point.shape}'
+        f'Expected zero_point shape {scale.shape} to match scale shape,'
+        f' but got {zero_point.shape}.'
     )
 
   # Ensure that the scale has the same dtype as the fp array, because

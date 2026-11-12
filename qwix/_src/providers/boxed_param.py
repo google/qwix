@@ -510,8 +510,16 @@ def create_quantized_param(
   module = flax_util.get_current_module()
   if isinstance(module, nn.Module):
     if not module.is_initializing():
+      mod_path = (
+          '/'.join(map(str, flax_util.get_current_module_path()))
+          or module.name
+          or '<root>'
+      )
       raise ValueError(
-          "It seems you're feeding an unquantized param to a quantized model."
+          f"Expected quantized parameter for '{name}' in Linen module"
+          f" '{mod_path}' (type QArray or WithAux), but got an unquantized"
+          f' {type(value).__name__}. If using PTQ, ensure'
+          ' qwix.quantize_params() was called on this variable subtree.'
       )
     param = module.get_variable('params', name)
     boxed = jax.tree.map(

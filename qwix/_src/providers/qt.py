@@ -127,7 +127,11 @@ class QtProvider(qconfig.QuantizationProvider):
       )
     if len(operands) != 2:
       # TODO(jiwonshin): Support N-ary einsum if there is a need in the future.
-      raise ValueError(f'Unsupported einsum format: {einsum_str=} {operands=}')
+      raise ValueError(
+          f"Unsupported einsum format '{einsum_str}': received"
+          f' {len(operands)} operands. Qwix currently supports only binary'
+          ' einsum operations (2 operands).'
+      )
 
     def custom_dot_general(
         lhs,
@@ -192,7 +196,17 @@ class QtProvider(qconfig.QuantizationProvider):
           out_sharding=out_sharding,
       )
     if rule.tile_size:
-      raise ValueError('subchannel is not supported for conv_general_dilated.')
+      mod_path = '/'.join(map(str, flax_util.get_current_module_path()))
+      if mod_path:
+        mod_str = f"'{mod_path}'"
+      else:
+        mod_str = f"rule pattern '{rule.module_path}'"
+      raise ValueError(
+          f'Subchannel quantization (tile_size={rule.tile_size}) is not'
+          f' supported for conv_general_dilated in module {mod_str}.'
+          ' Please remove tile_size from this rule or add a higher-precedence'
+          ' rule without tile_size for this module.'
+      )
     config = self._create_conv_general_qt_config(rule, op_id, lhs, rhs)  # pyrefly: ignore[bad-argument-type]
     return conv_general_qt.conv_general_qt(
         lhs,

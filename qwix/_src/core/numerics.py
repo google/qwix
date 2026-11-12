@@ -135,7 +135,12 @@ def get_symmetric_bound(qtype: jax.typing.DTypeLike) -> float:
 
   # Prevent common misconfigurations, e.g., use bf16 as qtype.
   if jnp.dtype(qtype).itemsize > 1 and jnp.dtype(qtype) != jnp.int16:
-    raise ValueError(f'Cannot use {qtype} as qtype.')
+    raise ValueError(
+        f"Invalid qtype '{jnp.dtype(qtype)}'. Qtypes must be 8-bit or lower (or"
+        f' int16 for TFLite/QATv3); got itemsize={jnp.dtype(qtype).itemsize}.'
+        ' Supported qtypes include jnp.int8, jnp.int4, jnp.float8_e4m3fn, and'
+        ' jnp.float8_e5m2.'
+    )
   if jnp.dtype(qtype) == jnp.int16:
     # TFLite/QATv3 uses 32768 for int16 symmetric quantization.
     return 32768.0

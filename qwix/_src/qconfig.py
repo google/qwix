@@ -257,8 +257,11 @@ class QuantizationProvider:
     """
     if not self._initial_run_complete:
       raise ValueError(
-          'Quantization is not completed yet. Please call `quantize_model`'
-          ' before calling `get_unused_rules`.'
+          'Quantization is not complete yet. Cannot determine unused rules'
+          ' before model execution. In Linen, run a forward pass with'
+          ' model.apply(...) or model.init(...) before calling'
+          ' get_unused_rules(). In NNX, call quantize_model(..., dummy_inputs)'
+          ' or run the model once.'
       )
     return [
         self._rules[i]
