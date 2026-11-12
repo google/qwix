@@ -7,9 +7,9 @@ targets (LiteRT).
 ## Features
 
 *   Supported schemas:
-    * Weight-only quantization.
-    * Dynamic-range quantization.
-    * Static-range quantization.
+    *   Weight-only quantization.
+    *   Dynamic-range quantization.
+    *   Static-range quantization.
 *   Supported modes:
     *   QAT: this mode emulates quantized behavior during serving with fake
         quantization.
@@ -37,8 +37,13 @@ targets (LiteRT).
 
 ## Usage
 
-Qwix doesn't provide a PyPI package yet. To use Qwix, you need to install from
-GitHub directly.
+Install Qwix from PyPI:
+
+```sh
+pip install qwix
+```
+
+To install the latest unreleased changes directly from GitHub:
 
 ```sh
 pip install git+https://github.com/google/qwix
@@ -134,8 +139,8 @@ Now the `ptq_model` will contain quantized weights. We could verify that.
 ### Weight quantization
 
 Since Flax Linen modules are pure-functional, weights quantization are separate
-from model quantization. To quantize weights for the above `ptq_model`, we
-need to call `qwix.quantize_params`.
+from model quantization. To quantize weights for the above `ptq_model`, we need
+to call `qwix.quantize_params`.
 
 ```py
 # Floating-point params, usually loaded from checkpoints.
@@ -177,6 +182,7 @@ Please refer to [CONTRIBUTING.md](CONTRIBUTING.md) for more information.
 To cite Qwix please use the citation:
 
 <!-- disableFinding(SNIPPET_INVALID_LANGUAGE) -->
+
 ```bibtex
 @software{Qwix,
   title = {Qwix: A Quantization Library for Jax},
