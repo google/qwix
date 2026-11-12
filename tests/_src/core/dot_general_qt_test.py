@@ -834,16 +834,13 @@ class DotGeneralQtTest(parameterized.TestCase):
 
     ref_grad_lhs, ref_grad_rhs = jax.grad(ref_loss, argnums=(0, 1))(lhs, rhs)
 
-    for qtype, tile_size in [('mxfp8', 32), ('mxfp8_16', 16)]:
+    for qtype in ('mxfp8', 'mxfp8_16'):
       with self.subTest(qtype=qtype):
         config = dot_general_qt.DotGeneralQtConfig(
             lhs_qtype=qtype,
             rhs_qtype=qtype,
             dlhs_grad_qtype=qtype,
             drhs_grad_qtype=qtype,
-            tile_size=tile_size,
-            dlhs_tile_size=tile_size,
-            drhs_tile_size=tile_size,
             use_original_residuals=False,
         )
         test_fwd = dot_general_qt.dot_general_qt(lhs, rhs, dnums, config=config)

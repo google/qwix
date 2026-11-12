@@ -52,6 +52,13 @@ def get_microscaled_block_size(qtype: jax.typing.DTypeLike) -> int | None:
   return None
 
 
+def resolve_tile_size(
+    tile_size: int | float | None, qtype: jax.typing.DTypeLike
+) -> int | float | None:
+  """Returns `tile_size`, or the block size of a microscaled `qtype` if unset."""
+  return get_microscaled_block_size(qtype) if tile_size is None else tile_size
+
+
 def can_dequant_on_output(qtype: jax.typing.DTypeLike) -> bool:
   """Checks if the qtype supports dequantizing after quantized computation.
 
