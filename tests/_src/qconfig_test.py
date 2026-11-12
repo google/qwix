@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from absl.testing import absltest
+from flax import linen as nn
 from flax import nnx
+import jax
 from jax import numpy as jnp
 from qwix._src import model as qwix_model
 from qwix._src import qconfig
@@ -106,12 +108,33 @@ class QconfigTest(absltest.TestCase):
     provider = ptq.PtqProvider(rules)
     with self.assertRaisesRegex(
         ValueError,
-        "Quantization is not completed yet. Please call `quantize_model`"
-        " before calling `get_unused_rules`.",
+        "Quantization is not complete yet. Cannot determine unused rules",
     ):
       provider.get_unused_rules()
 
     qwix_model.quantize_model(self.model, provider, self.x)
+    self.assertEmpty(provider.get_unused_rules())
+
+  def test_get_unused_rules_raises_after_quantize_model_linen(self):
+    class LinenModel(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        return nn.Dense(16)(x)
+
+    rules = [qconfig.QuantizationRule(weight_qtype="float8_e4m3fn")]
+    provider = ptq.PtqProvider(rules)
+    quant_model = qwix_model.quantize_model(LinenModel(), provider)
+    with self.assertRaisesRegex(
+        ValueError,
+        "Quantization is not complete yet. Cannot determine unused rules"
+        r" before model execution\. In Linen, run a forward pass with"
+        r" model\.apply\(\.\.\.\) or model\.init\(\.\.\.\)",
+    ):
+      provider.get_unused_rules()
+
+    variables = quant_model.init(jax.random.key(0), jnp.ones((1, 16)))
+    _ = quant_model.apply(variables, jnp.ones((1, 16)))
     self.assertEmpty(provider.get_unused_rules())
 
   def test_invalid_rule_static_scale_without_act_qtype(self):

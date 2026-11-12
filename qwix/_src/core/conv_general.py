@@ -126,7 +126,11 @@ def _fast_conv_general_dilated(
     lhs_scale = lhs.scale
     lhs_zero_point = lhs.zero_point
     if qarray.get_tiled_axes(lhs):
-      raise ValueError('subchannel is not supported for conv_general_dilated.')
+      raise ValueError(
+          'Subchannel quantization is not supported for conv_general_dilated'
+          f' (lhs tiled axes: {qarray.get_tiled_axes(lhs)}). Only per-tensor or'
+          ' per-channel quantization is supported for convolutions.'
+      )
   else:
     lhs_value = lhs
     lhs_scale = None
@@ -137,7 +141,11 @@ def _fast_conv_general_dilated(
     rhs_scale = rhs.scale
     rhs_zero_point = rhs.zero_point
     if qarray.get_tiled_axes(rhs):
-      raise ValueError('subchannel is not supported for conv_general_dilated.')
+      raise ValueError(
+          'Subchannel quantization is not supported for conv_general_dilated'
+          f' (rhs tiled axes: {qarray.get_tiled_axes(rhs)}). Only per-tensor or'
+          ' per-channel quantization is supported for convolutions.'
+      )
   else:
     rhs_value = rhs
     rhs_scale = None
