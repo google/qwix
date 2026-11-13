@@ -87,6 +87,7 @@ def get_sparsity_mask(
     offset: int = 0,
     *,
     axis: int | None = None,
+    stride: int = 1,
 ) -> jax.Array:
   """Returns sparsified inputs for n:m structured pruning.
 
@@ -111,14 +112,22 @@ def get_sparsity_mask(
         (offset * m). Offset != 128 may not be best optimized for the memory
         layout.
     axis: Optional axis along which to form the N:M groups. When specified,
-      groups of `m_sparsity` consecutive elements along `axis` keep their
+      groups of `m_sparsity` elements spaced by `stride` along `axis` keep their
       `n_sparsity` largest magnitudes without flattening other dimensions
       (`order` is ignored, and `block_size > 1` or `offset != 0` is rejected).
+    stride: Step along `axis` between elements within each N:M group (`1` for
+      contiguous groups; `stride != 1` requires `axis` to be specified).
 
   Returns:
     A mask that indicates the pruning locations (`True`: kept, `False`:
     pruned).
   """
+  if stride <= 0:
+    raise ValueError(f'stride must be positive; got {stride=}.')
+  if axis is None and stride != 1:
+    raise ValueError(
+        f'stride != 1 requires an explicit axis; got axis=None, {stride=}.'
+    )
   assert (
       n_sparsity <= m_sparsity
   ), f'N must be lower than M for N:M ({n_sparsity}:{m_sparsity}) sparsity.'
@@ -129,11 +138,12 @@ def get_sparsity_mask(
       )
     axis %= inputs.ndim
     shape = inputs.shape
-    if shape[axis] % m_sparsity != 0:
+    group_span = m_sparsity * stride
+    if shape[axis] % group_span != 0:
       raise ValueError(
           f'Cannot apply {n_sparsity}:{m_sparsity} sparsity along axis {axis}'
           f' of an array with shape {shape}: dimension {shape[axis]} is not'
-          f' divisible by M={m_sparsity}.'
+          f' divisible by M*stride={group_span}.'
       )
     if block_size > 1 or offset != 0:
       raise ValueError(
@@ -142,7 +152,7 @@ def get_sparsity_mask(
       )
     grouped_shape = (
         shape[:axis]
-        + (shape[axis] // m_sparsity, m_sparsity)
+        + (shape[axis] // group_span, m_sparsity, stride)
         + shape[axis + 1 :]
     )
     magnitudes = jnp.moveaxis(

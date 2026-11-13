@@ -550,7 +550,7 @@ class AxisPruningFunctionalityTest(parameterized.TestCase):
 
   def test_axis_errors(self):
     x = jnp.ones((6, 4), dtype=jnp.float32)
-    with self.assertRaisesRegex(ValueError, 'not divisible by M=4'):
+    with self.assertRaisesRegex(ValueError, r'not divisible by M\*stride=4'):
       sparsity.get_sparsity_mask(x, n_sparsity=2, m_sparsity=4, axis=0)
     for bad_axis in (2, -3):
       with self.assertRaisesRegex(ValueError, 'out of range'):
@@ -563,6 +563,173 @@ class AxisPruningFunctionalityTest(parameterized.TestCase):
       sparsity.get_sparsity_mask(
           jnp.ones((8, 4)), n_sparsity=2, m_sparsity=4, offset=2, axis=0
       )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='2d_axis1_1_4_stride2',
+          inputs=[
+              [
+                  1.0,
+                  2.0,
+                  -3.0,
+                  6.0,
+                  -9.0,
+                  -4.0,
+                  5.0,
+                  8.0,
+                  7.0,
+                  -1.0,
+                  -2.0,
+                  -8.0,
+                  4.0,
+                  3.0,
+                  -6.0,
+                  5.0,
+              ],
+              [2.0] * 16,
+          ],
+          n=1,
+          m=4,
+          axis=1,
+          stride=2,
+          expected_mask=[
+              [
+                  False,
+                  False,
+                  False,
+                  False,
+                  True,
+                  False,
+                  False,
+                  True,
+                  True,
+                  False,
+                  False,
+                  True,
+                  False,
+                  False,
+                  False,
+                  False,
+              ],
+              [
+                  True,
+                  True,
+                  False,
+                  False,
+                  False,
+                  False,
+                  False,
+                  False,
+                  True,
+                  True,
+                  False,
+                  False,
+                  False,
+                  False,
+                  False,
+                  False,
+              ],
+          ],
+      ),
+      dict(
+          testcase_name='2d_axis0_2_4_stride2',
+          inputs=[
+              [1.0, -8.0],
+              [4.0, 3.0],
+              [-5.0, 2.0],
+              [-2.0, -9.0],
+              [3.0, 6.0],
+              [-6.0, 1.0],
+              [-7.0, -1.0],
+              [8.0, 5.0],
+          ],
+          n=2,
+          m=4,
+          axis=0,
+          stride=2,
+          expected_mask=[
+              [False, True],
+              [False, False],
+              [True, False],
+              [False, True],
+              [False, True],
+              [True, False],
+              [True, False],
+              [True, True],
+          ],
+      ),
+      dict(
+          testcase_name='3d_negative_middle_axis_1_2_stride3',
+          inputs=[
+              [
+                  [9.0, 1.0, -2.0, 5.0],
+                  [2.0, -6.0, 4.0, 1.0],
+                  [-8.0, 2.0, 3.0, -4.0],
+                  [3.0, -8.0, -7.0, 2.0],
+                  [-5.0, 3.0, 1.0, -9.0],
+                  [1.0, 7.0, -6.0, 4.0],
+              ],
+              [
+                  [1.0, -9.0, 6.0, 2.0],
+                  [7.0, 1.0, -8.0, 3.0],
+                  [3.0, 8.0, 1.0, -9.0],
+                  [-4.0, 2.0, 1.0, -7.0],
+                  [2.0, -5.0, 4.0, -6.0],
+                  [-7.0, 4.0, -5.0, 2.0],
+              ],
+          ],
+          n=1,
+          m=2,
+          axis=-2,
+          stride=3,
+          expected_mask=[
+              [
+                  [True, False, False, True],
+                  [False, True, True, False],
+                  [True, False, False, True],
+                  [False, True, True, False],
+                  [True, False, False, True],
+                  [False, True, True, False],
+              ],
+              [
+                  [False, True, True, False],
+                  [True, False, True, False],
+                  [False, True, False, True],
+                  [True, False, False, True],
+                  [False, True, False, True],
+                  [True, False, True, False],
+              ],
+          ],
+      ),
+  )
+  def test_get_sparsity_mask_with_stride(
+      self, inputs, n, m, axis, stride, expected_mask
+  ):
+    inputs = jnp.asarray(inputs, dtype=jnp.float32)
+    mask = sparsity.get_sparsity_mask(
+        inputs, n_sparsity=n, m_sparsity=m, axis=axis, stride=stride
+    )
+    self.assertEqual(mask.dtype, jnp.bool_)
+    np.testing.assert_array_equal(mask, expected_mask)
+
+  @parameterized.named_parameters(
+      ('zero_no_axis', dict(stride=0), 'stride must be positive'),
+      (
+          'negative_with_axis',
+          dict(axis=0, stride=-2),
+          'stride must be positive',
+      ),
+      ('stride_without_axis', dict(stride=2), 'requires an explicit axis'),
+      (
+          'not_divisible_by_m_times_stride',
+          dict(axis=0, stride=2),
+          r'not divisible by M\*stride=8',
+      ),
+  )
+  def test_stride_errors(self, kwargs, error_regex):
+    x = jnp.ones((4, 4), dtype=jnp.float32)
+    with self.assertRaisesRegex(ValueError, error_regex):
+      sparsity.get_sparsity_mask(x, 2, 4, **kwargs)
 
 
 if __name__ == '__main__':
