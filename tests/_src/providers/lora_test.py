@@ -256,6 +256,124 @@ class LoraTest(parameterized.TestCase):
       with self.assertRaisesRegex(NotImplementedError, "reduction_order"):
         mod.init(jax.random.key(0), x, reduction_order="linear")
 
+  def test_lora_einsum_passes_options_through_on_non_weight(self):
+    """Options unknown to Qwix, e.g. from a newer JAX, reach JAX unchanged."""
+
+    class Module(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, y, **options):
+        return jnp.einsum("ij,jk->ik", x, y, **options)
+
+    mod = Module()
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((3, 4), dtype=jnp.float32)
+    with self.assertRaises(TypeError) as jax_error:
+      mod.apply({}, x, y, new_option="x")
+    lora_mod = lora.apply_lora_to_model(
+        mod, lora.LoraProvider(rank=2, alpha=1.0)
+    )
+    with self.assertRaises(TypeError) as lora_error:
+      lora_mod.apply({}, x, y, new_option="x")
+    self.assertEqual(str(lora_error.exception), str(jax_error.exception))
+
+  def test_lora_einsum_options_on_weight(self):
+    class Module(nnx.Module):
+
+      def __init__(self):
+        self.w = nnx.Param(jnp.ones((3, 4)))
+
+      def __call__(self, x, **options):
+        return jnp.einsum("ij,jk->ik", x, self.w, **options)
+
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    lora_module = lora.apply_lora_to_model(
+        Module(), lora.LoraProvider(rank=2, alpha=1.0), x
+    )
+    jax_einsum = jnp.einsum
+
+    def einsum(*args, new_option=None, reduction_order=None, **kwargs):
+      del new_option, reduction_order
+      return jax_einsum(*args, **kwargs)
+
+    with mock.patch.object(jnp, "einsum", side_effect=einsum) as mock_einsum:
+      y = lora_module(x, new_option="x")
+      self.assertEqual(y.shape, (2, 4))
+      # Only the base contraction passes the option on to JAX; the LoRA delta
+      # ignores it.
+      self.assertEqual(
+          ["new_option" in c.kwargs for c in mock_einsum.call_args_list],
+          [True, False],
+      )
+      with self.assertRaisesRegex(NotImplementedError, "reduction_order"):
+        lora_module(x, reduction_order="linear")
+
+  def test_lora_conv_general_dilated_passes_options_through_on_non_weight(self):
+    """Options unknown to Qwix, e.g. from a newer JAX, reach JAX unchanged."""
+
+    class Module(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, y, **options):
+        return jax.lax.conv_general_dilated(
+            x,
+            y,
+            (1, 1),
+            "SAME",
+            dimension_numbers=("NHWC", "HWIO", "NHWC"),
+            **options,
+        )
+
+    mod = Module()
+    x = jnp.ones((1, 4, 4, 2), dtype=jnp.float32)
+    y = jnp.ones((2, 2, 2, 3), dtype=jnp.float32)
+    with self.assertRaises(TypeError) as jax_error:
+      mod.apply({}, x, y, new_option="x")
+    lora_mod = lora.apply_lora_to_model(
+        mod, lora.LoraProvider(rank=2, alpha=1.0)
+    )
+    with self.assertRaises(TypeError) as lora_error:
+      lora_mod.apply({}, x, y, new_option="x")
+    self.assertEqual(str(lora_error.exception), str(jax_error.exception))
+
+  def test_lora_conv_general_dilated_options_on_weight(self):
+    class Module(nn.Module):
+      provider: lora.LoraProvider
+
+      @nn.compact
+      def __call__(self, x, **options):
+        w = self.param("w", nn.initializers.ones, (2, 2, 2, 3))
+        return self.provider.conv_general_dilated(
+            x,
+            w,
+            window_strides=(1, 1),
+            padding="SAME",
+            dimension_numbers=("NHWC", "HWIO", "NHWC"),
+            **options,
+        )
+
+    mod = Module(lora.LoraProvider(rank=2, alpha=1.0))
+    x = jnp.ones((1, 4, 4, 2), dtype=jnp.float32)
+    jax_conv = jax.lax.conv_general_dilated
+
+    def conv_general_dilated(
+        *args, new_option=None, reduction_order=None, **kwargs
+    ):
+      del new_option, reduction_order
+      return jax_conv(*args, **kwargs)
+
+    with mock.patch.object(
+        jax.lax, "conv_general_dilated", side_effect=conv_general_dilated
+    ) as mock_conv:
+      y, _ = mod.init_with_output(jax.random.key(0), x, new_option="x")
+      self.assertEqual(y.shape, (1, 4, 4, 3))
+      self.assertEqual(
+          ["new_option" in c.kwargs for c in mock_conv.call_args_list],
+          [True, False],
+      )
+      with self.assertRaisesRegex(NotImplementedError, "reduction_order"):
+        mod.init(jax.random.key(0), x, reduction_order="linear")
+
   @parameterized.parameters(0.0, 1.0)
   def test_lora_einsum_nnx(self, dropout_rate):
     """Test LoRA on nnx.Einsum module."""

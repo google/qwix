@@ -109,6 +109,7 @@ class QtProvider(qconfig.QuantizationProvider):
       preferred_element_type: jax.typing.DTypeLike | None = None,
       _dot_general: Callable[..., jax.Array] = jax.lax.dot_general,  # pylint: disable=invalid-name
       out_sharding=None,
+      **kwargs: Any,
   ) -> jax.Array:
     """QT einsum."""
     rule, op_id = self._get_current_rule_and_op_id('einsum')
@@ -120,7 +121,9 @@ class QtProvider(qconfig.QuantizationProvider):
           preferred_element_type=preferred_element_type,
           _dot_general=_dot_general,
           out_sharding=out_sharding,
+          **kwargs,
       )
+    qconfig.check_unsupported_options('Quantized einsum', kwargs)
     if len(operands) != 2:
       # TODO(jiwonshin): Support N-ary einsum if there is a need in the future.
       raise ValueError(f'Unsupported einsum format: {einsum_str=} {operands=}')
@@ -129,12 +132,13 @@ class QtProvider(qconfig.QuantizationProvider):
         lhs,
         rhs,
         dimension_numbers,
-        precision,
-        preferred_element_type,
+        precision=None,
+        preferred_element_type=None,
         **kwargs,
     ):
       # TODO(dangyi): support preferred_element_type.
       del precision, preferred_element_type
+      qconfig.check_unsupported_options('Quantized einsum', kwargs)
       return dot_general_qt.dot_general_qt(
           lhs,
           rhs,
@@ -169,6 +173,7 @@ class QtProvider(qconfig.QuantizationProvider):
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
       out_sharding=None,
+      **kwargs: Any,
   ) -> jax.Array:
     """QT conv_general_dilated."""
     rule, op_id = self._get_current_rule_and_op_id('conv_general_dilated')
@@ -186,7 +191,9 @@ class QtProvider(qconfig.QuantizationProvider):
           precision=precision,
           preferred_element_type=preferred_element_type,
           out_sharding=out_sharding,
+          **kwargs,
       )
+    qconfig.check_unsupported_options('Quantized conv_general_dilated', kwargs)
     if rule.tile_size:
       raise ValueError('subchannel is not supported for conv_general_dilated.')
     config = self._create_conv_general_qt_config(rule, op_id, lhs, rhs)  # pyrefly: ignore[bad-argument-type]
@@ -212,6 +219,7 @@ class QtProvider(qconfig.QuantizationProvider):
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
       group_offset: jax.Array | None = None,
+      **kwargs: Any,
   ) -> jax.Array:
     """QT ragged_dot."""
     rule, _ = self._get_current_rule_and_op_id('ragged_dot')
@@ -223,7 +231,9 @@ class QtProvider(qconfig.QuantizationProvider):
           precision=precision,
           preferred_element_type=preferred_element_type,
           group_offset=group_offset,
+          **kwargs,
       )
+    qconfig.check_unsupported_options('Quantized ragged_dot', kwargs)
     config = self._create_ragged_dot_qt_config(rule)
     return ragged_dot_qt.ragged_dot_qt(
         lhs,

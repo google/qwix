@@ -94,6 +94,216 @@ class PtqTest(parameterized.TestCase):
     with self.assertRaisesRegex(NotImplementedError, "reduction_order"):
       mod.apply({}, x, y, reduction_order="linear")
 
+  def test_unquantized_dot_passes_no_unset_options(self):
+    """JAX versions that predate an option must not get it from Qwix."""
+
+    class Module(nn.Module):
+      provider: ptq.PtqProvider
+
+      @nn.compact
+      def __call__(self, x, y):
+        return self.provider.dot(x, y)
+
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((3, 4), dtype=jnp.float32)
+    with mock.patch.object(
+        jax.lax, "dot_general", wraps=jax.lax.dot_general
+    ) as jax_dot_general:
+      Module(ptq.PtqProvider([])).apply({}, x, y)
+    self.assertEqual(
+        jax_dot_general.call_args.kwargs,
+        dict(precision=None, preferred_element_type=None, out_sharding=None),
+    )
+
+  def test_unquantized_dot_passes_options_through(self):
+    """Options unknown to Qwix, e.g. from a newer JAX, reach JAX unchanged."""
+
+    class Module(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, y, **options):
+        return jnp.dot(x, y, **options)
+
+    mod = Module()
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((3, 4), dtype=jnp.float32)
+    with self.assertRaises(TypeError):
+      mod.apply({}, x, y, new_option="x")
+    ptq_mod = qwix_model.quantize_model(mod, ptq.PtqProvider([]))
+    with self.assertRaises(TypeError) as ptq_error:
+      ptq_mod.apply({}, x, y, new_option="x")
+    self.assertIn("unexpected keyword argument", str(ptq_error.exception))
+    self.assertIn("new_option", str(ptq_error.exception))
+
+  def test_quantized_dot_options(self):
+    class Module(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, **options):
+        w = self.param("kernel", nn.initializers.ones, (3, 4), jnp.float32)
+        return jnp.dot(x, w, **options)
+
+    model = qwix_model.quantize_model(
+        Module(),
+        ptq.PtqProvider([qconfig.QuantizationRule(weight_qtype=jnp.int8)]),
+    )
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    variables = model.init(jax.random.key(0), x)
+    self.assertEqual(model.apply(variables, x, new_option="x").shape, (2, 4))
+    with self.assertRaisesRegex(NotImplementedError, "reduction_order"):
+      model.apply(variables, x, reduction_order="linear")
+
+  def test_unquantized_einsum_passes_no_unset_options(self):
+    """JAX versions that predate an option must not get it from Qwix."""
+
+    class Module(nn.Module):
+      provider: ptq.PtqProvider
+
+      @nn.compact
+      def __call__(self, x, y):
+        return self.provider.einsum("ij,jk->ik", x, y)
+
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((3, 4), dtype=jnp.float32)
+    with mock.patch.object(jnp, "einsum", wraps=jnp.einsum) as jax_einsum:
+      Module(ptq.PtqProvider([])).apply({}, x, y)
+    self.assertEqual(
+        jax_einsum.call_args.kwargs,
+        dict(
+            precision=None,
+            preferred_element_type=None,
+            _dot_general=jax.lax.dot_general,
+            out_sharding=None,
+        ),
+    )
+
+  def test_unquantized_einsum_passes_options_through(self):
+    """Options unknown to Qwix, e.g. from a newer JAX, reach JAX unchanged."""
+
+    class Module(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, y, **options):
+        return jnp.einsum("ij,jk->ik", x, y, **options)
+
+    mod = Module()
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((3, 4), dtype=jnp.float32)
+    with self.assertRaises(TypeError) as jax_error:
+      mod.apply({}, x, y, new_option="x")
+    ptq_mod = qwix_model.quantize_model(mod, ptq.PtqProvider([]))
+    with self.assertRaises(TypeError) as ptq_error:
+      ptq_mod.apply({}, x, y, new_option="x")
+    self.assertEqual(str(ptq_error.exception), str(jax_error.exception))
+
+  def test_quantized_einsum_options(self):
+    class Module(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, y, **options):
+        return jnp.einsum("ij,jk->ik", x, y, **options)
+
+    mod = qwix_model.quantize_model(
+        Module(),
+        ptq.PtqProvider([qconfig.QuantizationRule(weight_qtype=jnp.int8)]),
+    )
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((3, 4), dtype=jnp.float32)
+    self.assertEqual(mod.apply({}, x, y, new_option="x").shape, (2, 4))
+    with self.assertRaisesRegex(NotImplementedError, "reduction_order"):
+      mod.apply({}, x, y, reduction_order="linear")
+
+  def test_unquantized_conv_general_dilated_passes_no_unset_options(self):
+    """JAX versions that predate an option must not get it from Qwix."""
+
+    class Module(nn.Module):
+      provider: ptq.PtqProvider
+
+      @nn.compact
+      def __call__(self, x, y):
+        return self.provider.conv_general_dilated(
+            x,
+            y,
+            window_strides=(1, 1),
+            padding="SAME",
+            dimension_numbers=("NHWC", "HWIO", "NHWC"),
+        )
+
+    x = jnp.ones((1, 4, 4, 2), dtype=jnp.float32)
+    y = jnp.ones((2, 2, 2, 3), dtype=jnp.float32)
+    with mock.patch.object(
+        jax.lax, "conv_general_dilated", wraps=jax.lax.conv_general_dilated
+    ) as jax_conv:
+      Module(ptq.PtqProvider([])).apply({}, x, y)
+    self.assertEqual(
+        jax_conv.call_args.kwargs,
+        dict(
+            lhs_dilation=None,
+            rhs_dilation=None,
+            dimension_numbers=("NHWC", "HWIO", "NHWC"),
+            feature_group_count=1,
+            batch_group_count=1,
+            precision=None,
+            preferred_element_type=None,
+            out_sharding=None,
+        ),
+    )
+
+  def test_unquantized_conv_general_dilated_passes_options_through(self):
+    """Options unknown to Qwix, e.g. from a newer JAX, reach JAX unchanged."""
+
+    class Module(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, y, **options):
+        return jax.lax.conv_general_dilated(
+            x,
+            y,
+            (1, 1),
+            "SAME",
+            dimension_numbers=("NHWC", "HWIO", "NHWC"),
+            **options,
+        )
+
+    mod = Module()
+    x = jnp.ones((1, 4, 4, 2), dtype=jnp.float32)
+    y = jnp.ones((2, 2, 2, 3), dtype=jnp.float32)
+    with self.assertRaises(TypeError) as jax_error:
+      mod.apply({}, x, y, new_option="x")
+    ptq_mod = qwix_model.quantize_model(mod, ptq.PtqProvider([]))
+    with self.assertRaises(TypeError) as ptq_error:
+      ptq_mod.apply({}, x, y, new_option="x")
+    self.assertEqual(str(ptq_error.exception), str(jax_error.exception))
+
+  def test_quantized_conv_general_dilated_options(self):
+    class Module(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, **options):
+        w = self.param(
+            "kernel", nn.initializers.ones, (2, 2, 2, 3), jnp.float32
+        )
+        return jax.lax.conv_general_dilated(
+            x,
+            w,
+            (1, 1),
+            "SAME",
+            dimension_numbers=("NHWC", "HWIO", "NHWC"),
+            **options,
+        )
+
+    rules = [
+        qconfig.QuantizationRule(weight_qtype=jnp.int8, act_qtype=jnp.int8)
+    ]
+    model = qwix_model.quantize_model(Module(), ptq.PtqProvider(rules))
+    x = jnp.ones((1, 4, 4, 2), dtype=jnp.float32)
+    variables = model.init(jax.random.key(0), x)
+    self.assertEqual(
+        model.apply(variables, x, new_option="x").shape, (1, 4, 4, 3)
+    )
+    with self.assertRaisesRegex(NotImplementedError, "reduction_order"):
+      model.apply(variables, x, reduction_order="linear")
+
   def test_nn_ptq(self):
     dense = nn.Dense(
         features=5,

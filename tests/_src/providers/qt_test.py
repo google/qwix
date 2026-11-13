@@ -429,7 +429,8 @@ class QtTest(parameterized.TestCase):
         return jax.lax.dot_general(x, y, (((1,), (0,)), ((), ())), **options)
 
     mod = qwix_model.quantize_model(
-        Module(), qt.QtProvider([qt.QtRule(weight_qtype=jnp.int8)])
+        Module(),
+        qt.QtProvider([qt.QtRule(weight_qtype=jnp.int8, act_qtype=jnp.int8)]),
     )
     x = jnp.ones((2, 3), dtype=jnp.float32)
     y = jnp.ones((3, 4), dtype=jnp.float32)
@@ -456,6 +457,215 @@ class QtTest(parameterized.TestCase):
     y = jnp.ones((3, 4), dtype=jnp.float32)
     res = qt_mod.apply({}, x, y)
     self.assertEqual(res.shape, (2, 4))
+
+  def test_unquantized_einsum_passes_no_unset_options(self):
+    """JAX versions that predate an option must not get it from Qwix."""
+
+    class Module(nn.Module):
+      provider: qt.QtProvider
+
+      @nn.compact
+      def __call__(self, x, y):
+        return self.provider.einsum("ij,jk->ik", x, y)
+
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((3, 4), dtype=jnp.float32)
+    with mock.patch.object(jnp, "einsum", wraps=jnp.einsum) as jax_einsum:
+      Module(qt.QtProvider([])).apply({}, x, y)
+    self.assertEqual(
+        jax_einsum.call_args.kwargs,
+        dict(
+            precision=None,
+            preferred_element_type=None,
+            _dot_general=jax.lax.dot_general,
+            out_sharding=None,
+        ),
+    )
+
+  def test_unquantized_einsum_passes_options_through(self):
+    """Options unknown to Qwix, e.g. from a newer JAX, reach JAX unchanged."""
+
+    class Module(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, y, **options):
+        return jnp.einsum("ij,jk->ik", x, y, **options)
+
+    mod = Module()
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((3, 4), dtype=jnp.float32)
+    with self.assertRaises(TypeError) as jax_error:
+      mod.apply({}, x, y, new_option="x")
+    qt_mod = qwix_model.quantize_model(mod, qt.QtProvider([]))
+    with self.assertRaises(TypeError) as qt_error:
+      qt_mod.apply({}, x, y, new_option="x")
+    self.assertEqual(str(qt_error.exception), str(jax_error.exception))
+
+  def test_quantized_einsum_options(self):
+    class Module(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, y, **options):
+        return jnp.einsum("ij,jk->ik", x, y, **options)
+
+    mod = qwix_model.quantize_model(
+        Module(),
+        qt.QtProvider([qt.QtRule(weight_qtype=jnp.int8, act_qtype=jnp.int8)]),
+    )
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((3, 4), dtype=jnp.float32)
+    self.assertEqual(mod.apply({}, x, y, new_option="x").shape, (2, 4))
+    with self.assertRaisesRegex(NotImplementedError, "reduction_order"):
+      mod.apply({}, x, y, reduction_order="linear")
+
+  def test_unquantized_ragged_dot_passes_no_unset_options(self):
+    """JAX versions that predate an option must not get it from Qwix."""
+
+    class Module(nn.Module):
+      provider: qt.QtProvider
+
+      @nn.compact
+      def __call__(self, x, y, g):
+        return self.provider.ragged_dot(x, y, g)
+
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((1, 3, 4), dtype=jnp.float32)
+    g = jnp.array([2], dtype=jnp.int32)
+    with mock.patch.object(
+        jax.lax, "ragged_dot", wraps=jax.lax.ragged_dot
+    ) as jax_ragged_dot:
+      Module(qt.QtProvider([])).apply({}, x, y, g)
+    self.assertEqual(
+        jax_ragged_dot.call_args.kwargs,
+        dict(precision=None, preferred_element_type=None, group_offset=None),
+    )
+
+  def test_unquantized_ragged_dot_passes_options_through(self):
+    """Options unknown to Qwix, e.g. from a newer JAX, reach JAX unchanged."""
+
+    class Module(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, y, g, **options):
+        return jax.lax.ragged_dot(x, y, g, **options)
+
+    mod = Module()
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((1, 3, 4), dtype=jnp.float32)
+    g = jnp.array([2], dtype=jnp.int32)
+    with self.assertRaises(TypeError) as jax_error:
+      mod.apply({}, x, y, g, new_option="x")
+    qt_mod = qwix_model.quantize_model(mod, qt.QtProvider([]))
+    with self.assertRaises(TypeError) as qt_error:
+      qt_mod.apply({}, x, y, g, new_option="x")
+    self.assertEqual(str(qt_error.exception), str(jax_error.exception))
+
+  def test_quantized_ragged_dot_options(self):
+    class Module(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, y, g, **options):
+        return jax.lax.ragged_dot(x, y, g, **options)
+
+    mod = qwix_model.quantize_model(
+        Module(),
+        qt.QtProvider([qt.QtRule(weight_qtype=jnp.int8, act_qtype=jnp.int8)]),
+    )
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((1, 3, 4), dtype=jnp.float32)
+    g = jnp.array([2], dtype=jnp.int32)
+    self.assertEqual(mod.apply({}, x, y, g, new_option="x").shape, (2, 4))
+    with self.assertRaisesRegex(NotImplementedError, "reduction_order"):
+      mod.apply({}, x, y, g, reduction_order="linear")
+
+  def test_unquantized_conv_general_dilated_passes_no_unset_options(self):
+    """JAX versions that predate an option must not get it from Qwix."""
+
+    class Module(nn.Module):
+      provider: qt.QtProvider
+
+      @nn.compact
+      def __call__(self, x, y):
+        return self.provider.conv_general_dilated(
+            x,
+            y,
+            window_strides=(1, 1),
+            padding="SAME",
+            dimension_numbers=("NHWC", "HWIO", "NHWC"),
+        )
+
+    x = jnp.ones((1, 4, 4, 2), dtype=jnp.float32)
+    y = jnp.ones((2, 2, 2, 3), dtype=jnp.float32)
+    with mock.patch.object(
+        jax.lax, "conv_general_dilated", wraps=jax.lax.conv_general_dilated
+    ) as jax_conv:
+      Module(qt.QtProvider([])).apply({}, x, y)
+    self.assertEqual(
+        jax_conv.call_args.kwargs,
+        dict(
+            lhs_dilation=None,
+            rhs_dilation=None,
+            dimension_numbers=("NHWC", "HWIO", "NHWC"),
+            feature_group_count=1,
+            batch_group_count=1,
+            precision=None,
+            preferred_element_type=None,
+            out_sharding=None,
+        ),
+    )
+
+  def test_unquantized_conv_general_dilated_passes_options_through(self):
+    """Options unknown to Qwix, e.g. from a newer JAX, reach JAX unchanged."""
+
+    class Module(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, y, **options):
+        return jax.lax.conv_general_dilated(
+            x,
+            y,
+            (1, 1),
+            "SAME",
+            dimension_numbers=("NHWC", "HWIO", "NHWC"),
+            **options,
+        )
+
+    mod = Module()
+    x = jnp.ones((1, 4, 4, 2), dtype=jnp.float32)
+    y = jnp.ones((2, 2, 2, 3), dtype=jnp.float32)
+    with self.assertRaises(TypeError) as jax_error:
+      mod.apply({}, x, y, new_option="x")
+    qt_mod = qwix_model.quantize_model(mod, qt.QtProvider([]))
+    with self.assertRaises(TypeError) as qt_error:
+      qt_mod.apply({}, x, y, new_option="x")
+    self.assertEqual(str(qt_error.exception), str(jax_error.exception))
+
+  def test_quantized_conv_general_dilated_options(self):
+    class Module(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, **options):
+        w = self.param("w", nn.initializers.ones, (2, 2, 2, 3), jnp.float32)
+        return jax.lax.conv_general_dilated(
+            x,
+            w,
+            (1, 1),
+            "SAME",
+            dimension_numbers=("NHWC", "HWIO", "NHWC"),
+            **options,
+        )
+
+    mod = qwix_model.quantize_model(
+        Module(),
+        qt.QtProvider([qt.QtRule(weight_qtype=jnp.int8, act_qtype=jnp.int8)]),
+    )
+    x = jnp.ones((1, 4, 4, 2), dtype=jnp.float32)
+    variables = mod.init(jax.random.key(0), x)
+    self.assertEqual(
+        mod.apply(variables, x, new_option="x").shape, (1, 4, 4, 3)
+    )
+    with self.assertRaisesRegex(NotImplementedError, "reduction_order"):
+      mod.apply(variables, x, reduction_order="linear")
 
 
 if __name__ == "__main__":

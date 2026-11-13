@@ -14,7 +14,7 @@
 """Quantized jax.numpy.dot with subchannel support."""
 # pylint: disable=line-too-long
 
-from typing import Callable
+from typing import Any, Callable
 
 import jax
 from qwix._src.core import dot_general
@@ -29,6 +29,7 @@ def dot(
     out_sharding=None,
     *,
     _qwix_dot_general: Callable[..., jax.Array] = dot_general.dot_general,
+    **kwargs: Any,
 ):
   """Computes the dot product with support for ``QArray`` inputs.
 
@@ -51,6 +52,7 @@ def dot(
     _qwix_dot_general: Internal argument for dependency injection of the
       underlying ``dot_general`` implementation. Defaults to
       ``qwix.dot_general``.
+    **kwargs: Additional options to pass to the underlying ``dot_general``.
 
   Returns:
     The dot product of ``a`` and ``b``.
@@ -68,4 +70,5 @@ def dot(
       precision=precision,
       preferred_element_type=preferred_element_type,
       out_sharding=out_sharding,
+      **kwargs,
   )

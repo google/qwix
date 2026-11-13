@@ -340,6 +340,7 @@ class LoraProvider(boxed_param.BoxedParamProvider):
     weight_name = flax_util.find_param(rhs, boxed_param.WithAux)
     if weight_name is None:  # rhs is not a weight.
       return res
+    qconfig.check_unsupported_options('LoRA einsum', kwargs)
 
     (
         a_shape,
@@ -368,8 +369,12 @@ class LoraProvider(boxed_param.BoxedParamProvider):
           lhs, rngs=flax_util.make_rng('dropout')
       )
 
+    lora_kwargs = {}
+    if 'precision' in kwargs:
+      lora_kwargs['precision'] = kwargs['precision']
+
     return res + (
-        jax.numpy.einsum(lora_einsum_str, lhs, lora_a, lora_b, **kwargs)
+        jax.numpy.einsum(lora_einsum_str, lhs, lora_a, lora_b, **lora_kwargs)
         * (rule.alpha / rule.rank)
     )
 
@@ -387,6 +392,7 @@ class LoraProvider(boxed_param.BoxedParamProvider):
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
       out_sharding=None,
+      **kwargs: Any,
   ) -> jax.Array:
     """LoRA conv_general_dilated."""
     res = super().conv_general_dilated(
@@ -402,6 +408,7 @@ class LoraProvider(boxed_param.BoxedParamProvider):
         precision=precision,
         preferred_element_type=preferred_element_type,
         out_sharding=out_sharding,
+        **kwargs,
     )
 
     rule, _ = self._get_current_rule_and_op_id(
@@ -412,6 +419,7 @@ class LoraProvider(boxed_param.BoxedParamProvider):
 
     weight_name = flax_util.find_param(rhs, boxed_param.WithAux)
     assert weight_name is not None, 'rhs must be a weight.'
+    qconfig.check_unsupported_options('LoRA conv_general_dilated', kwargs)
 
     dimension_numbers = jax.lax.conv_dimension_numbers(
         lhs.shape, rhs.shape, dimension_numbers
