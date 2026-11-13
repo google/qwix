@@ -201,6 +201,7 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
       preferred_element_type: jax.typing.DTypeLike | None = None,
       _dot_general: Callable[..., jax.Array] = jax.lax.dot_general,  # pylint: disable=invalid-name
       out_sharding=None,
+      **kwargs: Any,
   ) -> jax.Array:
     rule, op_id = self._get_current_rule_and_op_id('einsum')
     if rule is None or rule.weight_qtype is None:
@@ -211,7 +212,9 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
           preferred_element_type=preferred_element_type,
           _dot_general=_dot_general,
           out_sharding=out_sharding,
+          **kwargs,
       )
+    qconfig.check_unsupported_options('Quantized einsum', kwargs)
     if len(operands) != 2:
       # TODO(jiwonshin): Support N-ary einsum if there is a need in the future.
       raise ValueError(f'Unsupported einsum format: {einsum_str=} {operands=}')
@@ -274,6 +277,7 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
       out_sharding=None,
+      **kwargs: Any,
   ) -> jax.Array:
     rule, op_id = self._get_current_rule_and_op_id('conv_general_dilated')
     if rule is None or rule.weight_qtype is None:
@@ -290,7 +294,9 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
           precision=precision,
           preferred_element_type=preferred_element_type,
           out_sharding=out_sharding,
+          **kwargs,
       )
+    qconfig.check_unsupported_options('Quantized conv_general_dilated', kwargs)
     dimension_numbers = jax.lax.conv_dimension_numbers(
         lhs.shape, rhs.shape, dimension_numbers
     )
@@ -361,6 +367,7 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
       out_sharding=None,
+      **kwargs: Any,
   ):
     """Intercepts jax.numpy.dot."""
     return dot.dot(
@@ -370,6 +377,7 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
         preferred_element_type=preferred_element_type,
         out_sharding=out_sharding,
         _qwix_dot_general=self.dot_general,
+        **kwargs,
     )
 
   def asarray(self, a, dtype=None, order=None, **kwargs):

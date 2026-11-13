@@ -216,6 +216,7 @@ class AwqInferenceProvider(ptq.PtqProvider):
       preferred_element_type: jax.typing.DTypeLike | None = None,
       _dot_general: Any = jax.lax.dot_general,
       out_sharding=None,
+      **kwargs: Any,
   ) -> jax.Array:
     def _preprocess_operand(op):
       if isinstance(op, WithAwqScale):
@@ -235,6 +236,7 @@ class AwqInferenceProvider(ptq.PtqProvider):
         preferred_element_type=preferred_element_type,
         _dot_general=_dot_general,
         out_sharding=out_sharding,
+        **kwargs,
     )
 
   def get_intercept_map(self):

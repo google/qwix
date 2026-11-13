@@ -546,6 +546,57 @@ class AwqTest(parameterized.TestCase):
     with self.assertRaisesRegex(NotImplementedError, 'reduction_order'):
       awq_model.apply(awq_vars, x, reduction_order='linear')
 
+  def test_einsum_passes_options_through(self):
+    """Options unknown to Qwix, e.g. from a newer JAX, reach JAX unchanged."""
+
+    class Module(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, y, **options):
+        return jnp.einsum('ij,jk->ik', x, y, **options)
+
+    mod = Module()
+    x = jnp.ones((2, 3), dtype=jnp.float32)
+    y = jnp.ones((3, 4), dtype=jnp.float32)
+    # JAX itself rejects the made-up option, with or without Qwix.
+    with self.assertRaises(TypeError) as jax_error:
+      mod.apply({}, x, y, new_option='x')
+    awq_mod = qwix_model.quantize_model(mod, awq.AwqInferenceProvider([]))
+    with self.assertRaises(TypeError) as awq_error:
+      awq_mod.apply({}, x, y, new_option='x')
+    self.assertEqual(str(awq_error.exception), str(jax_error.exception))
+
+  def test_quantized_einsum_options(self):
+    class Model(nn.Module):
+
+      @nn.compact
+      def __call__(self, x, **options):
+        w = self.param('kernel', nn.initializers.ones, (4, 8), jnp.float32)
+        return jnp.einsum('ij,jk->ik', x, w, **options)
+
+    model = Model()
+    x = jnp.ones((2, 4), dtype=jnp.float32)
+    variables = model.init(jax.random.key(0), x)
+    rules = [awq.AwqRule(weight_qtype=jnp.int8)]
+    cal_model = qwix_model.quantize_model(
+        model, awq.AwqCalibrationProvider(rules)
+    )
+    _, new_vars = cal_model.apply(variables, x, mutable='quant_stats')
+    ptq_model = qwix_model.quantize_model(model, ptq.PtqProvider(rules))
+    abs_vars = jax.eval_shape(ptq_model.init, jax.random.key(1), x)
+    awq_params = awq.quantize_params(
+        variables['params'], abs_vars['params'], new_vars['quant_stats']
+    )
+    self.assertIsInstance(awq_params['kernel'], awq.WithAwqScale)
+    awq_model = qwix_model.quantize_model(
+        model, awq.AwqInferenceProvider(rules)
+    )
+    awq_vars = {'params': awq_params}
+    # Options that Qwix does not know are ignored, like precision.
+    self.assertEqual(awq_model.apply(awq_vars, x, new_option='x').shape, (2, 8))
+    with self.assertRaisesRegex(NotImplementedError, 'reduction_order'):
+      awq_model.apply(awq_vars, x, reduction_order='linear')
+
 
 if __name__ == '__main__':
   absltest.main()
