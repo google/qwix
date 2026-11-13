@@ -545,11 +545,15 @@ def dot_general_qt_bwd(
       return jax.lax.transpose(grad_res, transpose_axes)
 
     if g_qtype and numerics.should_quantize(g.dtype):
-      if isinstance(y, qarray.QArray):
+      if (
+          isinstance(y, qarray.QArray)
+          and y.zero_point is None
+          and y.qtype == y.qvalue.dtype
+      ):
         # Scale shifting for quantized residuals (use_original_residuals=False)
         # Apply the scale of y to g, this trick avoids requantizing y because
-        # the y from fwd pass has different channelwise_axes.
-        assert y.zero_point is None and y.qtype == y.qvalue.dtype
+        # the y from fwd pass has different channelwise_axes. Otherwise (a
+        # zero_point or a qtype like nf4), dot_general dequantizes y.
         (g_ca, y_ca), (g_ba, y_ba) = bwd_dnums
         g = dot_general.fold_scale_into(
             g, y.scale, (*g_ca, *g_ba), (*y_ca, *y_ba)

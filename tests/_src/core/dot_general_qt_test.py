@@ -680,6 +680,39 @@ class DotGeneralQtTest(parameterized.TestCase):
     self.assertIsNotNone(res.lhs_in)
     self.assertIsNotNone(res.rhs_in)
 
+  @parameterized.named_parameters(
+      dict(testcase_name='zero_point', qtype='int8', calibration='minmax'),
+      dict(testcase_name='nf4', qtype='nf4', calibration='absmax'),
+  )
+  def test_quantized_grad_with_unfoldable_residual(self, qtype, calibration):
+    """Residuals whose scale cannot be folded into g still work in bwd pass."""
+    # Only lhs is asymmetric, as dot_general supports one asymmetric operand.
+    config = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype=qtype,
+        rhs_qtype=qtype,
+        lhs_calibration_method=calibration,
+    )
+    bwd_config = dataclasses.replace(
+        config, dlhs_grad_qtype='int8', drhs_grad_qtype='int8'
+    )
+    lhs = jax.random.normal(jax.random.key(0), (16, 64), jnp.float32)
+    rhs = jax.random.normal(jax.random.key(1), (64, 32), jnp.float32)
+    g = jax.random.normal(jax.random.key(2), (16, 32), jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+
+    def grads(config):
+      _, vjp_fn = jax.vjp(
+          lambda l, r: dot_general_qt.dot_general_qt(l, r, dnums, config),
+          lhs,
+          rhs,
+      )
+      return vjp_fn(g)
+
+    # Only the int8 quantization of g differs from the unquantized-g backward.
+    mae = lambda x, y: jnp.mean(jnp.abs(x - y)) / jnp.mean(jnp.abs(y))
+    for actual, expected in zip(grads(bwd_config), grads(config)):
+      self.assertLessEqual(mae(actual, expected), 0.01)
+
   def test_unquantized_residuals_freed_when_unused(self):
     """Verifies unquantized inputs are not stored when not needed."""
     config = dot_general_qt.DotGeneralQtConfig(
