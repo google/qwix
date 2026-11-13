@@ -12,8 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from absl.testing import absltest
+from absl.testing import parameterized
+from flax import linen as nn
 from flax import nnx
 from jax import numpy as jnp
+from qwix import pallas
 from qwix._src import model as qwix_model
 from qwix._src import qconfig
 from qwix._src.core import qarray
@@ -22,7 +25,7 @@ from qwix._src.providers import lora
 from qwix._src.providers import ptq
 
 
-class QconfigTest(absltest.TestCase):
+class QconfigTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -132,6 +135,101 @@ class QconfigTest(absltest.TestCase):
         issubclass(lora.LoraProvider, boxed_param.BoxedParamProvider)
     )
     self.assertFalse(issubclass(lora.LoraProvider, ptq.PtqProvider))
+
+  def test_get_current_rule_unintercepted(self):
+    self.assertIsNone(qconfig.get_current_rule("dot_general"))
+    self.assertIsNone(pallas.get_current_rule(op_name="dot_general"))
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="outer_miss_inner_match",
+          outer_module_path="unmatched",
+          inner_module_path=".*",
+          expected_source="inner",
+      ),
+      dict(
+          testcase_name="outer_match_takes_precedence",
+          outer_module_path=".*",
+          inner_module_path=".*",
+          expected_source="outer",
+      ),
+      dict(
+          testcase_name="neither_matches",
+          outer_module_path="unmatched",
+          inner_module_path="unmatched",
+          expected_source="none",
+      ),
+  )
+  def test_get_current_rule_nested_providers(
+      self, outer_module_path, inner_module_path, expected_source
+  ):
+    inner_rule = qconfig.QuantizationRule(
+        module_path=inner_module_path,
+        weight_qtype="int8",
+        act_qtype="int8",
+        act_static_scale=False,
+        act_calibration_method="absmax",
+    )
+    outer_rule = qconfig.QuantizationRule(
+        module_path=outer_module_path,
+        weight_qtype="float8_e4m3fn",
+        act_qtype="float8_e4m3fn",
+        act_static_scale=False,
+        act_calibration_method="absmax",
+    )
+    expected_rule = {
+        "inner": inner_rule,
+        "outer": outer_rule,
+        "none": None,
+    }[expected_source]
+
+    class InnerLinen(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        del x
+        return (
+            qconfig.get_current_rule("dot_general"),
+            pallas.get_current_rule(op_name="dot_general"),
+        )
+
+    class OuterLinen(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        return qwix_model.quantize_model(
+            InnerLinen(), ptq.PtqProvider([inner_rule])
+        )(x)
+
+    linen_out = qwix_model.quantize_model(
+        OuterLinen(), ptq.PtqProvider([outer_rule])
+    ).apply({}, self.x)
+    self.assertEqual(linen_out, (expected_rule, expected_rule))
+
+    class InnerNnx(nnx.Module):
+
+      def __call__(self, x):
+        del x
+        return (
+            qconfig.get_current_rule("dot_general"),
+            pallas.get_current_rule(op_name="dot_general"),
+        )
+
+    class OuterNnx(nnx.Module):
+
+      def __init__(self, inner):
+        self.inner = inner
+
+      def __call__(self, x):
+        return self.inner(x)
+
+    inner_nnx = qwix_model.quantize_model(
+        InnerNnx(), ptq.PtqProvider([inner_rule]), self.x
+    )
+    outer_nnx = qwix_model.quantize_model(
+        OuterNnx(inner_nnx), ptq.PtqProvider([outer_rule]), self.x
+    )
+    self.assertEqual(outer_nnx(self.x), (expected_rule, expected_rule))
 
 
 if __name__ == "__main__":

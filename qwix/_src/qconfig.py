@@ -162,8 +162,13 @@ class QuantizationProvider:
     """Returns the intercept map for interception.wrap_func_intercepted."""
     # Common functions that are intercepted by all quantization providers.
     intercept_map = {
+        # get_current_rule.__code__ is patched, so this fallback queries inner
+        # providers while self is disabled on the current thread.
         'qwix._src.qconfig.get_current_rule': (
-            lambda op: self._get_current_rule_and_op_id(op, only_rule=True)[0]
+            lambda op_name: self._get_current_rule_and_op_id(
+                op_name, only_rule=True
+            )[0]
+            or get_current_rule(op_name)
         )
     }
     if interception.has_attribute('jax.experimental.pallas.pallas_call'):
