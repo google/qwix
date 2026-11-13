@@ -17,8 +17,11 @@ import math
 
 from absl.testing import absltest
 from absl.testing import parameterized
+from flax import linen as nn
+from flax import nnx
 import jax
 from jax import numpy as jnp
+from qwix._src.core import qarray
 from qwix._src.core import sparse_array
 from qwix._src.core import sparsity
 
@@ -358,6 +361,190 @@ class SparseArrayTest(parameterized.TestCase):
               axis=axis,
           )
       )
+
+  def test_sparse_array_properties_and_axis_normalization(self):
+    vals_1_2 = jnp.ones((16, 16), dtype=jnp.bfloat16)
+    idx_1_2 = jnp.zeros((16, 16), dtype=jnp.uint2)
+    sa = sparse_array.SparseArray(
+        vals_1_2, idx_1_2, sparsity.StructuredSparsity(1, 2, dimension=1)
+    )
+    self.assertEqual(sa.axis, -1)
+    self.assertEqual(sa.shape, (16, 32))
+    self.assertEqual(sa.ndim, 2)
+    self.assertEqual(sa.dtype, jnp.bfloat16)
+    self.assertEqual(sa.astype(jnp.float32).dtype, jnp.float32)
+    sparse_array.validate_sparse_array(sa)
+
+    qvals = qarray.QArray(
+        jnp.zeros((16, 16), dtype=jnp.float8_e4m3fn),
+        jnp.ones((1, 16), dtype=jnp.bfloat16),
+    )
+    idx_1_4 = jnp.zeros((16, 16), dtype=jnp.uint2)
+    qsa = sparse_array.SparseArray(
+        qvals, idx_1_4, sparsity.StructuredSparsity(1, 4, dimension=0)
+    )
+    self.assertEqual(qsa.axis, -2)
+    self.assertEqual(qsa.shape, (64, 16))
+    self.assertEqual(qsa.dtype, jnp.bfloat16)
+    qsa_f32 = qsa.astype(jnp.float32)
+    self.assertEqual(qsa_f32.dtype, jnp.float32)
+    self.assertEqual(qsa_f32.values.qvalue.dtype, jnp.float8_e4m3fn)
+    qsa_per_tensor = sparse_array.SparseArray(
+        qarray.QArray(qvals.qvalue, jnp.ones((1, 1), dtype=jnp.bfloat16)),
+        idx_1_4,
+        qsa.sparsity,
+    )
+    for valid_qsa in (qsa, qsa_per_tensor):
+      sparse_array.validate_sparse_array(valid_qsa)
+      jax.eval_shape(sparse_array.validate_sparse_array, valid_qsa)
+
+    with self.assertRaisesRegex(ValueError, 'sparsity.dimension to be set'):
+      sparse_array.SparseArray(
+          vals_1_2, idx_1_2, sparsity.StructuredSparsity(1, 2)
+      )
+    for dim in (0, -1):
+      with self.assertRaisesRegex(NotImplementedError, 'Only n == 1'):
+        sparse_array.SparseArray(
+            vals_1_2,
+            idx_1_2,
+            sparsity.StructuredSparsity(2, 4, dimension=dim),
+        )
+    with self.assertRaisesRegex(ValueError, 'rank >= 2'):
+      sparse_array.SparseArray(
+          jax.ShapeDtypeStruct((16,), jnp.float32),
+          jax.ShapeDtypeStruct((16,), jnp.uint2),
+          sparsity.StructuredSparsity(1, 4, dimension=0),
+      )
+    with self.assertRaisesRegex(ValueError, 'out of range'):
+      sparse_array.SparseArray(
+          vals_1_2, idx_1_2, sparsity.StructuredSparsity(1, 2, dimension=2)
+      )
+    bad_sa = sparse_array.SparseArray(
+        vals_1_2, idx_1_2, sparsity.StructuredSparsity(1, 2, dimension=-3)
+    )
+    with self.assertRaisesRegex(ValueError, 'out of range'):
+      _ = bad_sa.shape
+
+  def test_sparse_array_pytree_partitioned_and_nnx(self):
+    vals = jnp.ones((16, 16), dtype=jnp.float32)
+    idx = jnp.zeros((16, 16), dtype=jnp.uint2)
+    sa = sparse_array.SparseArray(
+        vals, idx, sparsity.StructuredSparsity(1, 4, dimension=0)
+    )
+    finite = jax.tree.map(jnp.isfinite, sa)
+    all_finite = jax.tree.map(jnp.all, finite)
+    self.assertEqual(all_finite.values.shape, ())
+    self.assertTrue(all_finite.values)
+    self.assertTrue(all_finite.indices)
+    nones = jax.tree.map(lambda _: None, sa)
+    self.assertIsNone(nones.values)
+    self.assertIsNone(nones.indices)
+    grad_sa = jax.grad(lambda a: jnp.sum(a.values * 2.0), allow_int=True)(sa)
+    self._assert_equal(grad_sa.values, jnp.full((16, 16), 2.0, jnp.float32))
+    self.assertEqual(grad_sa.indices.dtype, jax.dtypes.float0)
+
+    p_sa = jax.tree.map(lambda x: nn.Partitioned(x, ('in', 'out')), sa)
+    self.assertEqual(p_sa.axis, -2)
+    self.assertIsInstance(p_sa.values, nn.Partitioned)
+    sparse_array.validate_sparse_array(p_sa)
+    unboxed = nn.unbox(p_sa)
+    self.assertEqual(unboxed.shape, (64, 16))
+    sparse_array.validate_sparse_array(unboxed)
+
+    class Holder(nnx.Module):
+
+      def __init__(self, fill: float):
+        qvals = qarray.QArray(
+            nnx.Param(jnp.zeros((16, 16), dtype=jnp.float8_e4m3fn)),
+            nnx.Param(jnp.full((1, 16), fill, dtype=jnp.bfloat16)),
+        )
+        self.w = sparse_array.SparseArray(
+            qvals,
+            nnx.Param(jnp.zeros((16, 16), dtype=jnp.uint2)),
+            sparsity.StructuredSparsity(1, 4, dimension=0),
+        )
+
+    src = Holder(3.0)
+    sparse_array.validate_sparse_array(src.w)
+    dst = Holder(1.0)
+    pure = nnx.to_pure_dict(nnx.state(src))
+    dst_state = nnx.state(dst)
+    nnx.replace_by_pure_dict(dst_state, pure)
+    nnx.update(dst, dst_state)
+    self.assertEqual(dst.w.axis, -2)
+    self.assertEqual(dst.w.shape, (64, 16))
+    self.assertEqual(dst.w.dtype, jnp.bfloat16)
+    self._assert_equal(
+        dst.w.values.scale.get_raw_value(),
+        jnp.full((1, 16), 3.0, dtype=jnp.bfloat16),
+    )
+    self._assert_equal(
+        qarray.dequantize(dst.w),
+        jnp.zeros((64, 16), dtype=jnp.bfloat16),
+    )
+
+  @parameterized.named_parameters(
+      dict(testcase_name='idx_dtype', idx_dtype=jnp.uint8, regex='dtype uint2'),
+      dict(
+          testcase_name='zero_point',
+          scale_shape=(1, 16),
+          has_zp=True,
+          regex='zero_point',
+      ),
+      dict(
+          testcase_name='nf4_qtype',
+          qval_dtype=jnp.uint4,
+          qtype='nf4',
+          scale_shape=(1, 16),
+          regex='Non-uniform qtype',
+      ),
+      dict(
+          testcase_name='qval_dtype',
+          qval_dtype=jnp.float32,
+          scale_shape=(1, 16),
+          regex='not a valid type for qvalue',
+      ),
+      dict(testcase_name='scale_ndim', scale_shape=(16,), regex='same rank'),
+      dict(
+          testcase_name='subchannel_sparse_axis',
+          scale_shape=(16, 16),
+          regex='Subchannel scale along sparse axis',
+      ),
+      dict(
+          testcase_name='subchannel_other_axis',
+          scale_shape=(1, 4),
+          regex='per-channel or per-tensor',
+      ),
+  )
+  def test_validate_sparse_array_errors(
+      self,
+      *,
+      regex,
+      idx_dtype=jnp.uint2,
+      qval_dtype=jnp.int8,
+      qtype=None,
+      scale_shape=None,
+      has_zp=False,
+  ):
+    def build_and_validate():
+      if scale_shape is None:
+        vals = jnp.ones((16, 16), jnp.bfloat16)
+      else:
+        vals = qarray.QArray(
+            jnp.zeros((16, 16), qval_dtype),
+            jnp.ones(scale_shape, jnp.bfloat16),
+            zero_point=jnp.zeros(scale_shape, qval_dtype) if has_zp else None,
+            qtype=qtype,
+        )
+      sa = sparse_array.SparseArray(
+          vals,
+          jnp.zeros((16, 16), idx_dtype),
+          sparsity.StructuredSparsity(1, 4, dimension=-2),
+      )
+      sparse_array.validate_sparse_array(sa)
+
+    with self.assertRaisesRegex(ValueError, regex):
+      jax.eval_shape(build_and_validate)
 
 
 if __name__ == '__main__':

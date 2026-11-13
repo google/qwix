@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
 import os
 from typing import Collection, Mapping
 
@@ -21,6 +22,7 @@ import jax
 from jax import numpy as jnp
 from qwix._src.core import numerics
 from qwix._src.core import qarray
+from qwix._src.core import sparse_array
 from qwix._src.core import sparsity
 
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
@@ -738,6 +740,98 @@ class QArrayTest(parameterized.TestCase):
             g_unreduced, w, calibration, how.calibration_method
         )
         self.assertEqual(clipped.sharding.spec.unreduced, frozenset({'x'}))
+
+  def test_sparse_array_dequantize_broadcast_and_result_type(self):
+    w = self._make_array((64, 32))
+    mask = sparsity.get_sparsity_mask(
+        w.astype(jnp.float32), n_sparsity=1, m_sparsity=4, axis=0
+    )
+    w_masked = jnp.where(mask, w, jnp.zeros_like(w))
+    sp = sparsity.StructuredSparsity(1, 4, dimension=0)
+
+    vals_fp, idx = sparse_array.compress(w, mask, n=1, m=4, axis=0)
+    sa_fp = sparse_array.SparseArray(vals_fp, idx, sp)
+    self.assertTrue(jnp.array_equal(qarray.dequantize(sa_fp), w_masked))
+    self.assertIs(qarray.broadcast_to(sa_fp, (64, 32)), sa_fp)
+    bcast_fp = qarray.broadcast_to(sa_fp, (2, 64, 32))
+    self.assertIsInstance(bcast_fp, jax.Array)
+    self.assertTrue(
+        jnp.array_equal(bcast_fp, jnp.broadcast_to(w_masked, (2, 64, 32)))
+    )
+
+    how = qarray.HowToQuantize(
+        qtype=jnp.float8_e4m3fn, channelwise_axes=[1], tiled_axes={}
+    )
+    q_masked = qarray.quantize(w_masked, how)
+    q_comp, idx_q = sparse_array.compress(
+        q_masked.qvalue, mask, n=1, m=4, axis=0
+    )
+    sa_q = sparse_array.SparseArray(
+        dataclasses.replace(q_masked, qvalue=q_comp), idx_q, sp
+    )
+    self.assertTrue(
+        jnp.array_equal(qarray.dequantize(sa_q), qarray.dequantize(q_masked))
+    )
+    bcast_q = qarray.broadcast_to(sa_q, (2, 128, 32))
+    self.assertIsInstance(bcast_q, qarray.QArray)
+    self.assertEqual(bcast_q.shape, (2, 128, 32))
+
+    self.assertEqual(
+        qarray.get_accumulator_and_result_type(
+            jnp.zeros((16, 64), jnp.bfloat16), sa_q, preferred_element_type=None
+        ),
+        (jnp.bfloat16, jnp.bfloat16),
+    )
+    sa_int4 = sparse_array.SparseArray(
+        qarray.QArray(
+            jnp.zeros((16, 32), jnp.int4), jnp.ones((1, 32), jnp.bfloat16)
+        ),
+        idx_q,
+        sp,
+    )
+    lhs_int8 = qarray.QArray(
+        jnp.zeros((16, 64), jnp.int8), jnp.ones((16, 1), jnp.bfloat16)
+    )
+    self.assertEqual(
+        qarray.get_accumulator_and_result_type(
+            lhs_int8, sa_int4, preferred_element_type=None
+        ),
+        (jnp.int32, jnp.bfloat16),
+    )
+
+    mesh = jax.make_mesh(
+        (2,),
+        ('x',),
+        axis_types=(jax.sharding.AxisType.Explicit,),
+        devices=jax.devices()[:2],
+    )
+    reduced_spec = jax.sharding.PartitionSpec(None, None, reduced={'x'})
+    with jax.set_mesh(mesh):
+      w_red = jax.device_put(w_masked, reduced_spec)
+      q_red = qarray.quantize(w_red, how)
+      mask_red = sparsity.get_sparsity_mask(
+          w_red.astype(jnp.float32), n_sparsity=1, m_sparsity=4, axis=0
+      )
+      qv_red, idx_red = sparse_array.compress(
+          q_red.qvalue, mask_red, n=1, m=4, axis=0
+      )
+      sa_red = sparse_array.SparseArray(
+          dataclasses.replace(q_red, qvalue=qv_red), idx_red, sp
+      )
+      dq_red = qarray.dequantize(sa_red)
+      self.assertEqual(dq_red.sharding.spec.reduced, frozenset({'x'}))
+
+    sa_nf4 = sparse_array.SparseArray(
+        qarray.QArray(
+            jnp.zeros((16, 32), jnp.uint4),
+            jnp.ones((1, 32), jnp.bfloat16),
+            qtype='nf4',
+        ),
+        idx_q,
+        sp,
+    )
+    with self.assertRaisesRegex(ValueError, 'Non-uniform qtype'):
+      qarray.dequantize(sa_nf4)
 
 
 if __name__ == '__main__':
