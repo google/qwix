@@ -13,15 +13,21 @@
 # limitations under the License.
 """Quantized Array."""
 
+from __future__ import annotations
+
 import dataclasses
 import functools
-from typing import Callable, Collection, Mapping, Sequence, TypeAlias
+from typing import Callable, Collection, Mapping, Sequence, TYPE_CHECKING, TypeAlias
+
 from flax import nnx
 import flax.struct
 import jax
 from jax import numpy as jnp
 from qwix._src.core import numerics
 from qwix._src.core import sparsity
+
+if TYPE_CHECKING:
+  from qwix._src.core import sparse_array  # pylint: disable=g-import-not-at-top
 
 # ---------------------------------------------
 # QArray definition and common functions.
@@ -439,11 +445,16 @@ def call_with_generic_broadcast(
 
 
 def broadcast_to(
-    operand: MaybeQArray, target_shape: tuple[int, ...]
-) -> MaybeQArray:
-  """Broadcasts a QArray or Array to the target shape recursively."""
+    operand: MaybeQArray | sparse_array.SparseArray,
+    target_shape: tuple[int, ...],
+) -> MaybeQArray | sparse_array.SparseArray:
+  """Broadcasts a QArray, SparseArray, or Array to the target shape."""
   if operand.shape == target_shape:
     return operand
+  from qwix._src.core import sparse_array  # pylint: disable=g-import-not-at-top
+
+  if isinstance(operand, sparse_array.SparseArray):
+    operand = sparse_array.decompress_sparse_array(operand)
 
   def _broadcast_component(x: jax.Array | None):
     """Broadcasts a single array component to the target shape."""
@@ -730,15 +741,23 @@ def quantize_api(
   return qarray
 
 
-def dequantize(array: QArray) -> jax.Array:
-  """Dequantizes an array. The reverse of |quantize|.
+def dequantize(array: QArray | sparse_array.SparseArray) -> jax.Array:
+  """Dequantizes a QArray or SparseArray. The reverse of |quantize|.
 
   Args:
-    array: The quantized array to dequantize.
+    array: The quantized or sparse array to dequantize.
 
   Returns:
-    The dequantized array, whose dtype is the same as the scale's dtype.
+    The dequantized array, whose dtype is the same as the scale's dtype (or
+    values.dtype for an unquantized SparseArray).
   """
+  from qwix._src.core import sparse_array  # pylint: disable=g-import-not-at-top
+
+  if isinstance(array, sparse_array.SparseArray):
+    decompressed = sparse_array.decompress_sparse_array(array)
+    if isinstance(decompressed, jax.Array):
+      return decompressed
+    array = decompressed
   validate_qarray(array)
   qvalue = numerics.convert_from(array.qvalue, array.qtype)
   qvalue = qvalue.astype(array.scale.dtype)
@@ -838,10 +857,10 @@ def clip_gradient_to_calibration(
 
 
 def get_accumulator_and_result_type(
-    *args: MaybeQArray,
+    *args: MaybeQArray | sparse_array.SparseArray,
     preferred_element_type: jax.typing.DTypeLike | None,
 ) -> tuple[jax.typing.DTypeLike, jax.typing.DTypeLike]:
-  """jnp.result_type for QArray.
+  """jnp.result_type for QArray and SparseArray.
 
   Accumulator type is the dtype used for the dot_general computation.
   Result type is the dtype of the final result.
@@ -853,8 +872,12 @@ def get_accumulator_and_result_type(
   Returns:
     A tuple of the accumulator type and the result type.
   """
+  from qwix._src.core import sparse_array  # pylint: disable=g-import-not-at-top
+
   qvalue_dtypes, dequant_dtypes = [], []
   for arg in args:
+    if isinstance(arg, sparse_array.SparseArray):
+      arg = arg.values
     if isinstance(arg, QArray):
       qvalue_dtypes.append(arg.qvalue.dtype)  # note qtype can be different.
       dequant_dtypes.append(arg.scale.dtype)

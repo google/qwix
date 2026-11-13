@@ -22,6 +22,7 @@ import opt_einsum
 from qwix._src.core import dot_general
 from qwix._src.core import einsum_info
 from qwix._src.core import qarray
+from qwix._src.core import sparse_array
 
 
 def get_how_to_quantize(
@@ -82,8 +83,8 @@ def get_how_to_quantize(
 
 
 def _perform_binary_einsum(
-    lhs: qarray.MaybeQArray,
-    rhs: qarray.MaybeQArray,
+    lhs: qarray.MaybeQArray | sparse_array.SparseArray,
+    rhs: qarray.MaybeQArray | sparse_array.SparseArray,
     einsum_str: str,
     dot_general_func: Callable[..., jax.Array],
     preferred_element_type: jax.typing.DTypeLike | None,
@@ -127,7 +128,11 @@ def einsum(
   # preferred_element_type has to be set for jnp.einsum so that it won't infer
   # the type from qvalue x qvalue.
   _, preferred_element_type = qarray.get_accumulator_and_result_type(
-      *[a for a in args if isinstance(a, qarray.MaybeQArray)],
+      *[
+          a
+          for a in args
+          if isinstance(a, qarray.MaybeQArray | sparse_array.SparseArray)
+      ],
       preferred_element_type=preferred_element_type,
   )
 
@@ -150,13 +155,13 @@ def einsum(
       shapes=True,
       einsum_call=True,  # This is necessary for opt_einsum to return the contraction list.
   )
-  for contraction in contractions:  # pytype: disable=attribute-error # pyrefly: ignore
+  for contraction in contractions:  # pyrefly: ignore[not-iterable]
     # operand_indices: (0, 1), einsum_str: "ij,jk->ik"
     operand_indices, _, einsum_str = contraction[:3]
     if len(operand_indices) == 1:
       # Fallback to dequantization for unary ops.
       op0 = operands.pop(operand_indices[0])
-      if isinstance(op0, qarray.QArray):
+      if isinstance(op0, (qarray.QArray, sparse_array.SparseArray)):
         dequantized_op0 = qarray.dequantize(op0)
       else:
         dequantized_op0 = op0

@@ -21,6 +21,35 @@ import jax
 import jax.numpy as jnp
 
 
+@dataclasses.dataclass(frozen=True)
+class StructuredSparsity:
+  """Configuration for N:M structured sparsity.
+
+  Attributes:
+    n: Number of non-zero elements retained per group (`0 < n < m <= 4`).
+    m: Group size along the sparse dimension (`0 < n < m <= 4`).
+    stride: Step between consecutive elements in a group (currently must be 1).
+    dimension: Sparse axis index. Must be `None` on `QuantizationRule` (resolved
+      to the contracting axis per op), and normalized to a negative axis on
+      `SparseArray`.
+  """
+
+  n: int
+  m: int
+  stride: int = 1
+  dimension: int | None = None
+
+  def __post_init__(self):
+    if not 0 < self.n < self.m <= 4:
+      raise ValueError(f'Expected 0 < n < m <= 4; got n={self.n}, m={self.m}.')
+    if self.stride <= 0:
+      raise ValueError(f'stride must be positive; got stride={self.stride}.')
+    if self.stride != 1:
+      raise NotImplementedError(
+          f'Only stride == 1 is supported; got stride={self.stride}.'
+      )
+
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class SparsityRule:
   """Sparsity rules that match and configure the sparsity behavior."""

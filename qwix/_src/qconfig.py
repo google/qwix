@@ -25,6 +25,7 @@ import jax
 from jax.experimental import pallas as pl
 from qwix._src import aux_data
 from qwix._src import interception
+from qwix._src.core import sparsity
 from qwix._src.utils import flax_util
 
 
@@ -96,6 +97,14 @@ class QuantizationRule:
   # per-channel scales and this config is ignored.
   act_batch_axes: Collection[int] = (0,)
 
+  # If set, apply N:M structured sparsity to weights along their contracting
+  # axis (`dimension` must be None on QuantizationRule and is resolved per op).
+  weight_sparsity: sparsity.StructuredSparsity | None = None
+
+  # If True, prune weights using `get_sparsity_mask` before compressing in PTQ;
+  # if False, verify that weights already satisfy `weight_sparsity`.
+  weight_sparsity_prune: bool = False
+
 
 def get_current_rule(op_name: str) -> QuantizationRule | None:
   """Returns the current quantization rule if intercepted, or None otherwise."""
@@ -129,6 +138,8 @@ class QuantizationProvider:
   injected into the model by using interception.py.
   """
 
+  _supports_weight_sparsity: bool = False
+
   def __init__(
       self, rules: Sequence[QuantizationRule], *, disable_jit: bool = False
   ):
@@ -152,6 +163,21 @@ class QuantizationProvider:
           'but act_qtype is None. Please either unset act_static_scale, '
           f'or set act_qtype to enable activation quantization. (Rule: {rule})'
       )
+    if rule.weight_sparsity_prune and rule.weight_sparsity is None:
+      raise ValueError(
+          'Invalid rule: weight_sparsity_prune=True requires weight_sparsity'
+          f' to be set. (Rule: {rule})'
+      )
+    if rule.weight_sparsity is not None:
+      if rule.weight_sparsity.dimension is not None:
+        raise ValueError(
+            'Invalid rule: weight_sparsity.dimension must be None on'
+            f' QuantizationRule; got {rule.weight_sparsity.dimension}.'
+        )
+      if not self._supports_weight_sparsity:
+        raise NotImplementedError(
+            f'{type(self).__name__} does not support weight_sparsity.'
+        )
     if rule.act_static_scale is None:
       rule = dataclasses.replace(rule, act_static_scale=False)
     if rule.act_calibration_method is None:
