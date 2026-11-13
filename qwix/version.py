@@ -14,4 +14,4 @@
 
 """Current Qwix version at head on Github."""
 
-__version__ = "0.1.9"
+__version__ = "0.1.10"
