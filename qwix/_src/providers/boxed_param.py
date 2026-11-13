@@ -29,9 +29,13 @@ from qwix._src.core import dot_general
 from qwix._src.core import einsum
 from qwix._src.core import numerics
 from qwix._src.core import qarray
+from qwix._src.core import sparse_array
 from qwix._src.utils import flax_util
 
-ArrayTypeVar = TypeVar('ArrayTypeVar', jax.Array, qarray.QArray)
+ArrayTypeVar = TypeVar(
+    'ArrayTypeVar',
+    bound=jax.Array | qarray.QArray | sparse_array.SparseArray,
+)
 
 
 @flax.struct.dataclass
@@ -56,7 +60,15 @@ class WithAux(Generic[ArrayTypeVar]):
   value = property(flax_util.unbox)
   shape = property(lambda self: flax_util.unbox(self.array).shape)
   ndim = property(lambda self: flax_util.unbox(self.array).ndim)
-  __getitem__ = lambda self, key: jax.tree.map(lambda x: x[key], self.value)
+
+  def __getitem__(self, key):
+    value = self.value
+    if key is Ellipsis:
+      return value
+    if isinstance(value.array, sparse_array.SparseArray):
+      raise TypeError('WithAux[SparseArray] supports only `[...]` indexing.')
+    return jax.tree.map(lambda x: x[key], value)
+
   dtype = property(lambda self: flax_util.unbox(self.array).dtype)
 
   def astype(self, dtype):
@@ -118,16 +130,16 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
       _conv_general_dilated_fn=conv_general.conv_general_dilated,
   ):
     """Initializes the boxed-parameter provider."""
-    super().__init__(rules, disable_jit=disable_jit)
     self._qarray_module = _qarray_module
     self._dot_general_fn = _dot_general_fn
     self._einsum_fn = _einsum_fn
     self._conv_general_dilated_fn = _conv_general_dilated_fn
+    super().__init__(rules, disable_jit=disable_jit)
 
   def dot_general(
       self,
       lhs: jax.Array,
-      rhs: jax.Array | WithAux[qarray.QArray],
+      rhs: jax.Array | WithAux[Any],
       dimension_numbers: jax.lax.DotDimensionNumbers,
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
@@ -165,6 +177,8 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
           for_lhs=False,
           qtype=rule.weight_qtype,
           calibration_method=rule.weight_calibration_method,
+          sparsity=rule.weight_sparsity,
+          sparsity_prune=rule.weight_sparsity_prune,
       )
       rhs = create_quantized_param(  # pyrefly: ignore[bad-assignment]
           weight_name, rhs, rhs_how, _qarray_module=self._qarray_module
@@ -239,6 +253,8 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
           for_lhs=False,
           qtype=rule.weight_qtype,
           calibration_method=rule.weight_calibration_method,
+          sparsity=rule.weight_sparsity,
+          sparsity_prune=rule.weight_sparsity_prune,
       )
       rhs = create_quantized_param(
           weight_name, rhs, rhs_how, _qarray_module=self._qarray_module
@@ -301,6 +317,10 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
           precision=precision,
           preferred_element_type=preferred_element_type,
           out_sharding=out_sharding,
+      )
+    if rule.weight_sparsity is not None:
+      raise NotImplementedError(
+          'conv_general_dilated does not support weight_sparsity.'
       )
     dimension_numbers = jax.lax.conv_dimension_numbers(
         lhs.shape, rhs.shape, dimension_numbers
@@ -368,7 +388,7 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
   def dot(
       self,
       a: jax.Array,
-      b: jax.Array | WithAux[qarray.QArray],
+      b: jax.Array | WithAux[Any],
       precision: jax.lax.PrecisionLike = None,
       preferred_element_type: jax.typing.DTypeLike | None = None,
       out_sharding=None,
@@ -393,7 +413,7 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
     This function covers the following cases:
       - nnx.State containing QArray components (unboxes into QArray).
       - WithAux (propagates to the underlying array).
-      - QArray (preserves QArray, casting dtype if requested).
+      - QArray or SparseArray (preserves container, casting dtype if requested).
 
     For all other types, including linen Variables, this falls back to calling
     `jax.numpy.asarray` on the unboxed value.
@@ -420,6 +440,10 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
         if 'zero_point' in a:
           qkwargs['zero_point'] = a['zero_point']
         a = qarray.QArray(**qkwargs)  # pyrefly: ignore[bad-argument-type]
+    if isinstance(a, nnx.State) and ('values' in a or 'indices' in a):
+      raise NotImplementedError(
+          'Reconstructing SparseArray from nnx.State is not supported.'
+      )
 
     # 3. Handle custom types
     if isinstance(a, WithAux):
@@ -427,7 +451,7 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
           array=self.asarray(a.array, dtype=dtype, order=order, **kwargs)
       )
 
-    if isinstance(a, qarray.QArray):
+    if isinstance(a, (qarray.QArray, sparse_array.SparseArray)):
       if dtype is not None and a.dtype != dtype:
         return a.astype(dtype)
       return a
@@ -491,13 +515,30 @@ def quantize_act(
   )
 
 
+def quantize_weight(
+    value: jax.Array,
+    how: qarray.HowToQuantize,
+    *,
+    _qarray_module=qarray,
+) -> qarray.QArray | sparse_array.SparseArray:
+  """Quantizes a weight array into a QArray or SparseArray."""
+  if how.sparsity is not None:
+    if _qarray_module is not qarray:
+      raise NotImplementedError(
+          'Custom _qarray_module does not support weight_sparsity.'
+      )
+    # `value` may be an nnx.Param when a module passes the Param itself.
+    return sparse_array.quantize(flax_util.unbox(value), how)
+  return _qarray_module.quantize(value, how)
+
+
 def create_quantized_param(
     name: str,
     value: jax.Array,
     how: qarray.HowToQuantize,
     *,
     _qarray_module=qarray,
-) -> WithAux[qarray.QArray]:
+) -> WithAux[Any]:
   """Creates the quantized param and replaces the original param in the module.
 
   Args:
@@ -509,7 +550,9 @@ def create_quantized_param(
   Returns:
     An unboxed WithAux.
   """
-  unboxed = WithAux(_qarray_module.quantize(value, how), how)
+  unboxed = WithAux(
+      quantize_weight(value, how, _qarray_module=_qarray_module), how
+  )
 
   # The following code is about replacing the saved param with WithAux, with
   # correct metadata.

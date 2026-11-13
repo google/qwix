@@ -21,6 +21,7 @@ import jax
 from jax import numpy as jnp
 import opt_einsum
 from qwix._src.core import qarray
+from qwix._src.core import sparse_array
 
 
 @dataclasses.dataclass(slots=True)
@@ -195,8 +196,9 @@ def sanitize_shape(shape: Sequence[int | Any]) -> tuple[int, ...]:
 
 
 def broadcast_operands(
-    operands: Sequence[qarray.MaybeQArray], operand_subs_list: Sequence[str]
-) -> list[qarray.MaybeQArray]:
+    operands: Sequence[qarray.MaybeQArray | sparse_array.SparseArray],
+    operand_subs_list: Sequence[str],
+) -> list[qarray.MaybeQArray | sparse_array.SparseArray]:
   """Broadcasts operands to matching shapes for shared dimensions.
 
   This function ensures that all operands have compatible shapes for the

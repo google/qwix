@@ -69,7 +69,9 @@ class QtProvider(qconfig.QuantizationProvider):
   def _init_rule(self, rule: qconfig.QuantizationRule) -> QtRule:
     rule = super()._init_rule(rule)
     if not isinstance(rule, QtRule):
-      rule = QtRule(**dataclasses.asdict(rule))
+      rule = QtRule(
+          **{f.name: getattr(rule, f.name) for f in dataclasses.fields(rule)}
+      )
     return rule
 
   def dot_general(
