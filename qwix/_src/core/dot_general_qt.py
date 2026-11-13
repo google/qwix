@@ -85,6 +85,7 @@ class DotGeneralQtConfig:
   drhs_residual_disable_channelwise_axes: bool = False
 
   sparsity_rule: sparsity.SparsityRule | None = None
+  preferred_element_type: jax.typing.DTypeLike | None = None
   out_sharding: (
       jax.sharding.NamedSharding | jax.sharding.PartitionSpec | None
   ) = None
@@ -456,12 +457,17 @@ def dot_general_qt_fwd(
         lhs_in,
         rhs_in,
         dimension_numbers,
+        preferred_element_type=config.preferred_element_type,
         multipass_mode=config.multipass_mode,
         tile_size=config.tile_size,
     )
   else:
     out = dot_general.dot_general(
-        lhs, rhs, dimension_numbers, out_sharding=config.out_sharding
+        lhs,
+        rhs,
+        dimension_numbers,
+        preferred_element_type=config.preferred_element_type,
+        out_sharding=config.out_sharding,
     )
   return out, residuals
 
@@ -495,7 +501,9 @@ def dot_general_qt_bwd(
     bwd_dnums, transpose_axes = _update_dimension_numbers_for_backward(
         fwd_dimension_numbers, (lhs.ndim, rhs.ndim), for_dlhs=for_dlhs
     )
+    primal_in = lhs_in if for_dlhs else rhs_in
     primal = lhs if for_dlhs else rhs
+    primal_dtype = primal_in.dtype if primal_in is not None else primal.dtype
     x_sharding = jax.typeof(
         primal.qvalue if isinstance(primal, qarray.QArray) else primal
     ).sharding
@@ -542,7 +550,7 @@ def dot_general_qt_bwd(
           multipass_mode=multipass_mode,
           tile_size=g_tile_size,
       )
-      return jax.lax.transpose(grad_res, transpose_axes)
+      return jax.lax.transpose(grad_res, transpose_axes).astype(primal_dtype)
 
     if g_qtype and numerics.should_quantize(g.dtype):
       if (
@@ -594,7 +602,7 @@ def dot_general_qt_bwd(
     grad_res = dot_general.dot_general(
         g, y, bwd_dnums, out_sharding=bwd_out_sharding
     )
-    return jax.lax.transpose(grad_res, transpose_axes)
+    return jax.lax.transpose(grad_res, transpose_axes).astype(primal_dtype)
 
   dlhs = _compute_gradient_for_operand(g, for_dlhs=True)
   drhs = _compute_gradient_for_operand(g, for_dlhs=False)
@@ -705,11 +713,16 @@ def dot_general_qt(
     dimension_numbers: jax.lax.DotDimensionNumbers,
     config: DotGeneralQtConfig,
     *,
+    preferred_element_type: jax.typing.DTypeLike | None = None,
     out_sharding: (
         jax.sharding.NamedSharding | jax.sharding.PartitionSpec | None
     ) = None,
 ) -> jax.Array:
   """Quantized dot_general with backpropagation support."""
+  if preferred_element_type is not None:
+    config = dataclasses.replace(
+        config, preferred_element_type=preferred_element_type
+    )
   if out_sharding is not None:
     config = dataclasses.replace(config, out_sharding=out_sharding)
   calibrate = functools.partial(

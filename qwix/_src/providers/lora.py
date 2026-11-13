@@ -172,6 +172,7 @@ def _compute_lora_delta(
     remain_shape: typing.Shape,
     rank: int,
     precision: jax.lax.PrecisionLike = None,
+    preferred_element_type: jax.typing.DTypeLike | None = None,
 ) -> jax.Array:
   """Computes the raw LoRA delta."""
 
@@ -187,6 +188,7 @@ def _compute_lora_delta(
       lora_a_reshaped,
       ((lhs_ca, lora_a_contract_axes), (lhs_ba, delta_batch_axes)),
       precision=precision,
+      preferred_element_type=preferred_element_type,
   )
 
   # delta = delta_a @ lora_b
@@ -201,6 +203,7 @@ def _compute_lora_delta(
           (delta_batch_axes, delta_batch_axes),
       ),
       precision=precision,
+      preferred_element_type=preferred_element_type,
   )
   return delta
 
@@ -315,6 +318,7 @@ class LoraProvider(boxed_param.BoxedParamProvider):
         remain_shape,
         rule.rank,
         precision=precision,
+        preferred_element_type=preferred_element_type,
     )
 
     return res + delta * (rule.alpha / rule.rank)

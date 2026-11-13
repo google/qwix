@@ -190,7 +190,12 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
           lhs, lhs_how, rule, op_id + '_lhs', _qarray_module=self._qarray_module  # pyrefly: ignore[unsupported-operation]
       )
     return self._dot_general_fn(
-        lhs, rhs, dimension_numbers, out_sharding=out_sharding  # pyrefly: ignore[bad-argument-type]
+        lhs,
+        rhs,  # pyrefly: ignore[bad-argument-type]
+        dimension_numbers,
+        precision=precision,
+        preferred_element_type=preferred_element_type,
+        out_sharding=out_sharding,
     )
 
   def einsum(
@@ -258,7 +263,13 @@ class BoxedParamProvider(qconfig.QuantizationProvider):
       lhs = quantize_act(
           lhs, lhs_how, rule, op_id + '_lhs', _qarray_module=self._qarray_module  # pyrefly: ignore[unsupported-operation]
       )
-    return self._einsum_fn(einsum_str, lhs, rhs)
+    return self._einsum_fn(
+        einsum_str,
+        lhs,
+        rhs,
+        precision=precision,
+        preferred_element_type=preferred_element_type,
+    )
 
   def conv_general_dilated(
       self,

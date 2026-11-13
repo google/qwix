@@ -457,6 +457,87 @@ class QtTest(parameterized.TestCase):
     res = qt_mod.apply({}, x, y)
     self.assertEqual(res.shape, (2, 4))
 
+  @parameterized.product(
+      op=["dot_general", "einsum"],
+      bwd_qtype=[None, jnp.int8],
+  )
+  def test_preferred_element_type_and_bwd(self, op, bwd_qtype):
+    class Mod(nn.Module):
+
+      @nn.compact
+      def __call__(self, x):
+        w = self.param("w", nn.initializers.normal(), (8, 4), jnp.bfloat16)
+        if op == "dot_general":
+          return jax.lax.dot_general(
+              x,
+              w,
+              (((1,), (0,)), ((), ())),
+              preferred_element_type=jnp.float32,
+          )
+        return jnp.einsum("ab,bc->ac", x, w, preferred_element_type=jnp.float32)
+
+    rule = qt.QtRule(
+        weight_qtype=jnp.float8_e4m3fn,
+        act_qtype=jnp.float8_e4m3fn,
+        bwd_qtype=bwd_qtype,
+    )
+    qt_mod = qwix_model.quantize_model(Mod(), qt.QtProvider([rule]))
+    x = jax.random.normal(jax.random.key(0), (2, 8), dtype=jnp.bfloat16)
+    variables = qt_mod.init(jax.random.key(1), x)
+    out = qt_mod.apply(variables, x)
+    self.assertEqual(out.dtype, jnp.float32)
+    self.assertFalse(
+        jnp.array_equal(out, out.astype(jnp.bfloat16).astype(jnp.float32))
+    )
+    dx, dw = jax.grad(
+        lambda x, p: qt_mod.apply({"params": p}, x).sum(), argnums=(0, 1)
+    )(x, variables["params"])
+    self.assertEqual(dx.dtype, jnp.bfloat16)
+    self.assertEqual(dw["w"].dtype, jnp.bfloat16)
+
+  @parameterized.parameters("dot_general", "einsum")
+  def test_additional_qt_config_preferred_element_type(self, op):
+    class Mod(nn.Module):
+      call_preferred_dtype: jax.typing.DTypeLike | None = None
+
+      @nn.compact
+      def __call__(self, x):
+        w = self.param("w", nn.initializers.normal(), (8, 4), jnp.bfloat16)
+        if op == "dot_general":
+          return jax.lax.dot_general(
+              x,
+              w,
+              (((1,), (0,)), ((), ())),
+              preferred_element_type=self.call_preferred_dtype,
+          )
+        return jnp.einsum(
+            "ab,bc->ac",
+            x,
+            w,
+            preferred_element_type=self.call_preferred_dtype,
+        )
+
+    rule = qt.QtRule(
+        weight_qtype=jnp.float8_e4m3fn,
+        act_qtype=jnp.float8_e4m3fn,
+        additional_qt_config={"preferred_element_type": jnp.float32},
+    )
+    x = jax.random.normal(jax.random.key(0), (2, 8), dtype=jnp.bfloat16)
+
+    qt_mod = qwix_model.quantize_model(Mod(), qt.QtProvider([rule]))
+    variables = qt_mod.init(jax.random.key(1), x)
+    out = qt_mod.apply(variables, x)
+    self.assertEqual(out.dtype, jnp.float32)
+    self.assertFalse(
+        jnp.array_equal(out, out.astype(jnp.bfloat16).astype(jnp.float32))
+    )
+
+    qt_override = qwix_model.quantize_model(
+        Mod(call_preferred_dtype=jnp.bfloat16), qt.QtProvider([rule])
+    )
+    out_override = qt_override.apply(variables, x)
+    self.assertEqual(out_override.dtype, jnp.bfloat16)
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -1171,6 +1171,72 @@ class DotGeneralQtTest(parameterized.TestCase):
             jnp.allclose(drhs_resolved, drhs_ref, rtol=1e-5, atol=1e-5)
         )
 
+  @parameterized.parameters(None, jnp.float8_e4m3fn)
+  def test_preferred_element_type_and_bwd_dtype(self, bwd_qtype):
+    lhs = jax.random.normal(jax.random.key(0), (8, 16), jnp.bfloat16)
+    rhs = jax.random.normal(jax.random.key(1), (16, 8), jnp.bfloat16)
+    dnums = (((1,), (0,)), ((), ()))
+    config = dot_general_qt.DotGeneralQtConfig(
+        lhs_qtype=jnp.float8_e4m3fn,
+        rhs_qtype=jnp.float8_e4m3fn,
+        dlhs_grad_qtype=bwd_qtype,
+        drhs_grad_qtype=bwd_qtype,
+        preferred_element_type=jnp.float32,
+    )
+
+    out = dot_general_qt.dot_general_qt(lhs, rhs, dnums, config)
+    self.assertEqual(out.dtype, jnp.float32)
+    self.assertFalse(
+        jnp.array_equal(out, out.astype(jnp.bfloat16).astype(jnp.float32))
+    )
+    dlhs, drhs = jax.grad(
+        lambda l, r: dot_general_qt.dot_general_qt(l, r, dnums, config).sum(),
+        argnums=(0, 1),
+    )(lhs, rhs)
+    self.assertEqual(dlhs.dtype, jnp.bfloat16)
+    self.assertEqual(drhs.dtype, jnp.bfloat16)
+
+    # Keyword argument overrides DotGeneralQtConfig.preferred_element_type.
+    out_bf16 = dot_general_qt.dot_general_qt(
+        lhs, rhs, dnums, config, preferred_element_type=jnp.bfloat16
+    )
+    self.assertEqual(out_bf16.dtype, jnp.bfloat16)
+
+    cfg_bf16 = dataclasses.replace(config, preferred_element_type=jnp.bfloat16)
+    out_f32_override = dot_general_qt.dot_general_qt(
+        lhs, rhs, dnums, cfg_bf16, preferred_element_type=jnp.float32
+    )
+    self.assertEqual(out_f32_override.dtype, jnp.float32)
+    self.assertTrue(jnp.array_equal(out_f32_override, out))
+
+  def test_preferred_element_type_multipass(self):
+    lhs = jax.random.normal(jax.random.key(0), (16, 32), jnp.bfloat16)
+    rhs = jax.random.normal(jax.random.key(1), (32, 16), jnp.bfloat16)
+    dnums = (((1,), (0,)), ((), ()))
+    config = dot_general_qt.DotGeneralQtConfig(
+        multipass_mode='three_pass_fp8',
+        dlhs_multipass_mode='three_pass_fp8',
+        drhs_multipass_mode='three_pass_fp8',
+        preferred_element_type=jnp.float32,
+    )
+
+    out = dot_general_qt.dot_general_qt(lhs, rhs, dnums, config)
+    self.assertEqual(out.dtype, jnp.float32)
+    self.assertFalse(
+        jnp.array_equal(out, out.astype(jnp.bfloat16).astype(jnp.float32))
+    )
+    dlhs, drhs = jax.grad(
+        lambda l, r: dot_general_qt.dot_general_qt(l, r, dnums, config).sum(),
+        argnums=(0, 1),
+    )(lhs, rhs)
+    self.assertEqual(dlhs.dtype, jnp.bfloat16)
+    self.assertEqual(drhs.dtype, jnp.bfloat16)
+
+    out_bf16 = dot_general_qt.dot_general_qt(
+        lhs, rhs, dnums, config, preferred_element_type=jnp.bfloat16
+    )
+    self.assertEqual(out_bf16.dtype, jnp.bfloat16)
+
 
 if __name__ == '__main__':
   absltest.main()

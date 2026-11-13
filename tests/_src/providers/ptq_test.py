@@ -895,6 +895,38 @@ class PtqTest(parameterized.TestCase):
     self.assertEqual(out.shape, (2, 16))
     self.assertEqual(ptq_layer.w.array.scale.shape, (4, 8))
 
+  @parameterized.parameters("dot_general", "einsum")
+  def test_preferred_element_type(self, op):
+    class Mod(nnx.Module):
+
+      def __init__(self):
+        self.w = nnx.Param(
+            jax.random.normal(jax.random.key(1), (8, 4), dtype=jnp.bfloat16)
+        )
+
+      def __call__(self, x):
+        if op == "dot_general":
+          return jax.lax.dot_general(
+              x,
+              self.w,
+              (((1,), (0,)), ((), ())),
+              preferred_element_type=jnp.float32,
+          )
+        return jnp.einsum(
+            "ab,bc->ac", x, self.w, preferred_element_type=jnp.float32
+        )
+
+    rule = qconfig.QuantizationRule(
+        weight_qtype=jnp.float8_e4m3fn, act_qtype=jnp.float8_e4m3fn
+    )
+    x = jax.random.normal(jax.random.key(0), (2, 8), dtype=jnp.bfloat16)
+    ptq_mod = qwix_model.quantize_model(Mod(), ptq.PtqProvider([rule]), x)
+    out = ptq_mod(x)
+    self.assertEqual(out.dtype, jnp.float32)
+    self.assertFalse(
+        jnp.array_equal(out, out.astype(jnp.bfloat16).astype(jnp.float32))
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

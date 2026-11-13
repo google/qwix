@@ -167,6 +167,25 @@ class RaggedDotQtTest(parameterized.TestCase):
 
     self.assertEqual(out.shape, (256, 128))
 
+  @parameterized.parameters(None, jnp.float8_e4m3fn)
+  def test_preferred_element_type_bwd_dtype(self, bwd_qtype):
+    lhs = jax.random.normal(jax.random.key(0), (16, 8), jnp.bfloat16)
+    rhs = jax.random.normal(jax.random.key(1), (2, 8, 4), jnp.bfloat16)
+    group_sizes = jnp.array([8, 8], jnp.int32)
+    config = ragged_dot_qt.RaggedDotQtConfig(
+        lhs_qtype=jnp.float8_e4m3fn,
+        rhs_qtype=jnp.float8_e4m3fn,
+        dlhs_grad_qtype=bwd_qtype,
+        drhs_grad_qtype=bwd_qtype,
+    )
+    fn = lambda l, r: ragged_dot_qt.ragged_dot_qt(
+        l, r, group_sizes, config, preferred_element_type=jnp.float32
+    )
+    self.assertEqual(fn(lhs, rhs).dtype, jnp.float32)
+    dlhs, drhs = jax.grad(lambda l, r: fn(l, r).sum(), argnums=(0, 1))(lhs, rhs)
+    self.assertEqual(dlhs.dtype, jnp.bfloat16)
+    self.assertEqual(drhs.dtype, jnp.bfloat16)
+
 
 if __name__ == "__main__":
   absltest.main()

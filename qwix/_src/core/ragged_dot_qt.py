@@ -71,6 +71,7 @@ def ragged_dot_qt_bwd(
 ) -> tuple[jax.Array, jax.Array, None]:
   """Backward pass for ragged_dot_qt custom VJP."""
   lhs, rhs, group_sizes = residuals  # lhs [M, K], rhs [G, K, N], g [M, N]
+  lhs_dtype, rhs_dtype = lhs.dtype, rhs.dtype
 
   # dlhs = ragged_dot(g, rhs.swapaxes(1, 2))
   # [M, K] = [M, N] @ [G, N, K]
@@ -125,7 +126,7 @@ def ragged_dot_qt_bwd(
       group_offset=group_offset,
   )
 
-  return dlhs, drhs, None
+  return dlhs.astype(lhs_dtype), drhs.astype(rhs_dtype), None
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6))

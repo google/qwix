@@ -716,6 +716,72 @@ class LoraTest(parameterized.TestCase):
     lora_model = lora.apply_lora_to_model(model, lora_provider, x)
     self.assertIsInstance(lora_model.linear.kernel_lora_a, nnx.LoRAParam)
 
+  @parameterized.product(
+      dtypes=[
+          (jnp.bfloat16, jnp.float32),
+          (jnp.float32, jnp.bfloat16),
+      ],
+      weight_qtype=[None, "float8_e4m3fn"],
+  )
+  def test_lora_dot_general_preferred_element_type(self, dtypes, weight_qtype):
+    input_dtype, preferred_dtype = dtypes
+    rank, alpha = 3, 1.5
+
+    class Linear(nnx.Module):
+
+      def __init__(self, rngs):
+        self.kernel = nnx.Param(
+            jax.random.normal(rngs.params(), (8, 4), dtype=input_dtype)
+        )
+
+      def __call__(self, x):
+        return jax.lax.dot_general(
+            x,
+            self.kernel.value,
+            (((1,), (0,)), ((), ())),
+            preferred_element_type=preferred_dtype,
+        )
+
+    model = Linear(nnx.Rngs(0))
+    provider = lora.LoraProvider([
+        lora.LoraRule(
+            module_path=".*",
+            rank=rank,
+            alpha=alpha,
+            weight_qtype=weight_qtype,
+            lora_b_initializer=nnx.initializers.ones,
+        )
+    ])
+    x = jax.random.normal(jax.random.key(2), (2, 8), dtype=input_dtype)
+    lora_model = lora.apply_lora_to_model(model, provider, x, rngs=nnx.Rngs(1))
+    out = lora_model(x)
+    self.assertEqual(out.dtype, preferred_dtype)
+    if preferred_dtype == jnp.float32:
+      self.assertFalse(
+          jnp.array_equal(out, out.astype(jnp.bfloat16).astype(jnp.float32))
+      )
+      if weight_qtype is None:
+        base_out = jax.lax.dot_general(
+            x,
+            lora_model.kernel.value,
+            (((1,), (0,)), ((), ())),
+            preferred_element_type=preferred_dtype,
+        )
+        delta_a = jax.lax.dot_general(
+            x,
+            lora_model.kernel_lora_a.value,
+            (((1,), (0,)), ((), ())),
+            preferred_element_type=preferred_dtype,
+        )
+        delta = jax.lax.dot_general(
+            delta_a,
+            lora_model.kernel_lora_b.value,
+            (((1,), (0,)), ((), ())),
+            preferred_element_type=preferred_dtype,
+        )
+        expected = base_out + delta * (alpha / rank)
+        self.assertTrue(jnp.allclose(out, expected))
+
 
 if __name__ == "__main__":
   absltest.main()

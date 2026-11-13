@@ -98,7 +98,12 @@ class QtProvider(qconfig.QuantizationProvider):
     qconfig.check_unsupported_options('Quantized dot_general', kwargs)
     config = self._create_dot_general_qt_config(rule, op_id, lhs, rhs)  # pyrefly: ignore[bad-argument-type]
     return dot_general_qt.dot_general_qt(
-        lhs, rhs, dimension_numbers, config, out_sharding=out_sharding
+        lhs,
+        rhs,
+        dimension_numbers,
+        config,
+        preferred_element_type=preferred_element_type,
+        out_sharding=out_sharding,
     )
 
   def einsum(
@@ -133,8 +138,7 @@ class QtProvider(qconfig.QuantizationProvider):
         preferred_element_type,
         **kwargs,
     ):
-      # TODO(dangyi): support preferred_element_type.
-      del precision, preferred_element_type
+      del precision
       return dot_general_qt.dot_general_qt(
           lhs,
           rhs,
@@ -142,7 +146,17 @@ class QtProvider(qconfig.QuantizationProvider):
           # lhs and rhs might be flipped by einsum so we cannot use the operands
           # from the einsum call.
           self._create_dot_general_qt_config(rule, op_id, lhs, rhs),  # pyrefly: ignore[bad-argument-type]
+          preferred_element_type=preferred_element_type,
           out_sharding=kwargs.get('out_sharding'),
+      )
+
+    if (
+        preferred_element_type is None
+        and isinstance(rule, QtRule)
+        and rule.additional_qt_config
+    ):
+      preferred_element_type = rule.additional_qt_config.get(
+          'preferred_element_type'
       )
 
     with jax.disable_jit():
