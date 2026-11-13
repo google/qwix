@@ -13,6 +13,7 @@
 # limitations under the License.
 import functools
 import os
+import types
 from unittest import mock
 
 from absl.testing import absltest
@@ -23,8 +24,12 @@ import jax
 from jax import export
 from jax import numpy as jnp
 from jax.experimental import pallas as pl
+import numpy as np
+import qwix
 from qwix._src import model as qwix_model
 from qwix._src import qconfig
+from qwix._src.core import sparse_array
+from qwix._src.core import sparsity
 from qwix._src.providers import boxed_param
 from qwix._src.providers import ptq
 from qwix._src.providers import qt
@@ -926,6 +931,514 @@ class PtqTest(parameterized.TestCase):
     self.assertFalse(
         jnp.array_equal(out, out.astype(jnp.bfloat16).astype(jnp.float32))
     )
+
+  def test_sparse_array_public_export(self):
+    self.assertIs(qwix.SparseArray, sparse_array.SparseArray)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="w8a16", qtype=jnp.float8_e4m3fn, act_qtype=None),
+      dict(
+          testcase_name="w8a8",
+          qtype=jnp.float8_e4m3fn,
+          act_qtype=jnp.float8_e4m3fn,
+      ),
+      dict(testcase_name="w4a16", qtype=jnp.int4, act_qtype=None),
+  )
+  def test_weight_sparsity_linen_and_nnx(self, qtype, act_qtype):
+    sp = sparsity.StructuredSparsity(1, 4)
+    sparse_rules = [
+        qconfig.QuantizationRule(
+            weight_qtype=qtype, act_qtype=act_qtype, weight_sparsity=sp
+        )
+    ]
+    dense_rules = [
+        qconfig.QuantizationRule(weight_qtype=qtype, act_qtype=act_qtype)
+    ]
+    w_raw = jax.random.normal(jax.random.key(0), (16, 8), dtype=jnp.bfloat16)
+    w_sparse = sparsity.prune_inputs_n_m(
+        w_raw.astype(jnp.float32), n=1, m=4, axis=0
+    ).astype(jnp.bfloat16)
+    x = jax.random.normal(jax.random.key(1), (3, 16), dtype=jnp.bfloat16)
+
+    # Linen: eval_shape + quantize_params + Partitioned metadata + jit(init).
+    dense = nn.Dense(
+        features=8,
+        use_bias=False,
+        param_dtype=jnp.bfloat16,
+        kernel_init=nn.with_partitioning(
+            lambda *_: w_sparse, ("contraction", "remaining")
+        ),
+    )
+    ptq_sparse = qwix_model.quantize_model(dense, ptq.PtqProvider(sparse_rules))
+    ptq_dense = qwix_model.quantize_model(dense, ptq.PtqProvider(dense_rules))
+
+    abs_params = jax.eval_shape(ptq_sparse.init, jax.random.key(0), x)["params"]
+    abs_sa = abs_params["kernel"].array
+    self.assertIsInstance(abs_sa, sparse_array.SparseArray)
+    self.assertEqual(abs_params["kernel"].shape, (16, 8))
+    self.assertIsInstance(abs_sa.values.qvalue, nn.Partitioned)
+    self.assertEqual(abs_sa.values.qvalue.value.shape, (4, 8))
+    self.assertEqual(abs_sa.values.qvalue.names, ("contraction", "remaining"))
+    self.assertIsInstance(abs_sa.indices, nn.Partitioned)
+    self.assertEqual(abs_sa.indices.value.shape, (4, 8))
+    self.assertEqual(abs_sa.indices.value.dtype, jnp.uint2)
+
+    q_params = ptq.quantize_params({"kernel": w_sparse}, abs_params)
+    dense_params = ptq.quantize_params(
+        {"kernel": w_sparse},
+        jax.eval_shape(ptq_dense.init, jax.random.key(0), x)["params"],
+    )
+    out_sparse = jax.jit(ptq_sparse.apply)({"params": q_params}, x)
+    out_dense = jax.jit(ptq_dense.apply)({"params": dense_params}, x)
+    self.assertTrue(jnp.array_equal(out_sparse, out_dense))
+
+    jit_params = nn.unbox(
+        jax.jit(ptq_sparse.init)(jax.random.key(0), x)["params"]
+    )
+    self.assertTrue(
+        jnp.array_equal(
+            jax.jit(ptq_sparse.apply)({"params": jit_params}, x), out_dense
+        )
+    )
+
+    # NNX: quantize_model and eval_shape + quantize_params + nnx.update.
+    lin = nnx.Linear(
+        16, 8, use_bias=False, param_dtype=jnp.bfloat16, rngs=nnx.Rngs(0)
+    )
+    lin.kernel[...] = w_sparse
+    lin_ref = nnx.clone(lin)
+    with mock.patch.object(
+        boxed_param, "quantize_act", wraps=boxed_param.quantize_act
+    ) as mock_qact:
+      ptq_lin = qwix_model.quantize_model(lin, ptq.PtqProvider(sparse_rules), x)
+      ptq_lin_ref = qwix_model.quantize_model(
+          lin_ref, ptq.PtqProvider(dense_rules), x
+      )
+      out_nnx = ptq_lin(x)
+    self.assertIsInstance(ptq_lin.kernel.array, sparse_array.SparseArray)
+    self.assertTrue(jnp.array_equal(out_nnx, ptq_lin_ref(x)))
+    if act_qtype is not None:
+      self.assertIsNone(mock_qact.call_args.args[1].sparsity)
+
+    abs_lin = nnx.eval_shape(
+        lambda: qwix_model.quantize_model(
+            nnx.Linear(
+                16,
+                8,
+                use_bias=False,
+                param_dtype=jnp.bfloat16,
+                rngs=nnx.Rngs(0),
+            ),
+            ptq.PtqProvider(sparse_rules),
+            x,
+        )
+    )
+    nnx_q_params = ptq.quantize_params({"kernel": w_sparse}, abs_lin)
+    nnx.update(abs_lin, nnx_q_params)
+    self.assertTrue(jnp.array_equal(abs_lin(x), out_nnx))
+
+  def test_weight_sparsity_nnx_direct_param(self):
+    # Modules passing nnx.Param directly (without [...]) work in verify/prune,
+    # eval_shape + quantize_params + nnx.update, and subsequent jitted calls.
+    w_dense = jax.random.normal(jax.random.key(5), (16, 8), dtype=jnp.bfloat16)
+    w_sparse = sparsity.prune_inputs_n_m(
+        w_dense.astype(jnp.float32), n=1, m=4, axis=0
+    ).astype(jnp.bfloat16)
+    x = jax.random.normal(jax.random.key(6), (3, 16), dtype=jnp.bfloat16)
+
+    class DirectParamModule(nnx.Module):
+
+      def __init__(self, w: jax.Array, op: str):
+        self.w = nnx.Param(w)
+        self._op = op
+
+      def __call__(self, inp):
+        if self._op == "einsum":
+          return jnp.einsum("ij,jk->ik", inp, self.w)
+        return jnp.dot(inp, self.w)
+
+    for op in ("einsum", "dot"):
+      dense_ref = qwix_model.quantize_model(
+          DirectParamModule(w_sparse, op),
+          ptq.PtqProvider(
+              [qconfig.QuantizationRule(weight_qtype=jnp.float8_e4m3fn)]
+          ),
+          x,
+      )
+      expected = dense_ref(x)
+
+      for prune, w_init in ((False, w_sparse), (True, w_dense)):
+        rule = qconfig.QuantizationRule(
+            weight_qtype=jnp.float8_e4m3fn,
+            weight_sparsity=sparsity.StructuredSparsity(1, 4),
+            weight_sparsity_prune=prune,
+        )
+        ptq_m = qwix_model.quantize_model(
+            DirectParamModule(w_init, op), ptq.PtqProvider([rule]), x
+        )
+        self.assertIsInstance(ptq_m.w.array, sparse_array.SparseArray)
+        self.assertTrue(jnp.array_equal(jax.jit(ptq_m.__call__)(x), expected))
+
+        abs_m = nnx.eval_shape(
+            lambda r=rule, o=op: qwix_model.quantize_model(
+                DirectParamModule(jnp.zeros((16, 8), jnp.bfloat16), o),
+                ptq.PtqProvider([r]),
+                x,
+            )
+        )
+        q_params = ptq.quantize_params({"w": w_init}, abs_m)
+        nnx.update(abs_m, q_params)
+        self.assertTrue(jnp.array_equal(jax.jit(abs_m.__call__)(x), expected))
+
+  def test_weight_sparsity_nnx_scan_and_multi_axis_einsum(self):
+    # NNX vmap + scan stacks SparseArray leaves while preserving axis=-2.
+    class ScanModel(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        @nnx.split_rngs(splits=2)
+        @nnx.vmap(axis_size=2)
+        def create_layer(r: nnx.Rngs):
+          return nnx.Linear(12, 12, use_bias=False, rngs=r)
+
+        self.layers = create_layer(rngs)
+
+      def __call__(self, x):
+        @nnx.scan(out_axes=nnx.Carry)
+        def scan_fn(carry: jax.Array, layer):
+          return layer(carry)
+
+        return scan_fn(x, self.layers)
+
+    model = ScanModel(nnx.Rngs(0))
+    w_pruned = sparsity.prune_inputs_n_m(
+        model.layers.kernel.value, n=1, m=4, axis=1
+    )
+    model_ref = ScanModel(nnx.Rngs(0))
+    model_ref.layers.kernel[...] = w_pruned
+
+    x = jnp.ones((4, 12))
+    ptq_scan = qwix_model.quantize_model(
+        model,
+        ptq.PtqProvider([
+            qconfig.QuantizationRule(
+                weight_qtype=jnp.float8_e4m3fn,
+                weight_sparsity=sparsity.StructuredSparsity(1, 4),
+                weight_sparsity_prune=True,
+            )
+        ]),
+        x,
+    )
+    ptq_scan_ref = qwix_model.quantize_model(
+        model_ref,
+        ptq.PtqProvider(
+            [qconfig.QuantizationRule(weight_qtype=jnp.float8_e4m3fn)]
+        ),
+        x,
+    )
+    sa = ptq_scan.layers.kernel.array
+    self.assertIsInstance(sa, sparse_array.SparseArray)
+    self.assertEqual(sa.shape, (2, 12, 12))
+    self.assertEqual(sa.values.qvalue.shape, (2, 3, 12))
+    self.assertEqual(sa.axis, -2)
+    self.assertTrue(
+        jnp.array_equal(
+            ptq.qarray.dequantize(sa),
+            ptq.qarray.dequantize(ptq_scan_ref.layers.kernel.array),
+        )
+    )
+    # The sparse and dense scan bodies are different XLA graphs; float32 outputs
+    # differed below this tolerance on one CPU platform.
+    np.testing.assert_allclose(
+        ptq_scan(x), ptq_scan_ref(x), rtol=1e-6, atol=1e-6
+    )
+
+    # Multi-axis einsum resolves sparsity along max contracting axis (1, not 0).
+    class MultiContractEinsum(nn.Module):
+
+      @nn.compact
+      def __call__(self, inp):
+        w = self.param("w", nn.initializers.normal(), (4, 8, 6))
+        return jnp.einsum("btnh,nhd->btd", inp, w)
+
+    inp = jnp.ones((2, 3, 4, 8))
+    ptq_ein = qwix_model.quantize_model(
+        MultiContractEinsum(),
+        ptq.PtqProvider([
+            qconfig.QuantizationRule(
+                weight_qtype=jnp.float8_e4m3fn,
+                weight_sparsity=sparsity.StructuredSparsity(1, 4),
+            )
+        ]),
+    )
+    abs_ein = jax.eval_shape(ptq_ein.init, jax.random.key(0), inp)["params"]
+    self.assertEqual(abs_ein["w"].array.axis, -2)
+    self.assertEqual(abs_ein["w"].array.values.qvalue.shape, (4, 2, 6))
+
+    w_base = jax.random.normal(jax.random.key(2), (4, 8, 6)) + 2.0
+    w_axis1 = sparsity.prune_inputs_n_m(w_base, n=1, m=4, axis=1)
+    w_axis0 = sparsity.prune_inputs_n_m(w_base, n=1, m=4, axis=0)
+    q_ein = ptq.quantize_params({"w": w_axis1}, abs_ein)
+    self.assertEqual(
+        ptq_ein.apply({"params": q_ein}, inp).shape,
+        (2, 3, 6),
+    )
+    with self.assertRaisesRegex(ValueError, "does not satisfy 1:M"):
+      ptq.quantize_params({"w": w_axis0}, abs_ein)
+
+  def test_weight_sparsity_verify_vs_prune(self):
+    dense = nn.Dense(features=8, use_bias=False)
+    x = jnp.ones((2, 16))
+    w_dense = jax.random.normal(jax.random.key(3), (16, 8)) + 2.0
+    w_pruned = sparsity.prune_inputs_n_m(w_dense, n=1, m=4, axis=0)
+
+    verify_model = qwix_model.quantize_model(
+        dense,
+        ptq.PtqProvider([
+            qconfig.QuantizationRule(
+                weight_qtype=jnp.float8_e4m3fn,
+                weight_sparsity=sparsity.StructuredSparsity(1, 4),
+            )
+        ]),
+    )
+    prune_model = qwix_model.quantize_model(
+        dense,
+        ptq.PtqProvider([
+            qconfig.QuantizationRule(
+                weight_qtype=jnp.float8_e4m3fn,
+                weight_sparsity=sparsity.StructuredSparsity(1, 4),
+                weight_sparsity_prune=True,
+            )
+        ]),
+    )
+    abs_verify = jax.eval_shape(verify_model.init, jax.random.key(0), x)[
+        "params"
+    ]
+    abs_prune = jax.eval_shape(prune_model.init, jax.random.key(0), x)["params"]
+
+    with self.assertRaisesRegex(ValueError, "does not satisfy 1:M"):
+      ptq.quantize_params({"kernel": w_dense}, abs_verify)
+
+    with self.assertRaises(jax.errors.JaxRuntimeError):
+      jax.jit(verify_model.init)(jax.random.key(0), x)
+      jax.effects_barrier()
+
+    q_pruned = ptq.quantize_params({"kernel": w_dense}, abs_prune)
+    q_verified = ptq.quantize_params({"kernel": w_pruned}, abs_verify)
+    self.assertTrue(
+        jnp.array_equal(
+            prune_model.apply({"params": q_pruned}, x),
+            verify_model.apply({"params": q_verified}, x),
+        )
+    )
+
+  def test_weight_sparsity_sharding(self):
+    how = ptq.qarray.HowToQuantize(
+        qtype=jnp.float8_e4m3fn,
+        channelwise_axes=(1,),
+        sparsity=sparsity.StructuredSparsity(1, 4, dimension=-2),
+        sparsity_prune=True,
+    )
+    w_8 = jnp.ones((8, 8), dtype=jnp.float32)
+    w_16 = jnp.ones((16, 8), dtype=jnp.float32)
+
+    # SingleDeviceSharding succeeds.
+    sa_single = sparse_array.quantize(
+        jax.device_put(w_8, jax.devices()[0]), how
+    )
+    self.assertEqual(sa_single.values.qvalue.shape, (2, 8))
+
+    # AxisType.Explicit: shard size 2 along axis 0 fails (eager and jit).
+    explicit_mesh = jax.make_mesh(
+        (4,),
+        ("x",),
+        axis_types=(jax.sharding.AxisType.Explicit,),
+        devices=jax.devices()[:4],
+    )
+    with jax.set_mesh(explicit_mesh):
+      w_exp_bad = jax.device_put(w_8, jax.sharding.PartitionSpec("x", None))
+      with self.assertRaisesRegex(ValueError, "Shard size 2 along sparse axis"):
+        sparse_array.quantize(w_exp_bad, how)
+      with self.assertRaisesRegex(ValueError, "Shard size 2 along sparse axis"):
+        jax.jit(lambda w: sparse_array.quantize(w, how))(w_exp_bad)
+
+      w_exp_ok = jax.device_put(w_16, jax.sharding.PartitionSpec("x", None))
+      self.assertEqual(
+          sparse_array.quantize(w_exp_ok, how).values.qvalue.shape, (4, 8)
+      )
+      w_exp_col = jax.device_put(w_8, jax.sharding.PartitionSpec(None, "x"))
+      self.assertEqual(
+          sparse_array.quantize(w_exp_col, how).values.qvalue.shape, (2, 8)
+      )
+
+      # Pure-reduced Explicit weights work in verify mode (pruned passes,
+      # unpruned raises).
+      how_verify = ptq.qarray.HowToQuantize(
+          qtype=jnp.float8_e4m3fn,
+          channelwise_axes=(1,),
+          sparsity=sparsity.StructuredSparsity(1, 4, dimension=-2),
+      )
+      red_spec = jax.sharding.PartitionSpec(None, None, reduced={"x"})
+      w_red_pruned = jax.device_put(
+          sparsity.prune_inputs_n_m(
+              jax.random.normal(jax.random.key(9), (8, 8)) + 2.0,
+              n=1,
+              m=4,
+              axis=0,
+          ),
+          red_spec,
+      )
+      self.assertEqual(
+          sparse_array.quantize(w_red_pruned, how_verify).values.qvalue.shape,
+          (2, 8),
+      )
+      w_red_dense = jax.device_put(w_8, red_spec)
+      with self.assertRaisesRegex(ValueError, "does not satisfy 1:M"):
+        sparse_array.quantize(w_red_dense, how_verify)
+
+    # Concrete AxisType.Auto: getattr(value, 'sharding') catches shard size 2.
+    auto_sharding = jax.sharding.NamedSharding(
+        jax.sharding.Mesh(jax.devices()[:4], ("x",)),
+        jax.sharding.PartitionSpec("x", None),
+    )
+    with self.assertRaisesRegex(ValueError, "Shard size 2 along sparse axis"):
+      sparse_array.quantize(jax.device_put(w_8, auto_sharding), how)
+    self.assertEqual(
+        sparse_array.quantize(
+            jax.device_put(w_16, auto_sharding), how
+        ).values.qvalue.shape,
+        (4, 8),
+    )
+
+  def test_weight_sparsity_errors_and_aux(self):
+    sp = sparsity.StructuredSparsity(1, 4)
+
+    with self.assertRaisesRegex(
+        NotImplementedError, "PtqProvider requires weight_qtype"
+    ):
+      ptq.PtqProvider([qconfig.QuantizationRule(weight_sparsity=sp)])
+
+    class _SubPtqProvider(ptq.PtqProvider):
+      pass
+
+    with self.assertRaisesRegex(
+        NotImplementedError, "_SubPtqProvider does not support weight_sparsity"
+    ):
+      _SubPtqProvider(
+          [qconfig.QuantizationRule(weight_qtype=jnp.int8, weight_sparsity=sp)]
+      )
+
+    stub_qarray = types.SimpleNamespace()
+    with self.assertRaisesRegex(
+        NotImplementedError, "custom _qarray_module does not support"
+    ):
+      ptq.PtqProvider(
+          [qconfig.QuantizationRule(weight_qtype=jnp.int8, weight_sparsity=sp)],
+          _qarray_module=stub_qarray,
+      )
+
+    dense = nn.Dense(features=8, use_bias=False)
+    x = jnp.ones((2, 16))
+    for overrides, err_re in (
+        (
+            dict(weight_sparsity=sparsity.StructuredSparsity(2, 4)),
+            "Only n == 1 is supported",
+        ),
+        (dict(tile_size=4), "tiled_axes"),
+        (dict(weight_qtype="mxfp8"), "tiled_axes"),
+        (dict(weight_qtype="nf4"), "Non-uniform qtype"),
+        (dict(weight_calibration_method="minmax"), "zero_point"),
+    ):
+      bad_rule = qconfig.QuantizationRule(**(
+          dict(
+              weight_qtype=jnp.int8,
+              weight_sparsity=sp,
+              weight_sparsity_prune=True,
+          )
+          | overrides
+      ))
+      with self.subTest(rule=bad_rule):
+        m = qwix_model.quantize_model(dense, ptq.PtqProvider([bad_rule]))
+        with self.assertRaisesRegex(NotImplementedError, err_re):
+          m.init(jax.random.key(0), x)
+
+    conv_m = qwix_model.quantize_model(
+        nn.Conv(features=4, kernel_size=(3,)),
+        ptq.PtqProvider([
+            qconfig.QuantizationRule(
+                weight_qtype=jnp.int8, act_qtype=jnp.int8, weight_sparsity=sp
+            )
+        ]),
+    )
+    with self.assertRaisesRegex(
+        NotImplementedError, "conv_general_dilated does not support"
+    ):
+      conv_m.init(jax.random.key(0), jnp.ones((2, 8, 4)))
+
+    class _VecDot(nn.Module):
+
+      @nn.compact
+      def __call__(self, inp):
+        w = self.param("w", nn.initializers.ones, (8,))
+        return jnp.dot(inp, w)
+
+    vec_m = qwix_model.quantize_model(
+        _VecDot(),
+        ptq.PtqProvider([
+            qconfig.QuantizationRule(weight_qtype=jnp.int8, weight_sparsity=sp)
+        ]),
+    )
+    with self.assertRaisesRegex(ValueError, "rank >= 2"):
+      vec_m.init(jax.random.key(0), jnp.ones((2, 8)))
+
+    # Custom _qarray_module rejected in quantize_params as well.
+    valid_m = qwix_model.quantize_model(
+        dense,
+        ptq.PtqProvider([
+            qconfig.QuantizationRule(
+                weight_qtype=jnp.int8,
+                weight_sparsity=sp,
+                weight_sparsity_prune=True,
+            )
+        ]),
+    )
+    abs_p = jax.eval_shape(valid_m.init, jax.random.key(0), x)["params"]
+    with self.assertRaisesRegex(NotImplementedError, "weight_sparsity"):
+      ptq.quantize_params(
+          {"kernel": jnp.ones((16, 8))}, abs_p, _qarray_module=stub_qarray
+      )
+
+    # asarray and WithAux indexing on SparseArray.
+    sa = sparse_array.SparseArray(
+        ptq.qarray.QArray(
+            jnp.ones((4, 8), jnp.int8), jnp.ones((1, 8), jnp.float32)
+        ),
+        jnp.zeros((4, 8), jnp.uint2),
+        sparsity.StructuredSparsity(1, 4, dimension=-2),
+    )
+    asarray_m = self._get_quantized_asarray_model()
+    self.assertEqual(jax.tree.map(id, asarray_m(sa)), jax.tree.map(id, sa))
+    self.assertEqual(asarray_m(sa, dtype=jnp.float16).dtype, jnp.float16)
+
+    wa_sa = boxed_param.WithAux(sa, abs_p["kernel"].how)
+    self.assertEqual(asarray_m(wa_sa, dtype=jnp.float16).dtype, jnp.float16)
+    self.assertEqual(jax.tree.map(id, wa_sa[...].array), jax.tree.map(id, sa))
+    with self.assertRaises(TypeError):
+      _ = wa_sa[0]
+    wa_qa = boxed_param.WithAux(sa.values, abs_p["kernel"].how)
+    idx_2d = jnp.zeros((2, 2), dtype=jnp.int32)
+    self.assertEqual(
+        ptq.qarray.dequantize(wa_qa[idx_2d].array).shape, (2, 2, 8)
+    )
+
+    sparse_state = nnx.State({
+        "values": nnx.Variable(jnp.ones((4, 8))),
+        "indices": nnx.Variable(sa.indices),
+    })
+    for st in (sparse_state, nnx.State({"array": sparse_state})):
+      with self.assertRaisesRegex(
+          NotImplementedError, "Reconstructing SparseArray from nnx.State"
+      ):
+        asarray_m(st)
 
 
 if __name__ == "__main__":
