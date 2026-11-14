@@ -65,6 +65,28 @@ def get_transpose(
   return transpose  # pyrefly: ignore[bad-return]
 
 
+def apply_scale_to_output(
+    out: jax.Array,
+    scale: jax.Array,
+    dimension_numbers: jax.lax.ConvDimensionNumbers,
+    *,
+    for_lhs: bool,
+    batch_group_count: int = 1,
+) -> jax.Array:
+  """Applies a forward lhs or rhs scale to a conv output-shaped array."""
+  lhs_batch_axis = dimension_numbers.lhs_spec[0]
+  if for_lhs and batch_group_count > 1 and scale.shape[lhs_batch_axis] > 1:
+    out_batch_size = out.shape[dimension_numbers.out_spec[0]]
+    scale = qarray.split_axis(scale, {lhs_batch_axis: out_batch_size})
+    transpose: list[int | None] = [None] * out.ndim
+    transpose[dimension_numbers.out_spec[1]] = lhs_batch_axis
+    transpose[dimension_numbers.out_spec[0]] = lhs_batch_axis + 1
+  else:
+    transpose = get_transpose(dimension_numbers, for_lhs=for_lhs)
+  scale = qarray.transpose_array(scale, transpose)
+  return qarray.call_with_generic_broadcast(jnp.multiply, out, scale)
+
+
 def _slow_conv_general_dilated(
     lhs: qarray.MaybeQArray,
     rhs: qarray.MaybeQArray,
@@ -175,14 +197,18 @@ def _fast_conv_general_dilated(
     )
 
   if lhs_scale is not None:
-    transpose = get_transpose(dimension_numbers, for_lhs=True)
-    lhs_scale = qarray.transpose_array(lhs_scale, transpose)
-    res = qarray.call_with_generic_broadcast(jnp.multiply, res, lhs_scale)
+    res = apply_scale_to_output(
+        res,
+        lhs_scale,
+        dimension_numbers,
+        for_lhs=True,
+        batch_group_count=batch_group_count,
+    )
 
   if rhs_scale is not None:
-    transpose = get_transpose(dimension_numbers, for_lhs=False)
-    rhs_scale = qarray.transpose_array(rhs_scale, transpose)
-    res = qarray.call_with_generic_broadcast(jnp.multiply, res, rhs_scale)
+    res = apply_scale_to_output(
+        res, rhs_scale, dimension_numbers, for_lhs=False
+    )
 
   return res.astype(result_type)
 

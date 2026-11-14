@@ -538,6 +538,78 @@ class QtTest(parameterized.TestCase):
     out_override = qt_override.apply(variables, x)
     self.assertEqual(out_override.dtype, jnp.bfloat16)
 
+  @parameterized.product(
+      feature_group_count=[2, 4],
+      bwd_qtype=[None, jnp.int8],
+  )
+  def test_grouped_conv_qt_bwd_linen_and_nnx(
+      self, feature_group_count, bwd_qtype
+  ):
+    rule = qt.QtRule(
+        module_path=".*",
+        weight_qtype=jnp.int8,
+        act_qtype=jnp.int8,
+        bwd_qtype=bwd_qtype,
+    )
+    x = jax.random.normal(jax.random.key(0), (2, 8, 8, 4), dtype=jnp.float32)
+
+    linen_conv = nn.Conv(
+        features=8,
+        kernel_size=(3, 3),
+        feature_group_count=feature_group_count,
+        use_bias=False,
+    )
+    variables = linen_conv.init(jax.random.key(1), x)
+    qt_linen_conv = qwix_model.quantize_model(linen_conv, qt.QtProvider([rule]))
+    fp_dx, fp_dp = jax.grad(
+        lambda inp, p: linen_conv.apply({"params": p}, inp).sum(),
+        argnums=(0, 1),
+    )(x, variables["params"])
+    qt_dx, qt_dp = jax.grad(
+        lambda inp, p: qt_linen_conv.apply({"params": p}, inp).sum(),
+        argnums=(0, 1),
+    )(x, variables["params"])
+    self.assertEqual(qt_dx.shape, fp_dx.shape)
+    self.assertEqual(qt_dp["kernel"].shape, fp_dp["kernel"].shape)
+    self.assertLess(jnp.abs(fp_dx - qt_dx).mean() / jnp.abs(fp_dx).mean(), 0.05)
+    self.assertLess(
+        jnp.abs(fp_dp["kernel"] - qt_dp["kernel"]).mean()
+        / jnp.abs(fp_dp["kernel"]).mean(),
+        0.05,
+    )
+
+    nnx_conv = nnx.Conv(
+        in_features=4,
+        out_features=8,
+        kernel_size=(3, 3),
+        feature_group_count=feature_group_count,
+        use_bias=False,
+        rngs=nnx.Rngs(1),
+    )
+    qt_nnx_conv = qwix_model.quantize_model(nnx_conv, qt.QtProvider([rule]), x)
+    fp_nnx_grads = nnx.grad(lambda m, inp: m(inp).sum(), argnums=(0, 1))(
+        nnx_conv, x
+    )
+    qt_nnx_grads = nnx.grad(lambda m, inp: m(inp).sum(), argnums=(0, 1))(
+        qt_nnx_conv, x
+    )
+    self.assertEqual(qt_nnx_grads[1].shape, fp_nnx_grads[1].shape)
+    self.assertEqual(
+        qt_nnx_grads[0].kernel[...].shape, fp_nnx_grads[0].kernel[...].shape
+    )
+    self.assertLess(
+        jnp.abs(fp_nnx_grads[1] - qt_nnx_grads[1]).mean()
+        / jnp.abs(fp_nnx_grads[1]).mean(),
+        0.05,
+    )
+    self.assertLess(
+        jnp.abs(
+            fp_nnx_grads[0].kernel[...] - qt_nnx_grads[0].kernel[...]
+        ).mean()
+        / jnp.abs(fp_nnx_grads[0].kernel[...]).mean(),
+        0.05,
+    )
+
 
 if __name__ == "__main__":
   absltest.main()
