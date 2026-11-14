@@ -117,24 +117,17 @@ def _conv_general_vjp_rhs_padding(
   return list(zip(pads_lo, pads_hi))
 
 
-def _apply_fwd_scale_to_g(
-    scale: jax.Array, g: jax.Array, g_axis: int
+def _move_group_axis(
+    x: jax.Array, group_count: int, src: int, dst: int
 ) -> jax.Array:
-  """Applies the scale from the forward pass to the backward gradient.
-
-  Since the scale can only have channelwise axes on one dimension, we only need
-  to know which axis in g this scale applies to.
-
-  Args:
-    scale: The scale from the forward pass. Only 1 axis can be channelwise.
-    g: The backward gradient.
-    g_axis: The axis in g that the scale applies to.
-
-  Returns:
-    The backward gradient with the scale applied.
-  """
-  scale = scale.reshape([-1 if a == g_axis else 1 for a in range(g.ndim)])
-  return g * scale
+  """Moves a leading factor of size `group_count` from `src` into `dst`."""
+  x = qarray.split_axis(x, {src: x.shape[src] // group_count})
+  perm = [i for i in range(x.ndim) if i != src]
+  perm.insert(dst, src)
+  new_shape = list(x.shape)
+  del new_shape[src]
+  new_shape[dst] *= group_count
+  return jax.lax.reshape(x, new_shape, perm)
 
 
 @interception.disable_interceptions
@@ -268,7 +261,9 @@ def conv_general_qt_bwd(
   if config.dlhs_grad_qtype:
     if isinstance(rhs, qarray.QArray):
       # Apply rhs.scale to dlhs_g.
-      dlhs_g = _apply_fwd_scale_to_g(rhs.scale, dlhs_g, dnums.out_spec[1])
+      dlhs_g = conv_general.apply_scale_to_output(
+          dlhs_g, rhs.scale, dnums, for_lhs=False
+      )
       rhs = rhs.qvalue
     how = conv_general.get_how_to_quantize(
         dimension_numbers=dlhs_dnums,
@@ -280,6 +275,15 @@ def conv_general_qt_bwd(
       how = dataclasses.replace(how, channelwise_axes=[])
     dlhs_g = qarray.quantize(dlhs_g, how)
 
+  dlhs_feature_group_count = (
+      feature_group_count if feature_group_count > 1 else batch_group_count
+  )
+  if dlhs_feature_group_count > 1:
+    if isinstance(rhs, qarray.QArray):
+      rhs = qarray.dequantize(rhs)
+    rhs = _move_group_axis(
+        rhs, dlhs_feature_group_count, dnums.rhs_spec[0], dnums.rhs_spec[1]
+    )
   rhs = jax.tree.map(lambda x: jax.lax.rev(x, rhs_sdims_indices), rhs)
 
   dlhs = conv_general.conv_general_dilated(
@@ -290,9 +294,13 @@ def conv_general_qt_bwd(
       lhs_dilation=window_strides,
       rhs_dilation=rhs_dilation,
       dimension_numbers=dlhs_dnums,
-      feature_group_count=feature_group_count,
-      batch_group_count=batch_group_count,
+      feature_group_count=dlhs_feature_group_count,
+      batch_group_count=1,
   )
+  if batch_group_count > 1:
+    dlhs = _move_group_axis(
+        dlhs, batch_group_count, dnums.lhs_spec[1], dnums.lhs_spec[0]
+    )
 
   # drhs
   drhs_dnums = jax.lax.ConvDimensionNumbers(
@@ -314,7 +322,13 @@ def conv_general_qt_bwd(
   if config.drhs_grad_qtype:
     if isinstance(lhs, qarray.QArray):
       # Apply lhs.scale to drhs_g.
-      drhs_g = _apply_fwd_scale_to_g(lhs.scale, drhs_g, dnums.out_spec[0])
+      drhs_g = conv_general.apply_scale_to_output(
+          drhs_g,
+          lhs.scale,
+          dnums,
+          for_lhs=True,
+          batch_group_count=batch_group_count,
+      )
       lhs = lhs.qvalue
     how = conv_general.get_how_to_quantize(
         dimension_numbers=drhs_dnums,
@@ -334,8 +348,8 @@ def conv_general_qt_bwd(
       lhs_dilation=lhs_dilation,
       rhs_dilation=window_strides,
       dimension_numbers=drhs_dnums,
-      feature_group_count=feature_group_count,
-      batch_group_count=batch_group_count,
+      feature_group_count=batch_group_count,
+      batch_group_count=feature_group_count,
   )
 
   return dlhs, drhs
