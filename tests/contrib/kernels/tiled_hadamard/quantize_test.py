@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from qwix.contrib import hadamard_rot
-from qwix.contrib.kernels import fused_hadamard_quantize as fhq
+from qwix.contrib.kernels.tiled_hadamard import quantize
 
 
 class LHSFusedHadamardQuantizeTest(parameterized.TestCase):
@@ -27,7 +27,7 @@ class LHSFusedHadamardQuantizeTest(parameterized.TestCase):
     key = jax.random.PRNGKey(0)
     lhs = jax.random.normal(key, (m, n), dtype=jnp.float32)
 
-    kernel_answer_xq, kernel_answer_sx = fhq.fused_hadamard_quantize(
+    kernel_answer_xq, kernel_answer_sx = quantize.fused_hadamard_quantize(
         lhs,
         bm=bm,
         bn=bn,
@@ -49,7 +49,7 @@ class LHSFusedHadamardQuantizeTest(parameterized.TestCase):
     lhs_jax = jnp.matmul(lhs.reshape(sm, m // sm, sn, n // sn), had_mat)
 
     # Quantize the LHS
-    vqfn = jax.vmap(fhq.quantize_a_tile, in_axes=0, out_axes=(0, 0))
+    vqfn = jax.vmap(quantize.quantize_a_tile, in_axes=0, out_axes=(0, 0))
     vvqfn = jax.vmap(vqfn, in_axes=2, out_axes=(2, 2))
     xq, sx = vvqfn(lhs_jax)
     xq = xq.reshape(m, n)
