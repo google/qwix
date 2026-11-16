@@ -217,6 +217,8 @@ class NumericsTest(absltest.TestCase):
     for qtype, block_size in expected.items():
       with self.subTest(qtype=qtype):
         self.assertEqual(numerics.get_microscaled_block_size(qtype), block_size)
+        self.assertEqual(numerics.resolve_tile_size(None, qtype), block_size)
+        self.assertEqual(numerics.resolve_tile_size(64, qtype), 64)
 
   def test_mxint(self):
     with self.subTest("mxint8_bound"):
