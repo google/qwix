@@ -739,6 +739,170 @@ class QArrayTest(parameterized.TestCase):
         )
         self.assertEqual(clipped.sharding.spec.unreduced, frozenset({'x'}))
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='tensorwise',
+          array_shape=(4, 64),
+          qtype=jnp.int8,
+          channelwise_axes=(),
+          expected_api_axes=(),
+          expected_tiled_axes=None,
+          expected_scale_shape=(1, 1),
+      ),
+      dict(
+          testcase_name='channelwise_0',
+          array_shape=(4, 64),
+          qtype=jnp.int8,
+          channelwise_axes=(0,),
+          expected_api_axes=(0,),
+          expected_tiled_axes=None,
+          expected_scale_shape=(4, 1),
+      ),
+      dict(
+          testcase_name='negative_axis',
+          array_shape=(4, 64),
+          qtype=jnp.int8,
+          channelwise_axes=(-1,),
+          expected_api_axes=(1,),
+          expected_tiled_axes=None,
+          expected_scale_shape=(1, 64),
+      ),
+      dict(
+          testcase_name='minmax_scale_dtype',
+          array_shape=(4, 64),
+          qtype=jnp.int8,
+          channelwise_axes=(0,),
+          expected_api_axes=(0,),
+          expected_tiled_axes=None,
+          expected_scale_shape=(4, 1),
+          calibration_method='minmax',
+          scale_dtype=jnp.float32,
+      ),
+      dict(
+          testcase_name='mxfp8',
+          array_shape=(4, 64),
+          qtype='mxfp8',
+          channelwise_axes=(0,),
+          expected_api_axes=(0,),
+          expected_tiled_axes={1: 32},
+          expected_scale_shape=(4, 2),
+      ),
+      dict(
+          testcase_name='mxfp8_negative_axis',
+          array_shape=(4, 64),
+          qtype='mxfp8',
+          channelwise_axes=(-2,),
+          expected_api_axes=(0,),
+          expected_tiled_axes={1: 32},
+          expected_scale_shape=(4, 2),
+      ),
+      dict(
+          testcase_name='mxfp8_duplicate_axis',
+          array_shape=(4, 64),
+          qtype='mxfp8',
+          channelwise_axes=(0, -2),
+          expected_api_axes=(0,),
+          expected_tiled_axes={1: 32},
+          expected_scale_shape=(4, 2),
+      ),
+      dict(
+          testcase_name='nvfp4',
+          array_shape=(4, 64),
+          qtype='nvfp4',
+          channelwise_axes=(0,),
+          expected_api_axes=(0,),
+          expected_tiled_axes={1: 16},
+          expected_scale_shape=(4, 4),
+      ),
+      dict(
+          testcase_name='mxfp8_16_axis0_tiled',
+          array_shape=(32, 8),
+          qtype='mxfp8_16',
+          channelwise_axes=(1,),
+          expected_api_axes=(1,),
+          expected_tiled_axes={0: 16},
+          expected_scale_shape=(2, 8),
+      ),
+  )
+  def test_quantize_tile_matches_quantize_api(
+      self,
+      *,
+      array_shape,
+      qtype,
+      channelwise_axes,
+      expected_api_axes,
+      expected_tiled_axes,
+      expected_scale_shape,
+      calibration_method='absmax',
+      scale_dtype=None,
+  ):
+    x = self._make_array(
+        array_shape, asymmetric=(calibration_method == 'minmax')
+    )
+    actual = qarray.quantize_tile(
+        x,
+        qtype,
+        channelwise_axes=channelwise_axes,
+        calibration_method=calibration_method,
+        scale_dtype=scale_dtype,
+    )
+    expected = qarray.quantize_api(
+        x,
+        qtype,
+        channelwise_axes=expected_api_axes,
+        tiled_axes=expected_tiled_axes,
+        calibration_method=calibration_method,
+        scale_dtype=scale_dtype,
+    )
+    self.assertEqual(actual.scale.shape, expected_scale_shape)
+    self.assertEqual(actual.scale.dtype, expected.scale.dtype)
+    self.assertTrue(jnp.array_equal(actual.qvalue, expected.qvalue))
+    self.assertTrue(jnp.array_equal(actual.scale, expected.scale))
+    if expected.zero_point is not None:
+      self.assertIsNotNone(actual.zero_point)
+      self.assertTrue(jnp.array_equal(actual.zero_point, expected.zero_point))
+    else:
+      self.assertIsNone(actual.zero_point)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='mx_two_non_channelwise',
+          qtype='mxfp8',
+          channelwise_axes=(),
+          error_regex='requires exactly 1 non-channelwise axis, got 2',
+      ),
+      dict(
+          testcase_name='mx_zero_non_channelwise',
+          qtype='mxfp8',
+          channelwise_axes=(0, 1),
+          error_regex='requires exactly 1 non-channelwise axis, got 0',
+      ),
+      dict(
+          testcase_name='mx_zero_non_channelwise_neg',
+          qtype='mxfp8',
+          channelwise_axes=(0, -1),
+          error_regex='requires exactly 1 non-channelwise axis, got 0',
+      ),
+      dict(
+          testcase_name='axis_out_of_bounds_pos',
+          qtype=jnp.int8,
+          channelwise_axes=(2,),
+          error_regex='out of bounds for 2D array',
+      ),
+      dict(
+          testcase_name='axis_out_of_bounds_neg',
+          qtype=jnp.int8,
+          channelwise_axes=(-3,),
+          error_regex='out of bounds for 2D array',
+      ),
+  )
+  def test_quantize_tile_invalid_axes(
+      self, *, qtype, channelwise_axes, error_regex
+  ):
+    x = self._make_array((4, 64))
+    with self.assertRaisesRegex(ValueError, error_regex):
+      qarray.quantize_tile(x, qtype, channelwise_axes=channelwise_axes)
+
 
 if __name__ == '__main__':
   absltest.main()
