@@ -52,6 +52,8 @@ def conv_general_fq(
     dimension_numbers: jax.lax.ConvGeneralDilatedDimensionNumbers | None,
     lhs_dilation: Sequence[int] | None = None,
     rhs_dilation: Sequence[int] | None = None,
+    feature_group_count: int = 1,
+    batch_group_count: int = 1,
 ):
   """conv_general_dilated implemented with fake quantization."""
   dnums = jax.lax.conv_dimension_numbers(
@@ -80,6 +82,8 @@ def conv_general_fq(
       lhs_dilation=lhs_dilation,
       rhs_dilation=rhs_dilation,
       dimension_numbers=dnums,
+      feature_group_count=feature_group_count,
+      batch_group_count=batch_group_count,
   )
 
 
@@ -137,6 +141,58 @@ class ConvGeneralQtTest(parameterized.TestCase):
           bwd_qtype='float8_e4m3',
           expected_maes=[0.002, 0.04, 0.04, 0.02, 0.05, 0.06],
       ),
+      dict(
+          testcase_name='int8_nhwc_feature_groups',
+          data_format='NHWC',
+          fwd_qtype='int8',
+          feature_group_count=4,
+          # Index 0 is 6.1e-7 on CPU, 0.00282 on TPU (conv_general_fq uses
+          # default bf16 MXU precision vs exact int32 accumulation in QT,
+          # amplified by near-zero scalar cancellation in jnp.sum).
+          expected_maes=[0.003, 0, 0, 0.025, 0.005, 0.008],
+      ),
+      dict(
+          testcase_name='int8_bwd_nhwc_depthwise',
+          data_format='NHWC',
+          fwd_qtype='int8',
+          bwd_qtype='int8',
+          feature_group_count=8,
+          # Index 0 is 2.7e-7 on CPU, 0.0148 on TPU for the same bf16 MXU vs
+          # int32 scalar-sum reason above.
+          expected_maes=[0.016, 0.003, 0.005, 0.02, 0.004, 0.009],
+      ),
+      dict(
+          testcase_name='fp8_bwd_nchw_feature_groups',
+          data_format='NCHW',
+          fwd_qtype='float8_e4m3',
+          bwd_qtype='float8_e4m3',
+          feature_group_count=4,
+          expected_maes=[0.0008, 0.025, 0.025, 0.03, 0.035, 0.035],
+      ),
+      dict(
+          testcase_name='int8_nchw_batch_groups',
+          data_format='NCHW',
+          fwd_qtype='int8',
+          batch_group_count=2,
+          expected_maes=[1e-5, 0, 0, 0.015, 0.007, 0.006],
+      ),
+      dict(
+          testcase_name='int8_bwd_nhwc_batch_groups',
+          data_format='NHWC',
+          fwd_qtype='int8',
+          bwd_qtype='int8',
+          batch_group_count=2,
+          # Index 0 is 1.9e-7 on CPU, 0.00201 on TPU.
+          expected_maes=[0.0021, 0.004, 0.005, 0.003, 0.007, 0.009],
+      ),
+      dict(
+          testcase_name='fp8_bwd_nchw_batch_groups_full',
+          data_format='NCHW',
+          fwd_qtype='float8_e4m3',
+          bwd_qtype='float8_e4m3',
+          batch_group_count=4,
+          expected_maes=[0.001, 0.025, 0.002, 0.04, 0.04, 0.025],
+      ),
   )
   def test_grad_against_fq(
       self,
@@ -147,6 +203,8 @@ class ConvGeneralQtTest(parameterized.TestCase):
       padding='SAME',
       lhs_dilation=None,
       rhs_dilation=None,
+      feature_group_count=1,
+      batch_group_count=1,
       expected_maes,
   ):
     if fwd_qtype == 'int4' and jax.devices()[0].platform != 'tpu':
@@ -165,11 +223,21 @@ class ConvGeneralQtTest(parameterized.TestCase):
     window_strides = (1, 1)
     if data_format == 'NCHW':
       lhs_shape = (4, 8, 16, 16)  # N, C_in, H, W
-      rhs_shape = (32, 8, 3, 3)  # C_out, C_in, H_k, W_k
+      rhs_shape = (
+          32,
+          8 // feature_group_count,
+          3,
+          3,
+      )  # C_out, C_in/G, H_k, W_k
       dimension_numbers = ('NCHW', 'OIHW', 'NCHW')
     elif data_format == 'NHWC':
       lhs_shape = (4, 16, 16, 8)  # N, H, W, C_in
-      rhs_shape = (3, 3, 8, 32)  # H_k, W_k, C_in, C_out
+      rhs_shape = (
+          3,
+          3,
+          8 // feature_group_count,
+          32,
+      )  # H_k, W_k, C_in/G, C_out
       dimension_numbers = ('NHWC', 'HWIO', 'NHWC')
     else:
       raise ValueError(f'Unknown data_format: {data_format}')
@@ -194,6 +262,8 @@ class ConvGeneralQtTest(parameterized.TestCase):
               dimension_numbers,
               lhs_dilation=lhs_dilation,
               rhs_dilation=rhs_dilation,
+              feature_group_count=feature_group_count,
+              batch_group_count=batch_group_count,
           )
       )
 
@@ -208,6 +278,8 @@ class ConvGeneralQtTest(parameterized.TestCase):
               dimension_numbers=dimension_numbers,
               lhs_dilation=lhs_dilation,
               rhs_dilation=rhs_dilation,
+              feature_group_count=feature_group_count,
+              batch_group_count=batch_group_count,
           )
       )
 
@@ -221,6 +293,8 @@ class ConvGeneralQtTest(parameterized.TestCase):
               dimension_numbers=dimension_numbers,
               lhs_dilation=lhs_dilation,
               rhs_dilation=rhs_dilation,
+              feature_group_count=feature_group_count,
+              batch_group_count=batch_group_count,
           )
       )
 
@@ -249,6 +323,49 @@ class ConvGeneralQtTest(parameterized.TestCase):
 
     for x, y in zip(maes, expected_maes):
       self.assertLessEqual(x, y, msg=f'{maes} < {expected_maes}')
+
+  @parameterized.parameters(None, 'int8')
+  def test_batch_group_scale_folding_vjp(self, bwd_qtype):
+    lhs = jax.random.normal(jax.random.key(0), (6, 4, 8, 8), jnp.float32)
+    lhs = lhs * (2.0 ** jnp.arange(6, dtype=jnp.float32)).reshape(6, 1, 1, 1)
+    rhs = jax.random.normal(jax.random.key(1), (6, 4, 3, 3), jnp.float32)
+    g = jax.random.normal(jax.random.key(2), (2, 6, 8, 8), jnp.float32)
+    dnums = ('NCHW', 'OIHW', 'NCHW')
+    config = conv_general_qt.ConvGeneralQtConfig(
+        lhs_qtype='int8',
+        rhs_qtype='int8',
+        dlhs_grad_qtype=bwd_qtype,
+        drhs_grad_qtype=bwd_qtype,
+    )
+    fq_out, fq_vjp = jax.vjp(
+        lambda l, r: conv_general_fq(
+            l, r, config, (1, 1), 'SAME', dnums, batch_group_count=3
+        ),
+        lhs,
+        rhs,
+    )
+    qt_out, qt_vjp = jax.vjp(
+        lambda l, r: conv_general_qt.conv_general_qt(
+            l,
+            r,
+            config,
+            (1, 1),
+            'SAME',
+            dimension_numbers=dnums,
+            batch_group_count=3,
+        ),
+        lhs,
+        rhs,
+    )
+    fq_dlhs, fq_drhs = fq_vjp(g)
+    qt_dlhs, qt_drhs = qt_vjp(g)
+    # Matches fast_slow_mae <= 0.004 in conv_general_tpu_test (bf16 MXU in
+    # conv_general_fq vs exact int32 accumulation in conv_general_qt; 0.0022 on
+    # TPU, <1e-6 on CPU).
+    self.assertLessEqual(mae(fq_out, qt_out), 0.004)
+    grad_tol = 0 if bwd_qtype is None else 0.01
+    self.assertLessEqual(mae(fq_dlhs, qt_dlhs), grad_tol)
+    self.assertLessEqual(mae(fq_drhs, qt_drhs), grad_tol)
 
 
 if __name__ == '__main__':
