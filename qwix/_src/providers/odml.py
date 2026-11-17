@@ -717,7 +717,10 @@ class OdmlConversionProvider(OdmlQatProvider):
     if scale is None:
       scale = np.array([], np.float32)  # pyrefly: ignore[bad-assignment]
     if jnp.isnan(scale).any() or jnp.isinf(scale).any() or (scale == 0).any():  # pyrefly: ignore[bad-argument-type, missing-attribute]
-      raise ValueError(f'Invalid scale: {scale}')
+      raise ValueError(
+          f'Invalid scale for ODML fake_quant: {scale}. Scale values must be'
+          ' non-zero, non-NaN, and non-inf.'
+      )
     # Flatten the scale because ODML wants a 1D array.
     quantization_dim = None
     for dim, length in enumerate(scale.shape):  # pyrefly: ignore[missing-attribute]
@@ -725,7 +728,12 @@ class OdmlConversionProvider(OdmlQatProvider):
         if quantization_dim is None:
           quantization_dim = dim
         else:
-          raise ValueError(f'Cannot flatten scale with shape {scale.shape}.')  # pyrefly: ignore[missing-attribute]
+          raise ValueError(
+              f'Cannot flatten scale with shape {scale.shape} for ODML'  # pyrefly: ignore[missing-attribute]
+              ' export. ODML supports only per-tensor (scalar scale) or 1D'
+              ' per-channel quantization (scale with at most one dimension'
+              ' > 1).'
+          )
     match jnp.dtype(dtype):
       case jnp.int8:
         dtype = 'i8'
