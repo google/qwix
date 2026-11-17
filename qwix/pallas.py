@@ -49,8 +49,8 @@ __all__ = [
     'einsum',
 ]
 
-# APIs for generic QArray operations. These are deprecated in favor of the
-# qwix.* APIs.
+# Generic QArray APIs: the same objects as qwix.QArray, qwix.quantize and
+# qwix.dequantize, re-exported so kernel code can depend on qwix.pallas alone.
 QArray = qarray.QArray
 quantize = qarray.quantize_api
 dequantize = qarray.dequantize
