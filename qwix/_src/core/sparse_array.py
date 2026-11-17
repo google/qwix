@@ -13,9 +13,16 @@
 # limitations under the License.
 """N:M structured sparse array utilities."""
 
+import dataclasses
+
+from flax import nnx
+import flax.struct
 import jax
 from jax import numpy as jnp
 from jax.experimental import layout
+from qwix._src.core import numerics
+from qwix._src.core import qarray
+from qwix._src.core import sparsity as sparsity_lib
 
 
 def _validate_sparsity_args(
@@ -161,6 +168,150 @@ def compress(
   )
 
 
+def _validate_compressed_buffers(
+    values_shape: tuple[int, ...],
+    indices: jax.Array,
+    *,
+    n: int,
+    m: int,
+    axis: int,
+) -> int:
+  """Validates compressed `(values, indices)` shapes, dtype, and `axis`."""
+  axis = _validate_sparsity_args(values_shape, n=n, m=m, axis=axis)
+  if values_shape != indices.shape:
+    raise ValueError(
+        f'values and indices shapes must match; got {values_shape} vs'
+        f' {indices.shape}.'
+    )
+  if jnp.dtype(indices.dtype) != jnp.uint2:
+    raise ValueError(f'indices must have dtype uint2; got {indices.dtype}.')
+  return axis
+
+
+@flax.struct.dataclass
+class SparseArray:
+  """A 1:M structured sparse array with compressed values and 2-bit indices.
+
+  Attributes:
+    values: Compressed non-zero values (`jax.Array` or symmetric `QArray`) with
+      `values.shape[axis] == shape[axis] // sparsity.m`.
+    indices: `jnp.uint2` group-local indices in `[0, sparsity.m)` matching the
+      compressed value leaf shape.
+    sparsity: Static `StructuredSparsity` metadata (`n == 1`) with normalized
+      negative `dimension`.
+  """
+
+  values: jax.Array | qarray.QArray
+  indices: jax.Array
+  sparsity: sparsity_lib.StructuredSparsity = flax.struct.field(
+      pytree_node=False
+  )
+
+  def __post_init__(self):
+    if self.sparsity.dimension is None:
+      raise ValueError('SparseArray requires sparsity.dimension to be set.')
+    if self.sparsity.n != 1:
+      raise NotImplementedError(
+          f'Only n == 1 is supported; got n={self.sparsity.n}.'
+      )
+    if self.sparsity.dimension >= 0:
+      val_shape = self.values.shape
+      ax = _validate_sparsity_args(
+          val_shape,
+          n=self.sparsity.n,
+          m=self.sparsity.m,
+          axis=self.sparsity.dimension,
+      )
+      object.__setattr__(
+          self,
+          'sparsity',
+          dataclasses.replace(self.sparsity, dimension=ax - len(val_shape)),
+      )
+
+  @property
+  def axis(self) -> int:
+    """Returns the normalized negative sparse axis."""
+    assert self.sparsity.dimension is not None
+    return self.sparsity.dimension
+
+  @property
+  def shape(self) -> tuple[int, ...]:
+    """Returns the logical dense shape."""
+    val_shape = self.values.shape
+    ax = _validate_sparsity_args(
+        val_shape, n=self.sparsity.n, m=self.sparsity.m, axis=self.axis
+    )
+    dense_dim = val_shape[ax] * self.sparsity.m
+    return val_shape[:ax] + (dense_dim,) + val_shape[ax + 1 :]
+
+  @property
+  def ndim(self) -> int:
+    """Returns the rank of the logical dense array."""
+    return self.values.ndim
+
+  @property
+  def dtype(self) -> jnp.dtype:
+    """Returns the logical dequantized dtype."""
+    return self.values.dtype
+
+  def astype(self, dtype: jax.typing.DTypeLike) -> 'SparseArray':
+    """Casts the logical dtype of `values`."""
+    return dataclasses.replace(self, values=self.values.astype(dtype))
+
+
+nnx.register_data_type(SparseArray)
+
+
+def validate_sparse_array(array: SparseArray) -> None:
+  """Validates shape, dtype, and scale invariants of a `SparseArray`."""
+  if isinstance(array.values, jax.Array):
+    if isinstance(array.indices, jax.Array):
+      _validate_compressed_buffers(
+          array.values.shape,
+          array.indices,
+          n=array.sparsity.n,
+          m=array.sparsity.m,
+          axis=array.axis,
+      )
+    return
+  if not isinstance(array.values, qarray.QArray):
+    return
+  # `decompress` fills pruned slots with code 0, which must decode to 0.0.
+  if not numerics.can_dequant_on_output(array.values.qtype):
+    raise ValueError(
+        f'Non-uniform qtype {array.values.qtype} is not supported in'
+        ' SparseArray.'
+    )
+  if array.values.zero_point is not None:
+    raise ValueError(
+        'Asymmetric quantization (zero_point) is not supported in SparseArray.'
+    )
+  if not all(
+      isinstance(x, jax.Array)
+      for x in (array.values.qvalue, array.values.scale, array.indices)
+  ):
+    return
+  qarray.validate_qarray(array.values)
+  axis = _validate_compressed_buffers(
+      array.values.qvalue.shape,
+      array.indices,
+      n=array.sparsity.n,
+      m=array.sparsity.m,
+      axis=array.axis,
+  )
+  if array.values.scale.shape[axis] != 1:
+    raise ValueError(
+        'Subchannel scale along sparse axis is not supported; got'
+        f' scale.shape={array.values.scale.shape} for axis {array.axis}.'
+    )
+  if qarray.get_tiled_axes(array.values):
+    raise ValueError(
+        'Only per-channel or per-tensor scales are supported in'
+        f' SparseArray; got scale.shape={array.values.scale.shape} vs'
+        f' qvalue.shape={array.values.qvalue.shape}.'
+    )
+
+
 def decompress(
     values: jax.Array,
     indices: jax.Array,
@@ -189,14 +340,9 @@ def decompress(
       indices.shape`, or `indices` does not have dtype `uint2`.
     NotImplementedError: If `n != 1`.
   """
-  axis = _validate_sparsity_args(values.shape, n=n, m=m, axis=axis)
-  if values.shape != indices.shape:
-    raise ValueError(
-        f'values and indices shapes must match; got {values.shape} vs'
-        f' {indices.shape}.'
-    )
-  if jnp.dtype(indices.dtype) != jnp.uint2:
-    raise ValueError(f'indices must have dtype uint2; got {indices.dtype}.')
+  axis = _validate_compressed_buffers(
+      values.shape, indices, n=n, m=m, axis=axis
+  )
   indices_moved = jnp.moveaxis(_from_u2(indices), axis, -1)
   values_moved = jnp.moveaxis(values, axis, -1)
   leading = values_moved.shape[:-1]
@@ -211,3 +357,106 @@ def decompress(
       jnp.zeros_like(values_bcast),
   )
   return jnp.moveaxis(out.reshape(*leading, num_groups * m), -1, axis)
+
+
+def unwrap_variables(array: SparseArray) -> SparseArray:
+  """Unwraps any `nnx.Variable` leaves inside `array`."""
+  return jax.tree.map(
+      lambda x: x.get_raw_value() if isinstance(x, nnx.Variable) else x,
+      array,
+      is_leaf=lambda x: isinstance(x, nnx.Variable),
+  )
+
+
+def decompress_sparse_array(array: SparseArray) -> qarray.MaybeQArray:
+  """Validates `array` and decompresses its values leaf."""
+  array = unwrap_variables(array)
+  validate_sparse_array(array)
+  values = array.values
+  dense = decompress(
+      values.qvalue if isinstance(values, qarray.QArray) else values,
+      array.indices,
+      n=array.sparsity.n,
+      m=array.sparsity.m,
+      axis=array.axis,
+  )
+  return (
+      dataclasses.replace(values, qvalue=dense)
+      if isinstance(values, qarray.QArray)
+      else dense
+  )
+
+
+def _verify_sparsity_mask_callback(is_valid: jax.Array | bool) -> None:
+  if not bool(is_valid):
+    raise ValueError(
+        'Weight does not satisfy 1:M structured sparsity; set'
+        ' weight_sparsity_prune=True to prune.'
+    )
+
+
+def quantize(value: jax.Array, how: qarray.HowToQuantize) -> SparseArray:
+  """Quantizes and 1:M-compresses `value` according to `how`."""
+  sp = how.sparsity
+  if sp is None or sp.dimension is None:
+    raise ValueError(
+        'sparse_array.quantize requires how.sparsity with resolved dimension.'
+    )
+  axis = _validate_sparsity_args(value.shape, n=sp.n, m=sp.m, axis=sp.dimension)
+  if how.tiled_axes:
+    raise NotImplementedError(
+        'Subchannel/microscaled quantization'
+        f' (tiled_axes={dict(how.tiled_axes)}) is not supported with'
+        ' weight_sparsity.'
+    )
+  if not numerics.can_dequant_on_output(how.qtype):
+    raise NotImplementedError(
+        f'Non-uniform qtype {how.qtype} is not supported with weight_sparsity.'
+    )
+  # Concrete Auto-mesh sharding lives on value.sharding; Tracers use jax.typeof.
+  sh = getattr(value, 'sharding', None) or jax.typeof(value).sharding
+  shard_shape = sh.shard_shape(value.shape)
+  if shard_shape[axis] != value.shape[axis] and shard_shape[axis] % sp.m != 0:
+    raise ValueError(
+        f'Shard size {shard_shape[axis]} along sparse axis {axis} of shape'
+        f' {value.shape} is not divisible by m={sp.m}.'
+    )
+
+  mask = sparsity_lib.get_sparsity_mask(
+      value,
+      n_sparsity=sp.n,
+      m_sparsity=sp.m,
+      axis=axis,
+      stride=sp.stride,
+  )
+  masked = jnp.where(mask, value, jnp.zeros_like(value))
+  if not how.sparsity_prune:
+    spec = jax.typeof(value).sharding.spec
+    if spec.reduced:
+      unred = spec.update(reduced=frozenset())
+      is_valid = jnp.array_equal(
+          jax.sharding.reshard(masked, unred),
+          jax.sharding.reshard(value, unred),
+      )
+    else:
+      is_valid = jnp.array_equal(masked, value)
+    if isinstance(is_valid, jax.core.Tracer):
+      jax.debug.callback(
+          _verify_sparsity_mask_callback, is_valid, ordered=False
+      )
+    else:
+      _verify_sparsity_mask_callback(is_valid)
+
+  dense_how = dataclasses.replace(how, sparsity=None, sparsity_prune=False)
+  q = qarray.quantize(masked, dense_how)
+  if q.zero_point is not None:
+    raise NotImplementedError(
+        'Asymmetric quantization (zero_point) is not supported with'
+        ' weight_sparsity.'
+    )
+  qvalue_comp, indices = compress(q.qvalue, mask, n=sp.n, m=sp.m, axis=axis)
+  return SparseArray(
+      values=dataclasses.replace(q, qvalue=qvalue_comp),
+      indices=indices,
+      sparsity=sp,
+  )

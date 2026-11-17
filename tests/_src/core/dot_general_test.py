@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
 import functools
 from unittest import mock
 from absl.testing import absltest
@@ -19,9 +20,12 @@ from absl.testing import parameterized
 import jax
 from jax import numpy as jnp
 import numpy as np
+from qwix._src.core import dot
 from qwix._src.core import dot_general
 from qwix._src.core import einsum
 from qwix._src.core import qarray
+from qwix._src.core import sparse_array
+from qwix._src.core import sparsity
 
 # Unquantized x QArray cases whose scale varies along a contracting axis, so
 # that dot_general folds the scale into the unquantized operand.
@@ -1033,6 +1037,131 @@ class DotGeneralTest(parameterized.TestCase):
         lhs
     )
     np.testing.assert_allclose(grad, expected, rtol=1e-5, atol=1e-5)
+
+  @parameterized.named_parameters(
+      dict(testcase_name='rhs_bf16_1_4', rhs_qtype=None, m=4),
+      dict(
+          testcase_name='rhs_fp8_w8a16_1_4',
+          rhs_qtype=jnp.float8_e4m3fn,
+          m=4,
+      ),
+      dict(
+          testcase_name='rhs_fp8_w8a8_1_4',
+          lhs_qtype=jnp.float8_e4m3fn,
+          rhs_qtype=jnp.float8_e4m3fn,
+          m=4,
+      ),
+      dict(testcase_name='rhs_int4_1_4', rhs_qtype=jnp.int4, m=4),
+      dict(testcase_name='lhs_sparse_bf16_1_2', lhs_sparse=True, m=2),
+  )
+  def test_sparse_array_dot_and_dot_general(
+      self,
+      *,
+      m: int,
+      lhs_qtype=None,
+      rhs_qtype=None,
+      lhs_sparse: bool = False,
+  ):
+    lhs_raw = jax.random.normal(jax.random.key(0), (16, 64), jnp.bfloat16)
+    rhs_raw = jax.random.normal(jax.random.key(1), (64, 32), jnp.bfloat16)
+
+    def make_sparse(arr, axis, qtype):
+      mask = sparsity.get_sparsity_mask(
+          arr.astype(jnp.float32), n_sparsity=1, m_sparsity=m, axis=axis
+      )
+      masked = jnp.where(mask, arr, jnp.zeros_like(arr))
+      sp = sparsity.StructuredSparsity(1, m, dimension=axis)
+      if qtype is None:
+        vals, idx = sparse_array.compress(masked, mask, n=1, m=m, axis=axis)
+        return sparse_array.SparseArray(vals, idx, sp), masked
+      ch = [1 - axis]
+      q_masked = qarray.quantize(
+          masked, qarray.HowToQuantize(qtype=qtype, channelwise_axes=ch)
+      )
+      qv, idx = sparse_array.compress(
+          q_masked.qvalue, mask, n=1, m=m, axis=axis
+      )
+      return (
+          sparse_array.SparseArray(
+              dataclasses.replace(q_masked, qvalue=qv), idx, sp
+          ),
+          q_masked,
+      )
+
+    if lhs_sparse:
+      lhs, lhs_ref = make_sparse(lhs_raw, axis=1, qtype=lhs_qtype)
+      rhs, rhs_ref = rhs_raw, rhs_raw
+    else:
+      if lhs_qtype is not None:
+        lhs = qarray.quantize(
+            lhs_raw,
+            qarray.HowToQuantize(qtype=lhs_qtype, channelwise_axes=[0]),
+        )
+      else:
+        lhs = lhs_raw
+      lhs_ref = lhs
+      rhs, rhs_ref = make_sparse(rhs_raw, axis=0, qtype=rhs_qtype)
+
+    dnums = (((1,), (0,)), ((), ()))
+    out = jax.jit(dot_general.dot_general, static_argnums=2)(lhs, rhs, dnums)
+    ref = dot_general.dot_general(lhs_ref, rhs_ref, dnums)
+    self.assertEqual(out.dtype, ref.dtype)
+    np.testing.assert_array_equal(out, ref)
+
+    dot_2d = dot.dot(lhs, rhs)
+    np.testing.assert_array_equal(dot_2d, ref)
+    if not lhs_sparse and lhs_qtype is None:
+      np.testing.assert_array_equal(
+          dot.dot(lhs_raw[0], rhs), dot.dot(lhs_raw[0], rhs_ref)
+      )
+
+  def test_sparse_dot_backend_and_errors(self):
+    lhs = jnp.ones((16, 64), jnp.bfloat16)
+    rhs_raw = jnp.ones((64, 32), jnp.bfloat16)
+    mask = sparsity.get_sparsity_mask(
+        rhs_raw.astype(jnp.float32), n_sparsity=1, m_sparsity=4, axis=0
+    )
+    vals, idx = sparse_array.compress(rhs_raw, mask, n=1, m=4, axis=0)
+    sa = sparse_array.SparseArray(
+        vals, idx, sparsity.StructuredSparsity(1, 4, dimension=0)
+    )
+    dnums = (((1,), (0,)), ((), ()))
+
+    with self.assertRaisesRegex(ValueError, 'multipass'):
+      dot_general.dot_general(lhs, sa, dnums, multipass_mode='bf16x2')
+
+    calls = []
+    sentinel = jnp.full((16, 32), 7.0, jnp.float32)
+
+    def backend(l, r, dn, precision=None, preferred_element_type=None, **kw):
+      calls.append(
+          (type(l), type(r), dn, precision, preferred_element_type, kw)
+      )
+      return sentinel if preferred_element_type == jnp.float32 else None
+
+    try:
+      dot_general.set_sparse_dot_backend(backend)
+      bad_lhs = qarray.QArray(
+          jnp.zeros((16, 64), jnp.float8_e4m3fn), jnp.ones((16,), jnp.bfloat16)
+      )
+      with self.assertRaisesRegex(ValueError, 'same rank'):
+        dot_general.dot_general(bad_lhs, sa, dnums)
+      self.assertEmpty(calls)
+
+      dispatched = dot_general.dot_general(
+          lhs, sa, dnums, preferred_element_type=jnp.float32
+      )
+      np.testing.assert_array_equal(dispatched, sentinel)
+      self.assertLen(calls, 1)
+
+      fallback = dot_general.dot_general(lhs, sa, dnums)
+      expected = dot_general.dot_general(
+          lhs, jnp.where(mask, rhs_raw, jnp.zeros_like(rhs_raw)), dnums
+      )
+      np.testing.assert_array_equal(fallback, expected)
+      self.assertLen(calls, 2)
+    finally:
+      dot_general.set_sparse_dot_backend(None)
 
 
 if __name__ == '__main__':

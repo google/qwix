@@ -16,6 +16,7 @@
 # pylint: disable=line-too-long
 
 from collections.abc import Callable, Collection, Mapping, Sequence
+import dataclasses
 import itertools
 from typing import Any
 import jax
@@ -23,6 +24,17 @@ from jax import numpy as jnp
 from qwix._src.core import mxfp_dot
 from qwix._src.core import numerics
 from qwix._src.core import qarray
+from qwix._src.core import sparse_array
+from qwix._src.core import sparsity as sparsity_lib
+
+SparseDotBackend = Callable[..., jax.Array | None]
+_sparse_dot_backend: SparseDotBackend | None = None
+
+
+def set_sparse_dot_backend(backend: SparseDotBackend | None) -> None:
+  """Registers an optional sparse dot_general backend (or clears with None)."""
+  global _sparse_dot_backend
+  _sparse_dot_backend = backend
 
 
 def get_how_to_quantize(
@@ -31,6 +43,7 @@ def get_how_to_quantize(
     ndims: tuple[int, int],
     for_lhs: bool,
     tile_size: Mapping[int, int | float] | int | float | None,
+    sparsity: sparsity_lib.StructuredSparsity | None = None,
     **kwargs: Any,
 ) -> qarray.HowToQuantize:
   """Get how to quantize from dimension_numbers and remaining_dims.
@@ -46,6 +59,8 @@ def get_how_to_quantize(
       Mapping, then this uses the tiling specified by tile_size. Otherwise this
       is interpreted as the tile size for the innermost (last) axis in
       contracting_axes.
+    sparsity: Optional structured sparsity configuration; when set, resolves
+      `dimension` to the innermost contracting axis.
     **kwargs: Additional keyword arguments to HowToQuantize.
 
   Returns:
@@ -57,6 +72,16 @@ def get_how_to_quantize(
   else:
     ndim = ndims[1]
     contracting_axes = dimension_numbers[0][1]
+
+  if sparsity is not None:
+    if ndim < 2 or not contracting_axes:
+      raise ValueError(
+          'Structured sparsity requires rank >= 2 and at least one'
+          f' contracting axis; got {ndim=}, {contracting_axes=}.'
+      )
+    sparsity = dataclasses.replace(
+        sparsity, dimension=max(ca % ndim for ca in contracting_axes) - ndim
+    )
 
   if isinstance(tile_size, Mapping):
     tiled_axes = tile_size
@@ -72,6 +97,7 @@ def get_how_to_quantize(
   return qarray.HowToQuantize(
       channelwise_axes=channelwise_axes,
       tiled_axes=tiled_axes,
+      sparsity=sparsity,
       **kwargs,
   )
 
@@ -708,22 +734,22 @@ def _choose_dot_general_impl(
 
 
 def dot_general(
-    lhs: qarray.MaybeQArray,
-    rhs: qarray.MaybeQArray,
+    lhs: qarray.MaybeQArray | sparse_array.SparseArray,
+    rhs: qarray.MaybeQArray | sparse_array.SparseArray,
     dimension_numbers: jax.lax.DotDimensionNumbers,
     precision: jax.lax.PrecisionLike = None,
     preferred_element_type: jax.typing.DTypeLike | None = None,
     **kwargs,
 ) -> jax.Array:
-  """Computes a general dot product with support for ``QArray`` inputs.
+  """Computes a general dot product with support for ``QArray`` and ``SparseArray`` inputs.
 
   This function serves as a drop-in replacement for
   `jax.lax.dot_general
   <https://docs.jax.dev/en/latest/_autosummary/jax.lax.dot_general.html>`_.
 
   Args:
-    lhs: The left-hand side, either a jax.Array or QArray.
-    rhs: The right-hand side, either a jax.Array or QArray.
+    lhs: The left-hand side, a jax.Array, QArray, or SparseArray.
+    rhs: The right-hand side, a jax.Array, QArray, or SparseArray.
     dimension_numbers: The dimension numbers passed to dot_general.
     precision: The precision for jax.lax.dot_general.
     preferred_element_type: The preferred element type for jax.lax.dot_general.
@@ -733,7 +759,9 @@ def dot_general(
     a floating-point jax.Array.
   """
   if kwargs.get('multipass_mode') is not None:
-    if isinstance(lhs, qarray.QArray) or isinstance(rhs, qarray.QArray):
+    if isinstance(lhs, (qarray.QArray, sparse_array.SparseArray)) or isinstance(
+        rhs, (qarray.QArray, sparse_array.SparseArray)
+    ):
       raise ValueError(
           'Inputs to multipass dot_general must strictly be unquantized'
           f' jax.Array, but got lhs={type(lhs)}, rhs={type(rhs)}.'
@@ -748,6 +776,34 @@ def dot_general(
         preferred_element_type=preferred_element_type,
         **kwargs,
     )
+
+  if isinstance(lhs, sparse_array.SparseArray) or isinstance(
+      rhs, sparse_array.SparseArray
+  ):
+    if isinstance(lhs, sparse_array.SparseArray):
+      lhs = sparse_array.unwrap_variables(lhs)
+    if isinstance(rhs, sparse_array.SparseArray):
+      rhs = sparse_array.unwrap_variables(rhs)
+    for op in (lhs, rhs):
+      if isinstance(op, sparse_array.SparseArray):
+        sparse_array.validate_sparse_array(op)
+      elif isinstance(op, qarray.QArray):
+        qarray.validate_qarray(op)
+    if _sparse_dot_backend is not None:
+      sparse_result = _sparse_dot_backend(
+          lhs,
+          rhs,
+          dimension_numbers,
+          precision=precision,
+          preferred_element_type=preferred_element_type,
+          **kwargs,
+      )
+      if sparse_result is not None:
+        return sparse_result
+    if isinstance(lhs, sparse_array.SparseArray):
+      lhs = sparse_array.decompress_sparse_array(lhs)
+    if isinstance(rhs, sparse_array.SparseArray):
+      rhs = sparse_array.decompress_sparse_array(rhs)
 
   # The MXFP kernels cannot honor out_sharding, whereas the regular impls
   # forward it, so skip the MXFP path when out_sharding is set.

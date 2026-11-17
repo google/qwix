@@ -19,6 +19,7 @@ import flax
 from flax import nnx
 import jax
 from qwix._src import averaging
+from qwix._src import qconfig
 from qwix._src.core import qarray
 from qwix._src.providers import boxed_param
 from qwix._src.utils import flax_util
@@ -48,6 +49,28 @@ class PtqProvider(boxed_param.BoxedParamProvider):
     and will actually quantize them correctly. This can be an alternative to
     `quantize_params` if partial param quantization is not needed.
   """
+
+  _supports_weight_sparsity = True
+
+  def _init_rule(
+      self, rule: qconfig.QuantizationRule
+  ) -> qconfig.QuantizationRule:
+    rule = super()._init_rule(rule)
+    if rule.weight_sparsity is not None:
+      if type(self) is not PtqProvider:  # pylint: disable=unidiomatic-typecheck
+        raise NotImplementedError(
+            f'{type(self).__name__} does not support weight_sparsity.'
+        )
+      if self._qarray_module is not qarray:
+        raise NotImplementedError(
+            'PtqProvider with custom _qarray_module does not support'
+            ' weight_sparsity.'
+        )
+      if rule.weight_qtype is None:
+        raise NotImplementedError(
+            'PtqProvider requires weight_qtype when weight_sparsity is set.'
+        )
+    return rule
 
 
 def quantize_params(
@@ -100,7 +123,9 @@ def quantize_params(
       # module reshapes before compute. Abstract param has the compute shape.
       param = param.reshape(abs_param.shape)
       param = abs_param.replace(  # pyrefly: ignore[missing-attribute]
-          array=_qarray_module.quantize(param, abs_param.how)
+          array=boxed_param.quantize_weight(
+              param, abs_param.how, _qarray_module=_qarray_module
+          )
       )
     quantized_params[path] = param
 

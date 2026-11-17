@@ -732,5 +732,26 @@ class AxisPruningFunctionalityTest(parameterized.TestCase):
       sparsity.get_sparsity_mask(x, 2, 4, **kwargs)
 
 
+class StructuredSparsityTest(parameterized.TestCase):
+
+  def test_defaults_and_dimension(self):
+    sp = sparsity.StructuredSparsity(1, 4)
+    self.assertEqual((sp.n, sp.m, sp.stride, sp.dimension), (1, 4, 1, None))
+    sp_dim = sparsity.StructuredSparsity(2, 4, dimension=-1)
+    self.assertEqual((sp_dim.n, sp_dim.m, sp_dim.dimension), (2, 4, -1))
+
+  @parameterized.named_parameters(
+      ('n_zero', 0, 4, 1, ValueError, '0 < n < m <= 4'),
+      ('n_eq_m', 4, 4, 1, ValueError, '0 < n < m <= 4'),
+      ('m_gt_4', 2, 8, 1, ValueError, '0 < n < m <= 4'),
+      ('stride_zero', 1, 4, 0, ValueError, 'stride must be positive'),
+      ('stride_neg', 1, 4, -1, ValueError, 'stride must be positive'),
+      ('stride_two', 1, 4, 2, NotImplementedError, 'Only stride == 1'),
+  )
+  def test_invalid_args(self, n, m, stride, err_cls, regex):
+    with self.assertRaisesRegex(err_cls, regex):
+      sparsity.StructuredSparsity(n, m, stride=stride)
+
+
 if __name__ == '__main__':
   absltest.main()

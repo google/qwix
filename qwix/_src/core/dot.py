@@ -19,18 +19,19 @@ from typing import Callable
 import jax
 from qwix._src.core import dot_general
 from qwix._src.core import qarray
+from qwix._src.core import sparse_array
 
 
 def dot(
-    a: qarray.MaybeQArray,
-    b: qarray.MaybeQArray,
+    a: qarray.MaybeQArray | sparse_array.SparseArray,
+    b: qarray.MaybeQArray | sparse_array.SparseArray,
     precision: jax.lax.PrecisionLike = None,
     preferred_element_type: jax.typing.DTypeLike | None = None,
     out_sharding=None,
     *,
     _qwix_dot_general: Callable[..., jax.Array] = dot_general.dot_general,
 ):
-  """Computes the dot product with support for ``QArray`` inputs.
+  """Computes the dot product with support for ``QArray`` and ``SparseArray``.
 
   This function serves as a drop-in replacement for
   `jax.numpy.dot
@@ -41,8 +42,8 @@ def dot(
   applicable.
 
   Args:
-    a: The left-hand side, either a jax.Array or QArray.
-    b: The right-hand side, either a jax.Array or QArray.
+    a: The left-hand side, a jax.Array, QArray, or SparseArray.
+    b: The right-hand side, a jax.Array, QArray, or SparseArray.
     precision: The numerical precision configuration for the computation.
     preferred_element_type: The element type for the accumulation. Unlike
       standard ``jax.numpy.dot``, this function exposes this argument to allow

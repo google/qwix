@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import contextlib
+import dataclasses
 import functools
 import time
 from unittest import mock
@@ -25,6 +26,8 @@ from jax import numpy as jnp
 from qwix._src.core import dot_general
 from qwix._src.core import einsum
 from qwix._src.core import qarray
+from qwix._src.core import sparse_array
+from qwix._src.core import sparsity
 
 
 def time_it(f, *args):
@@ -553,6 +556,70 @@ class EinsumTest(parameterized.TestCase):
 
     res = einsum.einsum(einsum_str, q_lhs, q_rhs)
     self.assertEqual(res.shape, (2, 16, 128))
+
+  def test_sparse_array_einsum(self):
+    lhs = self._make_array((16, 64), jnp.bfloat16)
+    rhs_raw = self._make_array((64, 32), jnp.bfloat16)
+    mask = sparsity.get_sparsity_mask(
+        rhs_raw.astype(jnp.float32), n_sparsity=1, m_sparsity=4, axis=0
+    )
+    rhs_masked = jnp.where(mask, rhs_raw, jnp.zeros_like(rhs_raw))
+    sp = sparsity.StructuredSparsity(1, 4, dimension=0)
+
+    vals_fp, idx_fp = sparse_array.compress(rhs_masked, mask, n=1, m=4, axis=0)
+    sa_fp = sparse_array.SparseArray(vals_fp, idx_fp, sp)
+
+    q_rhs = qarray.quantize(
+        rhs_masked,
+        qarray.HowToQuantize(qtype=jnp.float8_e4m3fn, channelwise_axes=[1]),
+    )
+    qv, idx_q = sparse_array.compress(q_rhs.qvalue, mask, n=1, m=4, axis=0)
+    sa_q = sparse_array.SparseArray(
+        dataclasses.replace(q_rhs, qvalue=qv), idx_q, sp
+    )
+
+    self.assertTrue(
+        jnp.array_equal(
+            einsum.einsum('mk,kn->mn', lhs, sa_fp),
+            einsum.einsum('mk,kn->mn', lhs, rhs_masked),
+        )
+    )
+    self.assertTrue(
+        jnp.array_equal(
+            einsum.einsum('mk,kn->mn', lhs, sa_q),
+            einsum.einsum('mk,kn->mn', lhs, q_rhs),
+        )
+    )
+
+    # Unary and 3-operand contractions.
+    self.assertTrue(
+        jnp.array_equal(
+            einsum.einsum('kn->nk', sa_q),
+            jnp.einsum('kn->nk', qarray.dequantize(q_rhs)),
+        )
+    )
+    w2 = self._make_array((32, 24), jnp.bfloat16)
+    self.assertTrue(
+        jnp.array_equal(
+            einsum.einsum('mk,kn,no->mo', lhs, sa_q, w2),
+            einsum.einsum('mk,kn,no->mo', lhs, q_rhs, w2),
+        )
+    )
+
+    # Broadcast mismatch along batch axis ('bmk,bkn->bmn', (2,..) vs (1,..)).
+    lhs_b = self._make_array((2, 16, 64), jnp.bfloat16)
+    rhs_b_raw = rhs_masked[None, :, :]
+    mask_b = mask[None, :, :]
+    vals_b, idx_b = sparse_array.compress(rhs_b_raw, mask_b, n=1, m=4, axis=1)
+    sa_b = sparse_array.SparseArray(
+        vals_b, idx_b, sparsity.StructuredSparsity(1, 4, dimension=1)
+    )
+    self.assertTrue(
+        jnp.array_equal(
+            einsum.einsum('bmk,bkn->bmn', lhs_b, sa_b),
+            einsum.einsum('bmk,bkn->bmn', lhs_b, rhs_b_raw),
+        )
+    )
 
 
 if __name__ == '__main__':

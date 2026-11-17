@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Quantized einsum with subchannel support."""
+
 # pylint: disable=line-too-long
 
+import dataclasses
 from typing import Any, Callable, Mapping
 
 import jax
@@ -22,6 +24,8 @@ import opt_einsum
 from qwix._src.core import dot_general
 from qwix._src.core import einsum_info
 from qwix._src.core import qarray
+from qwix._src.core import sparse_array
+from qwix._src.core import sparsity as sparsity_lib
 
 
 def get_how_to_quantize(
@@ -30,6 +34,7 @@ def get_how_to_quantize(
     ndims: tuple[int, int],
     for_lhs: bool,
     tile_size: Mapping[int, int | float] | int | float | None,
+    sparsity: sparsity_lib.StructuredSparsity | None = None,
     **kwargs: Any,
 ) -> qarray.HowToQuantize:
   """Get how to quantize from an einsum string.
@@ -46,6 +51,8 @@ def get_how_to_quantize(
     tile_size: The tile size for subchannel quantization. If the tile_size is a
       Mapping, then this uses the tiling specified by tile_size. Otherwise this
       is interpreted as the tile size for the first axis in contracting_axes.
+    sparsity: Optional structured sparsity configuration; when set, resolves
+      `dimension` to the innermost contracting axis.
     **kwargs: Additional keyword arguments to HowToQuantize.
 
   Returns:
@@ -64,6 +71,16 @@ def get_how_to_quantize(
     else:
       last_contracting_axis = axis  # Only tile the last contraction axis.
 
+  if sparsity is not None:
+    if len(operand_subs) < 2 or last_contracting_axis is None:
+      raise ValueError(
+          'Structured sparsity requires rank >= 2 and at least one'
+          f' contracting axis; got {einsum_str=}, {operand_subs=}.'
+      )
+    sparsity = dataclasses.replace(
+        sparsity, dimension=last_contracting_axis - len(operand_subs)
+    )
+
   if isinstance(tile_size, Mapping):
     tiled_axes = tile_size
     # Update the channelwise axes to exclude the tiled axes.
@@ -77,13 +94,14 @@ def get_how_to_quantize(
   return qarray.HowToQuantize(
       channelwise_axes=channelwise_axes,
       tiled_axes=tiled_axes,
+      sparsity=sparsity,
       **kwargs,
   )
 
 
 def _perform_binary_einsum(
-    lhs: qarray.MaybeQArray,
-    rhs: qarray.MaybeQArray,
+    lhs: qarray.MaybeQArray | sparse_array.SparseArray,
+    rhs: qarray.MaybeQArray | sparse_array.SparseArray,
     einsum_str: str,
     dot_general_func: Callable[..., jax.Array],
     preferred_element_type: jax.typing.DTypeLike | None,
@@ -127,7 +145,11 @@ def einsum(
   # preferred_element_type has to be set for jnp.einsum so that it won't infer
   # the type from qvalue x qvalue.
   _, preferred_element_type = qarray.get_accumulator_and_result_type(
-      *[a for a in args if isinstance(a, qarray.MaybeQArray)],
+      *[
+          a
+          for a in args
+          if isinstance(a, qarray.MaybeQArray | sparse_array.SparseArray)
+      ],
       preferred_element_type=preferred_element_type,
   )
 
@@ -150,13 +172,13 @@ def einsum(
       shapes=True,
       einsum_call=True,  # This is necessary for opt_einsum to return the contraction list.
   )
-  for contraction in contractions:  # pytype: disable=attribute-error # pyrefly: ignore
+  for contraction in contractions:  # pyrefly: ignore[not-iterable]
     # operand_indices: (0, 1), einsum_str: "ij,jk->ik"
     operand_indices, _, einsum_str = contraction[:3]
     if len(operand_indices) == 1:
       # Fallback to dequantization for unary ops.
       op0 = operands.pop(operand_indices[0])
-      if isinstance(op0, qarray.QArray):
+      if isinstance(op0, (qarray.QArray, sparse_array.SparseArray)):
         dequantized_op0 = qarray.dequantize(op0)
       else:
         dequantized_op0 = op0
