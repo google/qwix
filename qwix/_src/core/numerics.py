@@ -64,10 +64,10 @@ def can_dequant_on_output(qtype: jax.typing.DTypeLike) -> bool:
 
   This allows performing heavy operations (like matrix multiplications)
   directly on quantized values and applying the dequantization step only to the
-  final result. This is generally possible for uniform data types (e.g., int8).
-  However, non-uniform types like 'nf4' (NormalFloat 4) use a non-linear
-  lookup table of buckets, making direct arithmetic on quantized indices
-  mathematically invalid.
+  final result. This is generally possible for zero-centered uniform types
+  (e.g., int8). However, non-uniform types like 'nf4' (NormalFloat 4) and
+  offset-encoded logical types like 'uint8_centered' require value conversion
+  before arithmetic, making direct arithmetic on stored codes invalid.
 
   Args:
     qtype: The quantization data type to check.
@@ -76,7 +76,7 @@ def can_dequant_on_output(qtype: jax.typing.DTypeLike) -> bool:
     True if the qtype supports dequantizing after the computation in quantized
     representation, False otherwise.
   """
-  return qtype not in ['nf4']
+  return qtype not in ('nf4', 'uint8_centered')
 
 
 def get_asymmetric_bound(qtype: jax.typing.DTypeLike) -> tuple[float, float]:
@@ -127,6 +127,8 @@ def get_symmetric_bound(qtype: jax.typing.DTypeLike) -> float:
   match qtype:
     case 'nf4':
       return 1.0
+    case 'uint8_centered':
+      return 127.5
     case 'int2' | 'int3' | 'int5' | 'int6' | 'int7':
       # The bound is extended to qmax + 0.5 so that we have a better utilization
       # of the qmax bucket. This is more important for fewer bits of int.
@@ -186,6 +188,12 @@ def convert_to(
   match qtype:
     case 'nf4':
       return fp_to_nf4(x)
+    case 'uint8_centered':
+      return (
+          jnp.floor(x.astype(jnp.float32) + 127.5 + 0.5)
+          .clip(0.0, 255.0)
+          .astype(jnp.uint8)
+      )
     case 'int2' | 'int3' | 'int5' | 'int6' | 'int7':
       bits = int(qtype[3:])
       qmin = -(2 ** (bits - 1))
@@ -228,11 +236,12 @@ def convert_to(
 
 
 def convert_from(x: jax.Array, qtype: jax.typing.DTypeLike) -> jax.Array:
-  """Converts a non-uniform quantized array back to floating-point values.
+  """Converts a non-uniform or offset-encoded quantized array to float.
 
   For non-uniform types (like 'nf4'), this function performs 'unbucketing'
   by mapping quantized indices back to their corresponding floating-point
-  values.
+  values. For offset-encoded logical types (like 'uint8_centered'), it removes
+  the storage offset to recover signed logical values.
 
   For native uniform types (e.g., 'int8'), this is a no-op.
 
@@ -241,13 +250,15 @@ def convert_from(x: jax.Array, qtype: jax.typing.DTypeLike) -> jax.Array:
     qtype: The quantization type that was used to create 'x'.
 
   Returns:
-    The array after representation conversion. For non-uniform types, the
-    result is in a floating-point format. For native types, the result
-    retains the original dtype of 'x'.
+    The array after representation conversion. For non-uniform or
+    offset-encoded types, the result is in a floating-point format. For native
+    types, the result retains the original dtype of 'x'.
   """
   match qtype:
     case 'nf4':
       return nf4_to_fp(x)
+    case 'uint8_centered':
+      return x.astype(jnp.float32) - 127.5
     case _:
       # For native types, no extra conversion is needed. The dtype will be
       # converted during unquantization.
