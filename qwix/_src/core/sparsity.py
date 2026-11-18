@@ -15,10 +15,52 @@
 """Basic functionalities for introducing sparsity in neural networks."""
 
 import dataclasses
+import re
 from typing import Optional
 
 import jax
 import jax.numpy as jnp
+
+
+@dataclasses.dataclass(frozen=True)
+class StructuredSparsity:
+  """Configuration for N:M structured sparsity.
+
+  Attributes:
+    n: Number of non-zero elements retained per group (`0 < n < m <= 4`).
+    m: Group size along the sparse dimension (`0 < n < m <= 4`).
+    stride: Step between consecutive elements in a group (currently must be 1).
+    dimension: Sparse axis index, normalized to a negative axis on
+      `SparseArray`.
+  """
+
+  n: int
+  m: int
+  stride: int = 1
+  dimension: int | None = None
+
+  def __post_init__(self):
+    if not 0 < self.n < self.m <= 4:
+      raise ValueError(f'Expected 0 < n < m <= 4; got n={self.n}, m={self.m}.')
+    if self.stride <= 0:
+      raise ValueError(f'stride must be positive; got stride={self.stride}.')
+    if self.stride != 1:
+      raise NotImplementedError(
+          f'Only stride == 1 is supported; got stride={self.stride}.'
+      )
+
+
+def parse_structured_sparsity(
+    spec: str, *, dimension: int | None = None
+) -> StructuredSparsity:
+  """Parses an `'N:M'` spec such as `'1:4'` into a `StructuredSparsity`."""
+  match = re.fullmatch(r'(\d+):(\d+)', spec) if isinstance(spec, str) else None
+  if match is None:
+    raise ValueError(
+        "Expected structured sparsity as an 'N:M' string, e.g. '1:4'; got"
+        f' {spec!r}.'
+    )
+  return StructuredSparsity(int(match[1]), int(match[2]), dimension=dimension)
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

@@ -684,6 +684,16 @@ class QtTest(parameterized.TestCase):
         0.05,
     )
 
+  def test_weight_sparsity_not_implemented(self):
+    rule = qconfig.QuantizationRule(
+        weight_qtype=jnp.float8_e4m3fn,
+        weight_sparsity="1:4",
+    )
+    with self.assertRaisesRegex(
+        NotImplementedError, "QtProvider does not support weight_sparsity"
+    ):
+      qt.QtProvider([rule])
+
 
 if __name__ == "__main__":
   absltest.main()
