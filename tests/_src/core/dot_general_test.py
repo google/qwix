@@ -576,6 +576,14 @@ class DotGeneralTest(parameterized.TestCase):
           expect='slow',
       ),
       dict(
+          testcase_name='uint8_centered_a16_slow',
+          lhs_how=None,
+          rhs_how=qarray.HowToQuantize(
+              qtype='uint8_centered', channelwise_axes=(1,), tiled_axes={}
+          ),
+          expect='slow',
+      ),
+      dict(
           testcase_name='a16_unquantized_slow',
           lhs_how=None,
           rhs_how=None,
