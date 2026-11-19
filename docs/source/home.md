@@ -25,6 +25,8 @@ research and production.
         backpropagation (QT).
     *   PTQ: this mode achieves the best serving performance on XLA devices such
         as TPU and GPU.
+    *   [KV Cache Quantization](kv_cache.md): quantizes autoregressive KV caches
+        (`int8`, `fp8`, `int4`) on XLA devices without custom kernels.
     *   ODML: this mode adds proper annotation to the model so that the LiteRT
         converter could produce full integer models.
     *   LoRA/QLoRA: this mode enables LoRA and QLoRA on a model.

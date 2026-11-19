@@ -12,6 +12,7 @@ get_started.md
 basics.md
 qt.md
 ptq.md
+kv_cache.md
 odml.md
 lora.md
 offline_quantization.md
