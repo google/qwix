@@ -221,6 +221,30 @@ class QArrayTest(parameterized.TestCase):
           f'{dq_array} != {array}\nDiff: {jnp.abs(dq_array - array)}',
       )
 
+  def test_uint8_centered_fixed_range(self):
+    grid = jnp.linspace(-1.0, 1.0, 256, dtype=jnp.float32)
+    q_array = qarray.quantize(
+        grid,
+        qarray.HowToQuantize(
+            qtype='uint8_centered', calibration_method='fixed,-1,1'
+        ),
+    )
+    self.assertEqual(q_array.qvalue.dtype, jnp.uint8)
+    self.assertIsNone(q_array.zero_point)
+    self.assertTrue(
+        jnp.array_equal(q_array.scale, jnp.array([2.0 / 255.0], jnp.float32))
+    )
+    self.assertTrue(
+        jnp.array_equal(q_array.qvalue, jnp.arange(256, dtype=jnp.uint8))
+    )
+    dq_array = qarray.dequantize(q_array)
+    self.assertEqual(dq_array.dtype, jnp.float32)
+    # (q - 127.5) * delta vs. linspace differs by at most 2^-23 (~1.19e-7).
+    self.assertLessEqual(float(jnp.max(jnp.abs(dq_array - grid))), 1.2e-7)
+    self.assertEqual(
+        qarray.dequantize(q_array.astype(jnp.bfloat16)).dtype, jnp.bfloat16
+    )
+
   def test_get_tiled_axes(self):
     array = qarray.QArray(
         qvalue=jnp.ones((10, 256, 16), jnp.int8),
