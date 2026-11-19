@@ -26,10 +26,12 @@ class NumericsTest(absltest.TestCase):
     self.assertTrue(jnp.array_equal(a, b), f"{a=} {b=}")
 
   def test_invalid_cases(self):
-    with self.assertRaisesRegex(
-        ValueError, "doesn't support asymmetric quantization"
-    ):
-      numerics.get_asymmetric_bound("nf4")
+    for qtype in ("nf4", "uint8_centered"):
+      with self.subTest(qtype=qtype):
+        with self.assertRaisesRegex(
+            ValueError, "doesn't support asymmetric quantization"
+        ):
+          numerics.get_asymmetric_bound(qtype)
 
   def test_convert_to(self):
     self._assert_equal(
@@ -122,6 +124,60 @@ class NumericsTest(absltest.TestCase):
     self._assert_equal(
         numerics.convert_from(jnp.zeros((2, 3, 4), jnp.uint4), "nf4").shape,
         (2, 3, 4),
+    )
+
+  def test_uint8_centered(self):
+    self.assertEqual(numerics.get_symmetric_bound("uint8_centered"), 127.5)
+    self.assertFalse(numerics.can_dequant_on_output("uint8_centered"))
+    self.assertTrue(numerics.can_dequant_on_output(jnp.uint8))
+
+    # Exhaustive 256-code inversion (exact in both float32 and bfloat16).
+    codes = jnp.arange(256, dtype=jnp.uint8)
+    logical = numerics.convert_from(codes, "uint8_centered")
+    self.assertEqual(logical.dtype, jnp.float32)
+    expected_logical = jnp.array(
+        [(2 * q - 255) / 2.0 for q in range(256)], dtype=jnp.float32
+    )
+    self._assert_equal(logical, expected_logical)
+    roundtrip = numerics.convert_to(logical, "uint8_centered")
+    self.assertEqual(roundtrip.dtype, jnp.uint8)
+    self._assert_equal(roundtrip, codes)
+    self._assert_equal(
+        numerics.convert_to(logical.astype(jnp.bfloat16), "uint8_centered"),
+        codes,
+    )
+
+    # Exact grid points, half-up ties (-1.0->127, 0.0->128, 1.0->129), and
+    # out-of-range clipping.
+    self._assert_equal(
+        numerics.convert_to(
+            jnp.array(
+                [
+                    -jnp.inf,
+                    -128.0,
+                    -127.5,
+                    -1.0,
+                    -0.5,
+                    0.0,
+                    0.5,
+                    1.0,
+                    127.5,
+                    128.0,
+                    jnp.inf,
+                ],
+                dtype=jnp.float32,
+            ),
+            "uint8_centered",
+        ),
+        jnp.array(
+            [0, 0, 0, 127, 127, 128, 128, 129, 255, 255, 255], dtype=jnp.uint8
+        ),
+    )
+    self._assert_equal(
+        numerics.convert_to(
+            jnp.array([-1.0, 0.0, 1.0], dtype=jnp.bfloat16), "uint8_centered"
+        ),
+        jnp.array([127, 128, 129], dtype=jnp.uint8),
     )
 
   def test_mxfp(self):
