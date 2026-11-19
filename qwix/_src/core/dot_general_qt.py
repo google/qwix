@@ -86,6 +86,9 @@ class DotGeneralQtConfig:
   drhs_residual_calibration_method: str = 'absmax'
   drhs_residual_disable_channelwise_axes: bool = False
 
+  # DEPRECATED: Legacy QT sparsity rule.
+  # Legacy sparsity paths are scheduled for removal. Do not add new callers
+  # or dependencies.
   sparsity_rule: sparsity.SparsityRule | None = None
   preferred_element_type: jax.typing.DTypeLike | None = None
   out_sharding: (

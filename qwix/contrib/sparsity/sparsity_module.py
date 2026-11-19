@@ -11,7 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Core sparsity quantized training support."""
+"""DEPRECATED: Core sparsity quantized training support.
+
+Legacy sparsity paths are scheduled for removal. Do not add new callers or
+dependencies.
+"""
 
 from flax import nnx
 import jax
@@ -20,7 +24,10 @@ from qwix._src.core import sparsity
 
 
 class SparsityModule(nnx.Module):
-  """A stateful module for managing and applying structured sparsity in Flax NNX.
+  """DEPRECATED: Stateful NNX module for structured sparsity.
+
+  Legacy sparsity paths are scheduled for removal. Do not add new callers
+  or dependencies.
 
   This module tracks the training step and maintains a persistent sparsity mask
   as `nnx.BatchStat` variables (effectively part of the model's batch stats,
@@ -121,7 +128,7 @@ class SparsityModule(nnx.Module):
       )
     if self.sparsity_rule.weight_sparsity_m != 0:
       if self.mask is None:
-        self.mask = nnx.BatchStat(jnp.ones(weight.shape, jnp.bool_))  # pyrefly: ignore
+        self.mask = nnx.BatchStat(jnp.ones(weight.shape, jnp.bool_))
 
       # Only update if not in eval mode
       if not self.sparsity_rule.eval_mode:

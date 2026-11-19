@@ -253,7 +253,10 @@ def validate_qarray(array: QArray):
 
 
 def sparsify(array: jax.Array, how: sparsity.SparsityRule) -> jax.Array:
-  """Applies N:M sparsity to a dense array.
+  """DEPRECATED: Applies N:M sparsity to a dense array.
+
+  Legacy sparsity paths are scheduled for removal. Do not add new callers
+  or dependencies.
 
   N:M sparsity ensures that at most N values are non-zero in each block of M
   consecutive values. Sparsity is based on magnitude.

@@ -65,7 +65,11 @@ def parse_structured_sparsity(
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class SparsityRule:
-  """Sparsity rules that match and configure the sparsity behavior."""
+  """DEPRECATED: Sparsity rules that match and configure sparsity behavior.
+
+  Legacy sparsity paths are scheduled for removal. Do not add new callers
+  or dependencies.
+  """
 
   # N:M sparsity for weights and activations. If m > 0, sparsity is enabled.
   # 1:4/2:4 and 3:4 sparsity are supported.
@@ -96,7 +100,10 @@ def apply_sparsity(
     is_channelwise: bool = False,
     pruned_value: Optional[jax.Array] = None,
 ) -> jax.Array:
-  """Returns sparsified inputs based on input mask.
+  """DEPRECATED: Returns sparsified inputs based on input mask.
+
+  Legacy sparsity paths are scheduled for removal. Do not add new callers
+  or dependencies.
 
   Args:
     inputs: The input tensor.
@@ -106,7 +113,8 @@ def apply_sparsity(
     pruned_value: If not None, it replaces the value of pruned elements (zeros)
       with the given pruned_value.
 
-  Returns: The masked input tensor.
+  Returns:
+    The masked input tensor.
   """
   if is_channelwise:
     mask = mask * jnp.ones_like(inputs).astype(jnp.bool_)
@@ -325,7 +333,10 @@ def get_sparsity_mask_unstructured(
     mask: jax.Array | None,
     prune_rate: jax.Array | float,
 ) -> jax.Array:
-  """Computes a sparisty mask to prune the required percentage of weights.
+  """DEPRECATED: Computes a sparsity mask to prune a percentage of weights.
+
+  Legacy sparsity paths are scheduled for removal. Do not add new callers
+  or dependencies.
 
   The mask is calculated by thresholding the absolute values of inputs. The
   threshold is the lowest value greater than prune_rate percent of weights, i.e.
@@ -358,7 +369,10 @@ def prune_inputs_n_m(
     offset: int = 0,
     axis: int | None = None,
 ) -> jax.Array:
-  """Returns pruned array with N:M (structured) pruning.
+  """DEPRECATED: Returns pruned array with N:M (structured) pruning.
+
+  Legacy sparsity paths are scheduled for removal. Do not add new callers
+  or dependencies.
 
   N:M pruning makes at most N values non-zero in each block of M consecutive
   values.
