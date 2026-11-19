@@ -168,14 +168,6 @@ class AuxDataKey(str, enum.Enum):
   # softmax.
   FIXED_RANGE = 'fixed_range'  # tuple[float, float]
 
-  # Deprecated and never set. The flattened-einsum RHS permutation is now one
-  # of the entries of WEIGHT_TRANSFORMS, so nothing in Qwix writes or reads this
-  # key. It is only kept so that downstream provider subclasses that copied the
-  # pre-replay weight lookup (and read this key through aux_data.get, always
-  # getting their default) keep importing and running. TODO(guoren): remove
-  # once those subclasses call _resolve_static_weight instead.
-  FLATTENED_EINSUM_RHS_PERM = 'flattened_einsum_rhs_perm'  # tuple[int, ...]
-
 
 # Metadata keys that depend on the value being preserved.
 # If the value changes (e.g. add, mul), these keys become invalid.
