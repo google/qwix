@@ -339,6 +339,46 @@ class PallasTest(parameterized.TestCase):
           rhs_scale_shape=(4, 2),
           dimension_numbers=(([2], [0]), ([], [])),
       ),
+      dict(
+          testcase_name="fp8_channelwise_bf16",
+          lhs_shape=(128, 256),
+          lhs_dtype=jnp.float8_e4m3fn,
+          lhs_scale_shape=(128, 1),
+          lhs_scale_dtype=jnp.bfloat16,
+          rhs_shape=(256, 128),
+          rhs_dtype=jnp.float8_e4m3fn,
+          rhs_scale_shape=(1, 128),
+          rhs_scale_dtype=jnp.bfloat16,
+          dimension_numbers=(([1], [0]), ([], [])),
+      ),
+      dict(
+          testcase_name="fp8_subchannel_bf16",
+          lhs_shape=(128, 256),
+          lhs_dtype=jnp.float8_e4m3fn,
+          lhs_scale_shape=(128, 8),
+          lhs_scale_dtype=jnp.bfloat16,
+          rhs_shape=(256, 128),
+          rhs_dtype=jnp.float8_e4m3fn,
+          rhs_scale_shape=(8, 128),
+          rhs_scale_dtype=jnp.bfloat16,
+          dimension_numbers=(([1], [0]), ([], [])),
+          # Observed mean relative error 0.00227 on viperlite: for K tiles < 128
+          # the qwix.dot_general reference takes _slow_dot_general (dequantizes
+          # to bf16 before the matmul), while loop_dot_general keeps f32 until
+          # the final cast.
+          max_mean_rel_error=3e-3,
+      ),
+      dict(
+          testcase_name="bf16_act_int8_weight_bf16",
+          lhs_shape=(128, 256),
+          lhs_dtype=jnp.bfloat16,
+          lhs_scale_shape=None,
+          rhs_shape=(256, 128),
+          rhs_dtype=jnp.int8,
+          rhs_scale_shape=(1, 128),
+          rhs_scale_dtype=jnp.bfloat16,
+          dimension_numbers=(([1], [0]), ([], [])),
+      ),
   )
   def test_pallas_dot_general(
       self,
@@ -352,6 +392,7 @@ class PallasTest(parameterized.TestCase):
       rhs_scale_shape,
       rhs_scale_dtype=jnp.float32,
       dimension_numbers,
+      max_mean_rel_error=2e-3,  # bf16 has a lot error.
   ):
     """Test what kind of dot_general can be called in pallas kernels."""
 
@@ -380,7 +421,7 @@ class PallasTest(parameterized.TestCase):
     )(lhs, rhs)
     self.assertLess(
         jnp.abs(jax_output - pallas_output).mean() / jnp.abs(jax_output).mean(),
-        2e-3,  # bf16 has a lot error.
+        max_mean_rel_error,
     )
 
   def _make_array(self, shape, dtype):
@@ -391,6 +432,10 @@ class PallasTest(parameterized.TestCase):
       )
     except ValueError:
       # dtype is float.
+      if jnp.finfo(dtype).bits < 16:
+        return jax.random.normal(jax.random.key(0), shape, jnp.float32).astype(
+            dtype
+        )
       return jax.random.normal(jax.random.key(0), shape, dtype)
 
 
