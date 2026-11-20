@@ -29,6 +29,8 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 dev = [
+  # Used by dot_general_qt_test.py and multipass_dot_test.py (metrax.SNR).
+  "google_metrax",
   "pytest",
 ]
 docs = [
@@ -52,6 +54,11 @@ version = {attr = "qwix.version.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["qwix*"]
+
+[tool.pytest.ini_options]
+# Test directories have no __init__.py files, so test modules in different
+# directories can share a basename (e.g. op_test.py).
+addopts = "--import-mode=importlib"
 
 [tool.pyrefly]
 project-includes = [

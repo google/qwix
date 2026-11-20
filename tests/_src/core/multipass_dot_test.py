@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Any
+
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
@@ -65,7 +67,7 @@ def is_ghostfish() -> bool:
     return True
 
 
-def extract_all_equations(jaxpr: jax.core.Jaxpr) -> list[jax.core.JaxprEqn]:
+def extract_all_equations(jaxpr: Any) -> list[Any]:
   """Recursively extracts all equations from a Jaxpr including nested JIT calls."""
   eqns = []
   for eqn in jaxpr.eqns:
@@ -79,9 +81,7 @@ def extract_all_equations(jaxpr: jax.core.Jaxpr) -> list[jax.core.JaxprEqn]:
   return eqns
 
 
-def get_graph_gemms_and_casts(
-    fn, *args
-) -> tuple[list[jax.core.JaxprEqn], list[jnp.dtype]]:
+def get_graph_gemms_and_casts(fn, *args) -> tuple[list[Any], list[jnp.dtype]]:
   """Extracts all GEMM equations and cast target dtypes from a traced JAX function."""
   jaxpr = jax.make_jaxpr(fn)(*args)
   all_eqns = extract_all_equations(
