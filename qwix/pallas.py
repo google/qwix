@@ -17,16 +17,18 @@ This module is usually imported as `import qwix.pallas as qpl` in user code.
 
 To add quantization support to a Pallas kernel, generally users need to
 
-1) Quantize the inputs outside of the kernel via `qpl.quantize`.
+1) Quantize inputs in the launcher outside the kernel via `qpl.quantize`.
 2) Instead of calling `pl.pallas_call`, call `qpl.pallas_call`, which supports
    taking QArrays as inputs. `qpl.pallas_call` takes the same block specs as
    `pl.pallas_call` and adjusts them automatically for QArrays.
-3) When inside the kernel, use `qpl.einsum` / `qpl.dot_general` / `qpl.dot`
-   which take QArrays as inputs and return jax.Array. Alternatively, call
-   `dequantize` on the QArray to obtain the dequantized jax.Array.
+3) Inside the kernel body, quantize tiles with `qpl.quantize_tile` and use
+   `qpl.einsum` / `qpl.dot_general` / `qpl.dot`, which take QArrays as inputs
+   and return jax.Array. Alternatively, call `qpl.dequantize` on the QArray
+   to obtain the dequantized jax.Array.
 
 Note: dot_general / einsum / dot in this module should only be called inside
 pallas kernels, as they can be inefficient when called outside of the kernel.
+Use quantize_tile on tiles inside a kernel body and quantize on full arrays.
 """
 
 import functools
@@ -41,6 +43,7 @@ from qwix._src.core import qarray
 __all__ = [
     'QArray',
     'quantize',
+    'quantize_tile',
     'dequantize',
     'get_current_rule',
     'pallas_call',
@@ -49,8 +52,8 @@ __all__ = [
     'einsum',
 ]
 
-# APIs for generic QArray operations. These are deprecated in favor of the
-# qwix.* APIs.
+# Generic QArray APIs: the same objects as qwix.QArray, qwix.quantize and
+# qwix.dequantize, re-exported so kernel code can depend on qwix.pallas alone.
 QArray = qarray.QArray
 quantize = qarray.quantize_api
 dequantize = qarray.dequantize
@@ -58,6 +61,7 @@ dequantize = qarray.dequantize
 # APIs for quantizing Pallas kernels.
 get_current_rule = qconfig.get_current_rule
 pallas_call = pallas.pallas_call
+quantize_tile = qarray.quantize_tile
 
 # Use loop-based implementations for Pallas kernels.
 dot_general = qwix_dot_general.loop_dot_general
