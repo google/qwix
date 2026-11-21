@@ -414,6 +414,24 @@ class RaggedDotTest(parameterized.TestCase):
           ),
           expect_fast=True,
       ),
+      dict(
+          testcase_name='slow_nf4_nf4',
+          lhs_how=qarray.HowToQuantize(qtype='nf4'),
+          rhs_how=qarray.HowToQuantize(qtype='nf4'),
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='slow_int8_nf4',
+          lhs_how=qarray.HowToQuantize(qtype=jnp.int8),
+          rhs_how=qarray.HowToQuantize(qtype='nf4'),
+          expect_fast=False,
+      ),
+      dict(
+          testcase_name='slow_nf4_int8',
+          lhs_how=qarray.HowToQuantize(qtype='nf4'),
+          rhs_how=qarray.HowToQuantize(qtype=jnp.int8),
+          expect_fast=False,
+      ),
   )
   @mock.patch.object(ragged_dot, '_slow_ragged_dot_general', autospec=True)
   @mock.patch.object(ragged_dot, '_fast_ragged_dot_general', autospec=True)
@@ -451,6 +469,34 @@ class RaggedDotTest(parameterized.TestCase):
     else:
       mock_fast.assert_not_called()
       mock_slow.assert_called_once()
+
+  @parameterized.named_parameters(
+      dict(testcase_name='nf4_nf4', lhs_qtype='nf4', rhs_qtype='nf4'),
+      dict(testcase_name='int8_nf4', lhs_qtype=jnp.int8, rhs_qtype='nf4'),
+      dict(testcase_name='nf4_int8', lhs_qtype='nf4', rhs_qtype=jnp.int8),
+  )
+  def test_ragged_dot_general_nf4_matches_dequantized(
+      self,
+      lhs_qtype: jax.typing.DTypeLike,
+      rhs_qtype: jax.typing.DTypeLike,
+  ):
+    lhs_fp = self._make_array((32, 64))
+    rhs_fp = self._make_array((2, 64, 16))
+    group_sizes = jnp.array((20, 12))
+    q_lhs = qarray.quantize(lhs_fp, qarray.HowToQuantize(qtype=lhs_qtype))
+    q_rhs = qarray.quantize(rhs_fp, qarray.HowToQuantize(qtype=rhs_qtype))
+    dnums = ragged_dot._BASIC_RAGGED_DOT_DIMENSION_NUMBERS
+
+    @jax.jit
+    def _run(lhs, rhs):
+      actual = ragged_dot.ragged_dot_general(lhs, rhs, group_sizes, dnums)
+      expected = jax.lax.ragged_dot_general(
+          qarray.dequantize(lhs), qarray.dequantize(rhs), group_sizes, dnums
+      )
+      return actual, expected
+
+    actual, expected = _run(q_lhs, q_rhs)
+    self.assertTrue(jnp.array_equal(actual, expected))
 
 
 if __name__ == '__main__':

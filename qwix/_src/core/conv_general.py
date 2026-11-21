@@ -288,7 +288,11 @@ def conv_general_dilated(
   use_fast_path = True
 
   for x in (lhs, rhs):
-    if isinstance(x, jax.Array) and numerics.should_quantize(x.dtype):
+    if isinstance(x, qarray.QArray):
+      if not numerics.can_dequant_on_output(x.qtype):
+        use_fast_path = False
+        break
+    elif isinstance(x, jax.Array) and numerics.should_quantize(x.dtype):
       use_fast_path = False
       break
 
