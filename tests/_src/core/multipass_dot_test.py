@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Any
+
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 from jax import lax
 import jax.numpy as jnp
-import metrax
 import numpy as np
 from qwix._src.core import dot_general
 from qwix._src.core import dot_general_qt
@@ -26,13 +27,20 @@ from qwix._src.core import qarray
 
 
 def compute_snr_db(true_val: jax.Array, approx_val: jax.Array) -> float:
-  """Computes Signal-to-Noise Ratio (SNR) in decibels (dB) via metrax.SNR."""
-  return float(
-      metrax.SNR.from_model_output(
-          predictions=approx_val.astype(jnp.float32),
-          targets=true_val.astype(jnp.float32),
-      ).compute()
+  """Computes Signal-to-Noise Ratio (SNR) in decibels (dB)."""
+  preds = approx_val.astype(jnp.float32)
+  target = true_val.astype(jnp.float32)
+  if preds.ndim > 2:
+    target = jnp.reshape(target, (target.shape[0], -1))
+    preds = jnp.reshape(preds, (preds.shape[0], -1))
+  noise = target - preds
+  eps = jnp.finfo(preds.dtype).eps
+  signal_power = jnp.sum(target**2, axis=-1) + eps
+  noise_power = jnp.sum(noise**2, axis=-1) + eps
+  snr = 10.0 * jnp.log10(
+      jnp.where(noise_power != 0, jnp.divide(signal_power, noise_power), 0.0)
   )
+  return float(jnp.mean(snr))
 
 
 def compute_relative_error(true_val: jax.Array, approx_val: jax.Array) -> float:
@@ -65,7 +73,7 @@ def is_ghostfish() -> bool:
     return True
 
 
-def extract_all_equations(jaxpr: jax.core.Jaxpr) -> list[jax.core.JaxprEqn]:
+def extract_all_equations(jaxpr: Any) -> list[Any]:
   """Recursively extracts all equations from a Jaxpr including nested JIT calls."""
   eqns = []
   for eqn in jaxpr.eqns:
@@ -79,9 +87,7 @@ def extract_all_equations(jaxpr: jax.core.Jaxpr) -> list[jax.core.JaxprEqn]:
   return eqns
 
 
-def get_graph_gemms_and_casts(
-    fn, *args
-) -> tuple[list[jax.core.JaxprEqn], list[jnp.dtype]]:
+def get_graph_gemms_and_casts(fn, *args) -> tuple[list[Any], list[jnp.dtype]]:
   """Extracts all GEMM equations and cast target dtypes from a traced JAX function."""
   jaxpr = jax.make_jaxpr(fn)(*args)
   all_eqns = extract_all_equations(
@@ -3039,6 +3045,192 @@ class MultiPassDotTest(parameterized.TestCase):
         self.assertLess(abs(bias_aligned), 2.7e-4)
         if 'mxfp4' in mode:
           self.assertLess(abs(bias_aligned), 1e-4)
+
+  @parameterized.parameters(64, 80, 85, 128, 256, 384)
+  def test_k_packed_fp8_single_gemm_and_sqnr(self, k_dim):
+    k1, k2 = jax.random.split(self.rng)
+    lhs = jax.random.normal(k1, (16, k_dim), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (k_dim, 16), dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+    ref = lax.dot_general(lhs, rhs, dnums)
+
+    how_l = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=True,
+        qtype=jnp.float8_e4m3fn,
+        tile_size=None,
+    )
+    how_r = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=False,
+        qtype=jnp.float8_e4m3fn,
+        tile_size=None,
+    )
+    res_1p = dot_general.dot_general(
+        qarray.quantize(lhs, how_l), qarray.quantize(rhs, how_r), dnums
+    )
+    snr_1p = compute_snr_db(ref, res_1p)
+
+    for mode, expected_factor in (
+        ('three_pass_fp8_k_packed', 3),
+        ('two_pass_lhs_fp8_k_packed', 2),
+        ('two_pass_rhs_fp8_k_packed', 2),
+    ):
+      fn = lambda a, b, m=mode: multipass_dot.multipass_dot_general(
+          a, b, dnums, multipass_mode=m
+      )
+      gemms, _ = get_graph_gemms_and_casts(fn, lhs, rhs)
+      self.assertLen(gemms, 1)
+      self.assertEqual(gemms[0].invars[0].aval.dtype, jnp.float8_e4m3fn)
+      self.assertEqual(gemms[0].invars[1].aval.dtype, jnp.float8_e4m3fn)
+      self.assertEqual(
+          gemms[0].invars[0].aval.shape[1], expected_factor * k_dim
+      )
+      self.assertEqual(
+          gemms[0].invars[1].aval.shape[0], expected_factor * k_dim
+      )
+
+    res_3p_unpacked = multipass_dot.multipass_dot_general(
+        lhs, rhs, dnums, multipass_mode='three_pass_fp8'
+    )
+    snr_3p_unpacked = compute_snr_db(ref, res_3p_unpacked)
+    res_3p_packed = multipass_dot.multipass_dot_general(
+        lhs, rhs, dnums, multipass_mode='three_pass_fp8_k_packed'
+    )
+    snr_3p_packed = compute_snr_db(ref, res_3p_packed)
+    # Observed ~59.5 dB on CPU (f32 accumulation). On TPU7x, K < 256 sums
+    # mixed-magnitude passes inside a shared 256-wide MXU tile (~45.8 dB vs
+    # ~49.8 dB unpacked); at K >= 256, K=256 aligns pass boundaries with MXU
+    # tiles and K=384 straddles at most one tile (~46.6 dB vs ~46.9 dB
+    # unpacked).
+    min_snr = 42.0 if is_ghostfish() else 55.0
+    self.assertGreater(snr_3p_packed, min_snr)
+    if not is_ghostfish() or k_dim >= 256:
+      self.assertAlmostEqual(snr_3p_packed, snr_3p_unpacked, delta=0.6)
+
+    for packed_mode in (
+        'two_pass_lhs_fp8_k_packed',
+        'two_pass_rhs_fp8_k_packed',
+    ):
+      res_2p = multipass_dot.multipass_dot_general(
+          lhs, rhs, dnums, multipass_mode=packed_mode
+      )
+      snr_2p = compute_snr_db(ref, res_2p)
+      self.assertGreater(snr_2p, snr_1p + 2.0)
+      self.assertGreater(snr_3p_packed, snr_2p + 12.0)
+
+  def test_k_packed_fp8_subchannel_tiled_scales(self):
+    k1, k2 = jax.random.split(self.rng)
+    lhs = jax.random.normal(k1, (16, 256), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (256, 16), dtype=jnp.float32)
+    dnums = (((1,), (0,)), ((), ()))
+    ref = lax.dot_general(lhs, rhs, dnums)
+
+    how_l = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=True,
+        qtype=jnp.float8_e4m3fn,
+        tile_size=128,
+    )
+    how_r = dot_general.get_how_to_quantize(
+        dimension_numbers=dnums,
+        ndims=(2, 2),
+        for_lhs=False,
+        qtype=jnp.float8_e4m3fn,
+        tile_size=128,
+    )
+    res_1p = dot_general.dot_general(
+        qarray.quantize(lhs, how_l), qarray.quantize(rhs, how_r), dnums
+    )
+    snr_1p = compute_snr_db(ref, res_1p)
+
+    def _run_tiled(lhs_arr, rhs_arr, mode):
+      return multipass_dot.multipass_dot_general(
+          lhs_arr,
+          rhs_arr,
+          dnums,
+          multipass_mode=mode,
+          tile_size=128,
+      )
+
+    # Observed ~59-60 dB on CPU vs ~49-50 dB on TPU7x (K=256, tile_size=128).
+    min_snr_3p = 42.0 if is_ghostfish() else 55.0
+    for mode, expected_factor in (
+        ('three_pass_fp8_k_packed', 3),
+        ('two_pass_lhs_fp8_k_packed', 2),
+        ('two_pass_rhs_fp8_k_packed', 2),
+    ):
+      out = _run_tiled(lhs, rhs, mode)
+      snr = compute_snr_db(ref, out)
+      if mode == 'three_pass_fp8_k_packed':
+        self.assertGreater(snr, min_snr_3p)
+      else:
+        self.assertGreater(snr, snr_1p + 2.0)
+      # CPU min_tile_size is 128, so _fast_dot_general splits packed K into
+      # (expected_factor * 2, 128); TPU7x has min_tile_size=512.
+      if not is_ghostfish():
+        gemms, _ = get_graph_gemms_and_casts(
+            lambda lhs_arr, rhs_arr, curr_mode=mode: _run_tiled(
+                lhs_arr, rhs_arr, curr_mode
+            ),
+            lhs,
+            rhs,
+        )
+        self.assertLen(gemms, 1)
+        self.assertEqual(
+            gemms[0].invars[0].aval.shape, (16, expected_factor * 2, 128)
+        )
+
+  def test_k_packed_fp8_batched_4d_attention_heads(self):
+    k1, k2 = jax.random.split(self.rng)
+    lhs = jax.random.normal(k1, (2, 4, 32, 80), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (2, 4, 32, 80), dtype=jnp.float32)
+    dnums = (((3,), (3,)), ((0, 1), (0, 1)))
+    ref = lax.dot_general(lhs, rhs, dnums)
+    out = dot_general.dot_general(
+        lhs, rhs, dnums, multipass_mode='three_pass_fp8_k_packed'
+    )
+    self.assertEqual(out.shape, (2, 4, 32, 32))
+    # Observed ~59.5 dB on CPU vs ~45.8 dB on TPU7x at head_dim=80 (< 256).
+    min_snr = 42.0 if is_ghostfish() else 55.0
+    self.assertGreater(compute_snr_db(ref, out), min_snr)
+
+  def test_fp8_outer_product_empty_contracting_axes(self):
+    k1, k2 = jax.random.split(self.rng)
+    lhs = jax.random.normal(k1, (16,), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (20,), dtype=jnp.float32)
+    dnums = (((), ()), ((), ()))
+    ref = lax.dot_general(lhs, rhs, dnums)
+
+    unpacked_outs = {}
+    for mode in (
+        'three_pass_fp8',
+        'four_pass_fp8',
+        'two_pass_lhs_fp8',
+        'two_pass_rhs_fp8',
+    ):
+      out = multipass_dot.multipass_dot_general(
+          lhs,
+          rhs,
+          dnums,
+          multipass_mode=mode,
+      )
+      self.assertEqual(out.shape, (16, 20))
+      self.assertGreater(compute_snr_db(ref, out), 45.0)
+      unpacked_outs[mode] = out
+
+    for packed_mode, unpacked_mode in (
+        ('three_pass_fp8_k_packed', 'three_pass_fp8'),
+        ('two_pass_lhs_fp8_k_packed', 'two_pass_lhs_fp8'),
+        ('two_pass_rhs_fp8_k_packed', 'two_pass_rhs_fp8'),
+    ):
+      out = multipass_dot.multipass_dot_general(
+          lhs, rhs, dnums, multipass_mode=packed_mode
+      )
+      np.testing.assert_array_equal(out, unpacked_outs[unpacked_mode])
 
 
 if __name__ == '__main__':

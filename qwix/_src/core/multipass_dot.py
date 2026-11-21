@@ -26,6 +26,23 @@ This module provides multi-pass residual quantization emulation:
        LHS uses 2 residual passes, RHS uses 1 pass.
     4. 'two_pass_rhs_fp8': A_0 B_0 + A_0 B_1
        LHS uses 1 pass, RHS uses 2 residual passes.
+    5. 'three_pass_fp8_k_packed':
+       [a0, E4M3(a0 * 2^-4), a1] @ [b0, b1, E4M3(b0 * 2^-4)]
+       Packs all 3 terms into a single dot_general along the contracting axis.
+    6. 'two_pass_lhs_fp8_k_packed':
+       [a0, a1] @ [b0, E4M3(b0 * 2^-4)]
+       Packs both LHS-residual terms into a single dot_general along K.
+    7. 'two_pass_rhs_fp8_k_packed':
+       [a0, E4M3(a0 * 2^-4)] @ [b0, b1]
+       Packs both RHS-residual terms into a single dot_general along K.
+    Trade-off for *_k_packed modes: under float32 accumulation (e.g. CPU), the
+    2^-4 E4M3 shift has negligible impact (~59.5 dB SQNR, matching unpacked
+    3-pass). On TPU7x at K < 256, summing mixed-magnitude passes inside a
+    shared 256-wide FP8 MXU tile lowers 3-pass SQNR by ~3-4 dB (~49.8 dB ->
+    ~45.8 dB). At K >= 256, pass boundaries align with MXU tiles when K is a
+    multiple of 256 (matching unpacked 3-pass at K=256), and at non-multiples
+    at most one 256-wide tile straddles Pass 0 and Pass 1 (~0.4 dB gap at
+    K=384, ~46.9 dB -> ~46.6 dB).
 
 - Hybrid types of multi-pass:
 For hybrid multi-pass, Pass 1 A0 B0 is evaluated in FP8, while 4-bit formats are
@@ -101,9 +118,12 @@ from qwix._src.core import qarray
 # subject to change in future releases.
 MultiPassMode: TypeAlias = Literal[
     'three_pass_fp8',
+    'three_pass_fp8_k_packed',
     'four_pass_fp8',
     'two_pass_lhs_fp8',
+    'two_pass_lhs_fp8_k_packed',
     'two_pass_rhs_fp8',
+    'two_pass_rhs_fp8_k_packed',
     'four_pass_int4',
     'three_pass_int4',
     'two_pass_lhs_int4',
@@ -449,8 +469,8 @@ def _int8_multipass_dot_general(
   lhs_tiled_axes = qarray.get_tiled_axes(q_lhs)
   rhs_tiled_axes = qarray.get_tiled_axes(q_rhs)
 
-  lhs_tiled_ca = {}
-  rhs_tiled_ca = {}
+  lhs_tiled_ca: dict[int, int] = {}
+  rhs_tiled_ca: dict[int, int] = {}
   for l, r in zip(lhs_ca, rhs_ca):
     lhs_tile_size = lhs_tiled_axes.get(l)
     rhs_tile_size = rhs_tiled_axes.get(r)
@@ -459,9 +479,10 @@ def _int8_multipass_dot_general(
           'Contracting axes must be tiled with the same tile size.'
           f' {lhs_tiled_axes=} {rhs_tiled_axes=} {dimension_numbers=}'
       )
-    if lhs_tile_size or rhs_tile_size:
-      lhs_tiled_ca[l] = lhs_tile_size or rhs_tile_size
-      rhs_tiled_ca[r] = lhs_tile_size or rhs_tile_size
+    ca_tile_size = lhs_tile_size or rhs_tile_size
+    if ca_tile_size is not None:
+      lhs_tiled_ca[l] = ca_tile_size
+      rhs_tiled_ca[r] = ca_tile_size
 
   lhs_value = qarray.split_axis(lhs_value, lhs_tiled_ca)
   rhs_value = qarray.split_axis(rhs_value, rhs_tiled_ca)
@@ -500,6 +521,60 @@ def _int8_multipass_dot_general(
   return res.astype(result_type)
 
 
+def _pack_operand(
+    base: qarray.QArray, qval_terms: tuple[jax.Array, ...], ca: int
+) -> qarray.QArray:
+  """Concatenates multi-pass qvalue (and tiled scale) terms along `ca`."""
+  scale = (
+      base.scale
+      if base.scale.shape[ca] == 1
+      else jnp.concatenate([base.scale] * len(qval_terms), axis=ca)
+  )
+  return qarray.QArray(
+      qvalue=jnp.concatenate(qval_terms, axis=ca),
+      scale=scale,
+      zero_point=base.zero_point,
+      qtype=base.qtype,
+  )
+
+
+def _pack_fp8_passes_along_k(
+    a0: qarray.QArray,
+    b0: qarray.QArray,
+    dimension_numbers: jax.lax.DotDimensionNumbers,
+    *,
+    a1: qarray.QArray | None = None,
+    b1: qarray.QArray | None = None,
+) -> tuple[qarray.QArray, qarray.QArray]:
+  """Packs multi-pass FP8 qvalues along the last contracting axis."""
+  (lhs_ca, rhs_ca), _ = dimension_numbers
+  assert lhs_ca and rhs_ca
+  ca_l = lhs_ca[-1] % a0.ndim
+  ca_r = rhs_ca[-1] % b0.ndim
+
+  # FP8 E4M3 residual passes use scale * 2^-4 (see _residual_decompose).
+  shift_bits = _get_residual_scale_shift_bits(jnp.float8_e4m3fn)
+  assert shift_bits is not None
+  shift_scale = 2.0 ** (-shift_bits)
+
+  def _shift_pass0(x: jax.Array) -> jax.Array:
+    return (x.astype(jnp.float32) * shift_scale).astype(jnp.float8_e4m3fn)
+
+  if a1 is not None and b1 is not None:
+    a_terms = (a0.qvalue, _shift_pass0(a0.qvalue), a1.qvalue)
+    b_terms = (b0.qvalue, b1.qvalue, _shift_pass0(b0.qvalue))
+  elif a1 is not None:
+    a_terms = (a0.qvalue, a1.qvalue)
+    b_terms = (b0.qvalue, _shift_pass0(b0.qvalue))
+  elif b1 is not None:
+    a_terms = (a0.qvalue, _shift_pass0(a0.qvalue))
+    b_terms = (b0.qvalue, b1.qvalue)
+  else:
+    raise ValueError('At least one residual operand (a1 or b1) is required.')
+
+  return _pack_operand(a0, a_terms, ca_l), _pack_operand(b0, b_terms, ca_r)
+
+
 def _fp8_multipass_dot_general(
     lhs: jax.Array,
     rhs: jax.Array,
@@ -525,6 +600,8 @@ def _fp8_multipass_dot_general(
       qtype=jnp.float8_e4m3fn,
       tile_size=tile_size,
   )
+  (lhs_ca, rhs_ca), _ = dimension_numbers
+  has_contracting_axes = bool(lhs_ca and rhs_ca)
 
   def _dot(a: qarray.QArray, b: qarray.QArray) -> jax.Array:
     return dg.dot_general(
@@ -535,39 +612,52 @@ def _fp8_multipass_dot_general(
         preferred_element_type=preferred_element_type,
     )
 
-  if multipass_mode == 'two_pass_lhs_fp8':
+  if multipass_mode in ('two_pass_lhs_fp8', 'two_pass_lhs_fp8_k_packed'):
     a_passes = _residual_decompose(lhs, lhs_how, n_passes=2)
     a0, a1 = a_passes[0], a_passes[1]
     b0 = qarray.quantize(rhs, rhs_how)
-    c0 = _dot(a0, b0)
-    c1 = _dot(a1, b0)
-    return c0 + c1
+    if multipass_mode == 'two_pass_lhs_fp8_k_packed' and has_contracting_axes:
+      a_packed, b_packed = _pack_fp8_passes_along_k(
+          a0, b0, dimension_numbers, a1=a1
+      )
+      return _dot(a_packed, b_packed)
+    return _dot(a0, b0) + _dot(a1, b0)
 
-  elif multipass_mode == 'two_pass_rhs_fp8':
+  elif multipass_mode in ('two_pass_rhs_fp8', 'two_pass_rhs_fp8_k_packed'):
     a0 = qarray.quantize(lhs, lhs_how)
     b_passes = _residual_decompose(rhs, rhs_how, n_passes=2)
     b0, b1 = b_passes[0], b_passes[1]
-    c0 = _dot(a0, b0)
-    c1 = _dot(a0, b1)
-    return c0 + c1
+    if multipass_mode == 'two_pass_rhs_fp8_k_packed' and has_contracting_axes:
+      a_packed, b_packed = _pack_fp8_passes_along_k(
+          a0, b0, dimension_numbers, b1=b1
+      )
+      return _dot(a_packed, b_packed)
+    return _dot(a0, b0) + _dot(a0, b1)
 
-  elif multipass_mode in ('three_pass_fp8', 'four_pass_fp8'):
+  elif multipass_mode in (
+      'three_pass_fp8',
+      'three_pass_fp8_k_packed',
+      'four_pass_fp8',
+  ):
     a_passes = _residual_decompose(lhs, lhs_how, n_passes=2)
     a0, a1 = a_passes[0], a_passes[1]
     b_passes = _residual_decompose(rhs, rhs_how, n_passes=2)
     b0, b1 = b_passes[0], b_passes[1]
-    c00 = _dot(a0, b0)
-    c01 = _dot(a0, b1)
-    c10 = _dot(a1, b0)
-    res = c00 + c01 + c10
+    if multipass_mode == 'three_pass_fp8_k_packed' and has_contracting_axes:
+      a_packed, b_packed = _pack_fp8_passes_along_k(
+          a0, b0, dimension_numbers, a1=a1, b1=b1
+      )
+      return _dot(a_packed, b_packed)
+    res = _dot(a0, b0) + _dot(a0, b1) + _dot(a1, b0)
     if multipass_mode == 'four_pass_fp8':
-      c11 = _dot(a1, b1)
-      res = res + c11
+      res = res + _dot(a1, b1)
     return res
   else:
     raise ValueError(
         "_fp8_multipass_dot_general requires mode 'two_pass_lhs_fp8',"
-        " 'two_pass_rhs_fp8', 'three_pass_fp8', or 'four_pass_fp8'"
+        " 'two_pass_lhs_fp8_k_packed', 'two_pass_rhs_fp8',"
+        " 'two_pass_rhs_fp8_k_packed', 'three_pass_fp8',"
+        " 'three_pass_fp8_k_packed', or 'four_pass_fp8'"
     )
 
 
@@ -1096,7 +1186,7 @@ def multipass_dot_general(
     precision: The precision for dot_general.
     preferred_element_type: Output/accumulator dtype.
     **kwargs: Additional arguments forwarded to dot_general, including optional
-      'multipass_mode', 'tile_size'.
+      'multipass_mode' and 'tile_size'.
 
   Returns:
     The resulting matrix product array.
@@ -1145,9 +1235,12 @@ def multipass_dot_general(
     )
   elif multipass_mode in (
       'three_pass_fp8',
+      'three_pass_fp8_k_packed',
       'four_pass_fp8',
       'two_pass_lhs_fp8',
+      'two_pass_lhs_fp8_k_packed',
       'two_pass_rhs_fp8',
+      'two_pass_rhs_fp8_k_packed',
   ):
     return _fp8_multipass_dot_general(
         lhs,
