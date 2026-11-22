@@ -34,7 +34,7 @@ class PallasTest(parameterized.TestCase):
     if platform == "tpu":
       cls.pallas_call_kwargs = dict()
     else:
-      cls.pallas_call_kwargs = dict(interpret=True)
+      cls.pallas_call_kwargs = dict(interpret=pltpu.InterpretParams())
 
   @parameterized.named_parameters(
       dict(
