@@ -1,0 +1,182 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>ADMM-Q for Qwix</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,500;6..72,600&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: single reading column, wide tables/code scroll in place; a three-step pipeline strip mirrors the calibrate → transform → serve flow */
+:root {
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --fg: #1c2230;
+  --muted: #5a6478;
+  --line: #dde2ea;
+  --accent: #1f6f8b;
+  --accent-soft: #e3f0f4;
+  --code-bg: #eef1f5;
+  --c-comment: #6b7487;
+  --c-string: #8a4b14;
+  --c-keyword: #7a3e9d;
+  --warn: #9a5b00;
+  --warn-soft: #fbf1df;
+  --f-display: "Newsreader", Georgia, "Times New Roman", serif;
+  --f-body: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12161d; --surface: #181d26; --fg: #e3e7ee; --muted: #9aa4b6; --line: #2a313d;
+    --accent: #6cc0d9; --accent-soft: #17303a; --code-bg: #1c222c;
+    --c-comment: #8590a3; --c-string: #e0a868; --c-keyword: #c79be3;
+    --warn: #f0b75a; --warn-soft: #2e2412;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12161d; --surface: #181d26; --fg: #e3e7ee; --muted: #9aa4b6; --line: #2a313d;
+  --accent: #6cc0d9; --accent-soft: #17303a; --code-bg: #1c222c;
+  --c-comment: #8590a3; --c-string: #e0a868; --c-keyword: #c79be3;
+  --warn: #f0b75a; --warn-soft: #2e2412;
+  color-scheme: dark;
+}
+
+body { background: var(--bg); color: var(--fg); font: 17px/1.6 var(--f-body); }
+main { max-width: 760px; margin: 0 auto; padding: 56px 20px 80px; display: grid; gap: 40px; }
+main > * { min-width: 0; }
+
+header { display: grid; gap: 12px; border-bottom: 1px solid var(--line); padding-bottom: 28px; }
+.eyebrow { font: 500 12px/1 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+h1, h2 { font-family: var(--f-display); font-weight: 600; text-wrap: balance; margin: 0; line-height: 1.15; }
+h1 { font-size: 2.6rem; }
+h2 { font-size: 1.6rem; }
+.lede { font-size: 1.12rem; color: var(--muted); margin: 0; max-width: 62ch; }
+p { margin: 0; max-width: 65ch; }
+section { display: grid; gap: 16px; }
+
+a { color: var(--accent); text-underline-offset: 3px; }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+code { font: .86em var(--f-mono); background: var(--code-bg); padding: .1em .35em; border-radius: 4px; }
+
+.scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: .95rem; }
+th, td { text-align: left; padding: 12px 14px; vertical-align: top; border-bottom: 1px solid var(--line); }
+tr:last-child td { border-bottom: 0; }
+th { font: 600 12px/1.2 var(--f-body); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+td code { white-space: nowrap; }
+.note { color: var(--muted); font-size: .95rem; }
+
+pre { margin: 0; padding: 18px 20px; overflow-x: auto; background: var(--code-bg); border-radius: 8px;
+      font: 14px/1.6 var(--f-mono); tab-size: 4; }
+pre code { background: none; padding: 0; font-size: inherit; }
+.c { color: var(--c-comment); font-style: italic; }
+.s { color: var(--c-string); }
+.k { color: var(--c-keyword); }
+
+.steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line);
+         border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.step { background: var(--surface); padding: 14px 16px; display: grid; gap: 4px; min-width: 0; }
+.step b { font: 500 12px/1 var(--f-mono); color: var(--accent); letter-spacing: .04em; }
+.step span { font-weight: 600; }
+.step small { color: var(--muted); font-size: .88rem; line-height: 1.4; }
+
+ul.facts { margin: 0; padding: 0; list-style: none; display: grid; gap: 14px; }
+ul.facts li { padding-left: 18px; position: relative; max-width: 65ch; }
+ul.facts li::before { content: ""; position: absolute; left: 0; top: .7em; width: 7px; height: 7px;
+                      border-radius: 50%; background: var(--accent); }
+
+.grid-line { display: flex; gap: 3px; flex-wrap: wrap; font: 12px/1 var(--f-mono); }
+.grid-line span { flex: 1 0 28px; text-align: center; padding: 8px 0; border-radius: 4px;
+                  background: var(--accent-soft); color: var(--fg); font-variant-numeric: tabular-nums; }
+.grid-line span.z { background: var(--accent); color: var(--bg); }
+figure { margin: 0; display: grid; gap: 8px; }
+figcaption { color: var(--muted); font-size: .88rem; }
+
+.callout { background: var(--warn-soft); border-radius: 8px; padding: 18px 20px; display: grid; gap: 10px; }
+.callout h2 { color: var(--warn); font-size: 1.3rem; }
+
+@media (max-width: 560px) {
+  h1 { font-size: 2rem; }
+  main { padding-block: 36px 60px; gap: 32px; }
+  .steps { grid-template-columns: 1fr; }
+}
+</style>
+
+<main>
+  <header>
+    <div class="eyebrow">admm-q-main / qwix_admmq</div>
+    <h1>ADMM-Q for Qwix</h1>
+    <p class="lede">ADMM-Q as a calibration-based algorithm for <a href="https://github.com/google/qwix">Qwix</a>, Google's JAX quantization library. It plugs in exactly like Qwix's GPTQ (<code>qwix.contrib.gptq</code>): calibrate, transform the weights, serve with Qwix's <code>PtqProvider</code>.</p>
+  </header>
+
+  <section>
+    <h2>Files</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>File</th><th>Mirrors</th><th>Contents</th></tr></thead>
+        <tbody>
+          <tr><td><code>admmq_core.py</code></td><td><code>qwix/contrib/gptq_core.py</code></td><td><code>quantize_weight(W, H, how) -&gt; (QArray, loss)</code>: the ADMM-Q solver on Qwix's grid</td></tr>
+          <tr><td><code>admmq.py</code></td><td><code>qwix/contrib/gptq.py</code></td><td><code>AdmmqRule</code>, <code>AdmmqCalibrationProvider</code>, <code>quantize_params</code></td></tr>
+          <tr><td><code>admmq_test.py</code></td><td><code>qwix/tests/contrib/gptq_test.py</code></td><td>Core and end-to-end tests (Linen, NNX, einsum)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note"><code>../solvers.py</code> (PyTorch) and <code>../solvers_jax.py</code> (standalone JAX) are unchanged.</p>
+  </section>
+
+  <section>
+    <h2>Usage</h2>
+    <div class="steps">
+      <div class="step"><b>1</b><span>Calibrate</span><small>Collect X·Xᵀ per weight, the same statistic GPTQ uses</small></div>
+      <div class="step"><b>2</b><span>Transform</span><small>Quantize the weights with ADMM-Q</small></div>
+      <div class="step"><b>3</b><span>Serve</span><small>Run with Qwix's <code>PtqProvider</code></small></div>
+    </div>
+<pre><code><span class="k">import</span> jax, jax.numpy <span class="k">as</span> jnp, qwix
+<span class="k">from</span> qwix_admmq <span class="k">import</span> admmq
+
+rules = [admmq.AdmmqRule(module_path=<span class="s">'.*'</span>, weight_qtype=jnp.int4)]
+
+<span class="c"># 1. Calibration: collects X @ X.T per weight (same statistic as GPTQ).</span>
+cal_model = qwix.quantize_model(model, admmq.AdmmqCalibrationProvider(rules))
+<span class="k">for</span> batch <span class="k">in</span> calibration_dataset:
+    _, new_vars = cal_model.apply(variables, batch, mutable=<span class="s">'quant_stats'</span>)
+    variables.update(new_vars)
+
+<span class="c"># 2. Weight transformation with ADMM-Q.</span>
+ptq_model = qwix.quantize_model(model, qwix.PtqProvider(rules))
+abs_vars = jax.eval_shape(ptq_model.init, jax.random.key(<span class="s">0</span>), model_input)
+params = admmq.quantize_params(
+    variables[<span class="s">'params'</span>], abs_vars[<span class="s">'params'</span>], variables[<span class="s">'quant_stats'</span>])
+
+<span class="c"># 3. Serve with Qwix's PtqProvider, as for PTQ / GPTQ.</span>
+y = ptq_model.apply({<span class="s">'params'</span>: params}, model_input)</code></pre>
+    <p>NNX models follow the NNX example in Qwix's <code>docs/source/gptq.md</code>, with <code>admmq</code> in place of <code>gptq</code>.</p>
+  </section>
+
+  <section>
+    <h2>Behavior</h2>
+    <ul class="facts">
+      <li>Same algorithm as <code>solvers_jax.ADMM_quantize</code>: clip-ratio scale search, ADMM with one float64 eigendecomposition per weight, a single guarded scale refresh when progress stalls, and PairSwap on ill-conditioned layers.</li>
+      <li>Uses Qwix's grid and calibration, not SpinQuant's. For int4 the codes are in [−8, 7]. Symmetric scales are absmax / 7.5. Asymmetric (<code>minmax</code>) uses an integer zero point. Any <code>weight_calibration_method</code> and <code>tile_size</code> that Qwix supports also work here.</li>
+      <li>Supports integer qtypes (<code>int4</code>, <code>int8</code>, <code>'int2'</code>…<code>'int7'</code>). Other qtypes (fp8, nf4, mx formats) fall back to Qwix's PTQ with a warning.</li>
+      <li>float64 is enabled only inside <code>quantize_weight</code> (<code>jax.enable_x64</code>), not globally. Matmuls there also run at full float32 precision (<code>jax.default_matmul_precision('highest')</code>), because JAX otherwise allows TF32 on NVIDIA GPUs.</li>
+    </ul>
+    <figure>
+      <div class="grid-line" aria-label="int4 codes from -8 to 7">
+        <span>−8</span><span>−7</span><span>−6</span><span>−5</span><span>−4</span><span>−3</span><span>−2</span><span>−1</span><span class="z">0</span><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span>
+      </div>
+      <figcaption>The 16 int4 codes on Qwix's grid. A symmetric scale of absmax / 7.5 puts ±absmax halfway past the outermost codes.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2>Running the tests</h2>
+<pre><code>pip install <span class="s">"flax&gt;=0.12"</span> absl-py   <span class="c"># plus jax</span>
+PYTHONPATH=/path/to/qwix:/path/to/admm-q-main python qwix_admmq/admmq_test.py</code></pre>
+    <p>On Engaging login nodes, prefix the command with <code>taskset -c 0-3</code>. Otherwise XLA tries to start one thread per core and hits the per-user thread limit.</p>
+  </section>
+
+  <section class="callout">
+    <h2>Note on Qwix's GPTQ</h2>
+    <p>Qwix's <code>gptq_core.quantize_weight</code> (as of commit <code>67ff467</code>) fails on asymmetric rules. Line 158 evaluates <code>zero_point and zero_point.squeeze(1)</code>, which raises "truth value of an array is ambiguous". The ADMM-Q tests therefore compare against GPTQ on symmetric rules only.</p>
+  </section>
+</main>
+
+</body></html>
