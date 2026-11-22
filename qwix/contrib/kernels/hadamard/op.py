@@ -37,15 +37,14 @@ Provides three entry points:
 The rotation is internal to these ops: its matmuls are never intercepted by a
 quantization provider, e.g. inside `qwix.quantize_model`.
 
-Relationship to `qwix.contrib.kernels.fused_hadamard_quantize`:
-`fused_hadamard_quantize` is a separate forward-only kernel for explicit Pallas
-grid tiling (`bm, bn, sm, sn`) that computes **2-D block-level scales** of shape
-`(sm, sn, 1, 1)` as raw `(xq, scale)` arrays (paired with
-`fused_hadamard_quantized_matmul`). This `hadamard` package instead targets
-Qwix's standard **row-wise (per-channel) `QArray`** contract and
-`dot_general_qt` QAT training, adding Rademacher sign flips, automatic tile
-heuristics, non-power-of-two Paley-I orders, FP8/INT8 qtypes, and custom-VJP
-backward passes.
+Relationship to `qwix.contrib.kernels.tiled_hadamard`:
+`tiled_hadamard.quantize` and `tiled_hadamard.quantized_matmul` are separate
+forward-only kernels for explicit Pallas grid tiling (`bm, bn, sm, sn`) that
+compute **2-D tile-level scales** of shape `(sm, sn, 1, 1)` as raw arrays.
+This `hadamard` package instead targets Qwix's standard **row-wise
+(per-channel) `QArray`** contract and `dot_general_qt` QAT training, adding
+Rademacher sign flips, automatic tile heuristics, non-power-of-two Paley-I
+orders, FP8/INT8 qtypes, and custom-VJP backward passes.
 
 Chip support: the Pallas kernels run on any TPU whose MXU takes the input
 dtype. Powers of two `k >= 256` use a two-stage layout (see `kernel.py`); other
