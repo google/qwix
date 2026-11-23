@@ -19,6 +19,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 from jax import numpy as jnp
+import numpy as np
 from qwix._src.core import qarray
 from qwix._src.core import ragged_dot
 
@@ -451,6 +452,47 @@ class RaggedDotTest(parameterized.TestCase):
     else:
       mock_fast.assert_not_called()
       mock_slow.assert_called_once()
+
+  @parameterized.named_parameters(
+      dict(testcase_name='nf4_nf4', lhs_qtype='nf4', rhs_qtype='nf4'),
+      dict(testcase_name='int8_nf4', lhs_qtype=jnp.int8, rhs_qtype='nf4'),
+      dict(testcase_name='nf4_int8', lhs_qtype='nf4', rhs_qtype=jnp.int8),
+  )
+  def test_can_dequant_on_output_dispatch(
+      self,
+      lhs_qtype: jax.typing.DTypeLike,
+      rhs_qtype: jax.typing.DTypeLike,
+  ):
+    lhs_fp = self._make_array((32, 64))
+    rhs_fp = self._make_array((2, 64, 16))
+    group_sizes = jnp.array((20, 12))
+    q_lhs = qarray.quantize(lhs_fp, qarray.HowToQuantize(qtype=lhs_qtype))
+    q_rhs = qarray.quantize(rhs_fp, qarray.HowToQuantize(qtype=rhs_qtype))
+    dnums = ragged_dot._BASIC_RAGGED_DOT_DIMENSION_NUMBERS
+
+    expected = jax.jit(
+        lambda lhs, rhs, sizes: jax.lax.ragged_dot_general(
+            qarray.dequantize(lhs), qarray.dequantize(rhs), sizes, dnums
+        )
+    )(q_lhs, q_rhs, group_sizes)
+    with (
+        mock.patch.object(
+            ragged_dot,
+            '_fast_ragged_dot_general',
+            wraps=ragged_dot._fast_ragged_dot_general,
+        ) as mock_fast,
+        mock.patch.object(
+            ragged_dot,
+            '_slow_ragged_dot_general',
+            wraps=ragged_dot._slow_ragged_dot_general,
+        ) as mock_slow,
+    ):
+      actual = jax.jit(ragged_dot.ragged_dot_general, static_argnums=3)(
+          q_lhs, q_rhs, group_sizes, dnums
+      )
+    mock_fast.assert_not_called()
+    mock_slow.assert_called_once()
+    np.testing.assert_array_equal(actual, expected)
 
 
 if __name__ == '__main__':

@@ -278,7 +278,9 @@ def ragged_dot_general(
   use_fast_path = True
   for operand in (lhs, rhs):
     if isinstance(operand, qarray.QArray):
-      if operand.zero_point is not None:
+      if operand.zero_point is not None or not numerics.can_dequant_on_output(
+          operand.qtype
+      ):
         use_fast_path = False
         break
     else:

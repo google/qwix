@@ -13,6 +13,8 @@
 # limitations under the License.
 """CPU tests for conv_general."""
 
+from unittest import mock
+
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
@@ -152,6 +154,63 @@ class ConvGeneralTest(parameterized.TestCase):
     )
     self.assertEqual(fast_out.shape, slow_out.shape)
     np.testing.assert_allclose(fast_out, slow_out, rtol=1e-5, atol=1e-5)
+
+  @parameterized.named_parameters(
+      ('nf4_nf4', 'nf4', 'nf4', False),
+      ('int8_nf4', jnp.int8, 'nf4', False),
+      ('nf4_int8', 'nf4', jnp.int8, False),
+      ('int8_int8', jnp.int8, jnp.int8, True),
+  )
+  def test_can_dequant_on_output_dispatch(
+      self,
+      lhs_qtype: jax.typing.DTypeLike,
+      rhs_qtype: jax.typing.DTypeLike,
+      expect_fast: bool,
+  ):
+    lhs_shape = (2, 4, 6, 6)
+    rhs_shape = (3, 4, 3, 3)
+    dnums = jax.lax.conv_dimension_numbers(
+        lhs_shape, rhs_shape, ('NCHW', 'OIHW', 'NCHW')
+    )
+    lhs_q = qarray.quantize(
+        jax.random.normal(jax.random.key(0), lhs_shape, jnp.float32),
+        conv_general.get_how_to_quantize(
+            dimension_numbers=dnums, for_lhs=True, qtype=lhs_qtype
+        ),
+    )
+    rhs_q = qarray.quantize(
+        jax.random.normal(jax.random.key(1), rhs_shape, jnp.float32),
+        conv_general.get_how_to_quantize(
+            dimension_numbers=dnums, for_lhs=False, qtype=rhs_qtype
+        ),
+    )
+    conv_kwargs = dict(
+        window_strides=(1, 1), padding='SAME', dimension_numbers=dnums
+    )
+    expected = jax.lax.conv_general_dilated(
+        qarray.dequantize(lhs_q), qarray.dequantize(rhs_q), **conv_kwargs
+    )
+    with (
+        mock.patch.object(
+            conv_general,
+            '_fast_conv_general_dilated',
+            wraps=conv_general._fast_conv_general_dilated,
+        ) as mock_fast,
+        mock.patch.object(
+            conv_general,
+            '_slow_conv_general_dilated',
+            wraps=conv_general._slow_conv_general_dilated,
+        ) as mock_slow,
+    ):
+      actual = conv_general.conv_general_dilated(lhs_q, rhs_q, **conv_kwargs)
+    if expect_fast:
+      mock_fast.assert_called_once()
+      mock_slow.assert_not_called()
+      np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-5)
+    else:
+      mock_fast.assert_not_called()
+      mock_slow.assert_called_once()
+      np.testing.assert_array_equal(actual, expected)
 
 
 if __name__ == '__main__':
