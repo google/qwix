@@ -15,6 +15,7 @@
 
 import dataclasses
 import functools
+import math
 from typing import Callable, Collection, Mapping, Sequence, TypeAlias
 from flax import nnx
 import flax.struct
@@ -464,12 +465,19 @@ def broadcast_to(
   return jax.tree.map(_broadcast_component, operand)
 
 
-def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
+def calibrate(
+    array: jax.Array,
+    how: HowToQuantize,
+    *,
+    reduce_dtype: jax.typing.DTypeLike | None = None,
+) -> dict[str, jax.Array]:
   """Calibrates the array.
 
   Args:
     array: The array to calibrate.
     how: How to quantize the array.
+    reduce_dtype: Optional dtype to cast `array` to for `max`/`min` reductions
+      before casting back to `array.dtype`.
 
   Returns:
     A dict of quantization statistics, e.g. {'min': ..., 'max': ...} for
@@ -488,13 +496,17 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
   # The returned calibration values should have the same shape as the scale.
   shape = get_scale_shape(array.shape, how)
   array = split_axis(array, how.tiled_axes)
+  reduce_array = array if reduce_dtype is None else array.astype(reduce_dtype)
 
   # Parse the calibration method.
   method, *args = how.calibration_method.lower().split(',')
   args = [float(a) for a in args]
   if method == 'minmax':
-    min_array = jnp.min(array, axis=reduce_axes, keepdims=True)
-    max_array = jnp.max(array, axis=reduce_axes, keepdims=True)
+    min_array = jnp.min(reduce_array, axis=reduce_axes, keepdims=True)
+    max_array = jnp.max(reduce_array, axis=reduce_axes, keepdims=True)
+    if reduce_dtype is not None:
+      min_array = min_array.astype(array.dtype)
+      max_array = max_array.astype(array.dtype)
     # Ensure min_array <= 0 <= max_array so that 0 can be accurately quantized.
     min_array = jnp.clip(min_array, max=0)
     max_array = jnp.clip(max_array, min=0)
@@ -503,7 +515,9 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
       max_array = max_array * args[0]
     return {'min': min_array.reshape(shape), 'max': max_array.reshape(shape)}
   elif method == 'absmax':
-    absmax = jnp.max(jnp.abs(array), axis=reduce_axes, keepdims=True)
+    absmax = jnp.max(jnp.abs(reduce_array), axis=reduce_axes, keepdims=True)
+    if reduce_dtype is not None:
+      absmax = absmax.astype(array.dtype)
     if args:  # args[0] is the scale factor.
       absmax = absmax * args[0]
     return {'absmax': absmax.reshape(shape)}
@@ -556,7 +570,8 @@ def compute_scale_zero_point(
   if 'min' in calibration and 'max' in calibration:
     qmin, qmax = numerics.get_asymmetric_bound(qtype)
     scale = (calibration['max'] - calibration['min']) / (qmax - qmin)
-    tiny_sqrt = jnp.sqrt(jnp.finfo(scale.dtype).tiny)
+    # Compute in Python so Mosaic doesn't emit a bf16 math.sqrt op in Pallas.
+    tiny_sqrt = math.sqrt(float(jnp.finfo(scale.dtype).tiny))
     scale = jnp.where(scale < tiny_sqrt, jnp.ones_like(scale), scale)
     zero_point = qmin - calibration['min'] / scale
     zero_point = numerics.convert_to(zero_point, qtype)
@@ -564,7 +579,8 @@ def compute_scale_zero_point(
     qmax = numerics.get_symmetric_bound(qtype)
     scale = calibration['absmax'] / qmax
     # Maybe adding an epsilon (1e-7) is faster?
-    tiny_sqrt = jnp.sqrt(jnp.finfo(scale.dtype).tiny)
+    # Compute in Python so Mosaic doesn't emit a bf16 math.sqrt op in Pallas.
+    tiny_sqrt = math.sqrt(float(jnp.finfo(scale.dtype).tiny))
     scale = jnp.where(scale < tiny_sqrt, jnp.ones_like(scale), scale)
     zero_point = None
   else:
@@ -629,6 +645,27 @@ def _align_reduced(x: jax.Array, reduced: frozenset[str]) -> jax.Array:
   spec = jax.typeof(x).sharding.spec
   if spec.reduced != reduced:
     return jax.sharding.reshard(x, spec.update(reduced=reduced))
+  return x
+
+
+def _expand_non_lane_axes(
+    x: jax.Array, target_shape: tuple[int, ...]
+) -> jax.Array:
+  """Expands singleton non-lane axes in f32 so Mosaic only lane-broadcasts."""
+  if (
+      x.ndim >= 2
+      and jnp.issubdtype(x.dtype, jnp.floating)
+      and jnp.finfo(x.dtype).bits < 32
+      and x.shape[-1] == 1
+      and target_shape[-1] > 1
+      and any(s == 1 and a > 1 for s, a in zip(x.shape[:-1], target_shape[:-1]))
+  ):
+    expanded_shape = tuple(
+        a if s == 1 else s for a, s in zip(target_shape[:-1], x.shape[:-1])
+    ) + (1,)
+    return jnp.broadcast_to(x.astype(jnp.float32), expanded_shape).astype(
+        x.dtype
+    )
   return x
 
 
@@ -735,6 +772,88 @@ def quantize_api(
   if scale_dtype is not None:
     qarray = dataclasses.replace(qarray, scale=qarray.scale.astype(scale_dtype))
   return qarray
+
+
+def quantize_tile(
+    x: jax.Array,
+    qtype: jax.typing.DTypeLike,
+    *,
+    channelwise_axes: Collection[int] = (),
+    calibration_method: str = 'absmax',
+    scale_dtype: jax.typing.DTypeLike | None = None,
+) -> QArray:
+  """Quantizes a tile inside a Pallas kernel with `qwix.quantize` numerics.
+
+  Unlike `quantize_api`, this takes no `tiled_axes`; axes refer to `x` (the
+  tile), and microscaled qtypes auto-tile the sole non-channelwise axis.
+
+  Example:
+    qa = qpl.quantize_tile(x_ref[...], jnp.int8, channelwise_axes=(0,))
+    acc_ref[...] += qpl.dot_general(qa, w_ref[...], dimension_numbers)
+
+  Args:
+    x: The tile array to quantize (e.g. `x_ref[...]`).
+    qtype: The logical type of the quantized value, e.g. jnp.int8,
+      jnp.float8_e4m3fn, 'mxfp8', etc.
+    channelwise_axes: Tile axes that receive a separate scale per index; all
+      other axes share one scale (or the microscaled block size). Negative axes
+      count from the end.
+    calibration_method: The calibration method to use, e.g. 'absmax' or
+      'minmax'.
+    scale_dtype: Optional dtype for the scale. Defaults to `x.dtype`.
+
+  Returns:
+    The quantized tile as a QArray.
+  """
+  normalized_axes = []
+  for axis in channelwise_axes:
+    norm = axis + x.ndim if axis < 0 else axis
+    if not 0 <= norm < x.ndim:
+      raise ValueError(
+          f'channelwise_axes axis {axis} is out of bounds for {x.ndim}D array.'
+      )
+    normalized_axes.append(norm)
+
+  tiled_axes = None
+  block_size = numerics.get_microscaled_block_size(qtype)
+  if block_size is not None:
+    non_channelwise = [a for a in range(x.ndim) if a not in normalized_axes]
+    if len(non_channelwise) != 1:
+      raise ValueError(
+          f'Microscaled qtype {qtype!r} requires exactly 1 non-channelwise'
+          f' axis, got {len(non_channelwise)} ({non_channelwise}) for'
+          f' {x.ndim}D array with channelwise_axes={channelwise_axes}.'
+      )
+    tiled_axes = {non_channelwise[0]: block_size}
+
+  how = HowToQuantize(
+      qtype=qtype,
+      channelwise_axes=tuple(normalized_axes),
+      tiled_axes=tiled_axes or {},
+      calibration_method=calibration_method,
+  )
+  reduce_dtype = None
+  if (
+      jnp.issubdtype(x.dtype, jnp.floating)
+      and jnp.finfo(x.dtype).bits < 32
+      and all(s == 1 for s in get_scale_shape(x.shape, how)[-2:])
+  ):
+    # Mosaic fails to reduce <32-bit float tiles when the last two axes
+    # collapse to size 1; non-lane broadcasts are still expanded in f32.
+    reduce_dtype = jnp.float32
+  calibration = calibrate(x, how, reduce_dtype=reduce_dtype)
+  scale, zero_point = compute_scale_zero_point(calibration, how.qtype)
+  bcast_scale = _expand_non_lane_axes(scale, x.shape)
+  bcast_zp = (
+      None
+      if zero_point is None
+      else _expand_non_lane_axes(zero_point.astype(x.dtype), x.shape)
+  )
+  qarray = quantize_with_scale_zero_point(
+      x, how.qtype, bcast_scale, bcast_zp, how.noise_fn
+  )
+  final_scale = scale.astype(scale_dtype) if scale_dtype is not None else scale
+  return dataclasses.replace(qarray, scale=final_scale, zero_point=zero_point)
 
 
 def dequantize(array: QArray) -> jax.Array:
