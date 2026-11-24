@@ -209,6 +209,16 @@ def rewriting_take(array: QArray, idx) -> QArray:
   return jax.tree.map(take, array)
 
 
+def _is_broadcastable_shape(
+    qvalue_shape: tuple[int, ...], param_shape: tuple[int, ...]
+) -> bool:
+  """Returns whether `param_shape` divides `qvalue_shape` (zero-safe)."""
+  return all(
+      (a == 0 and b in (0, 1)) or (a > 0 and b > 0 and a % b == 0)
+      for a, b in zip(qvalue_shape, param_shape)
+  )
+
+
 def validate_qarray(array: QArray):
   """Validates the internal consistency of a QArray."""
   if not isinstance(array.qvalue, jax.Array):
@@ -218,7 +228,7 @@ def validate_qarray(array: QArray):
         f'Scale {array.scale.shape} should have the same rank as qvalue'
         f' {array.qvalue.shape}.'
     )
-  if not all(a % b == 0 for a, b in zip(array.qvalue.shape, array.scale.shape)):
+  if not _is_broadcastable_shape(array.qvalue.shape, array.scale.shape):
     raise ValueError(
         f'Scale {array.scale.shape} should be broadcastable to qvalue'
         f' {array.qvalue.shape}.'
@@ -233,9 +243,7 @@ def validate_qarray(array: QArray):
           f'Zero point {array.zero_point.shape} should have the same rank as'
           f' qvalue {array.qvalue.shape}.'
       )
-    if not all(
-        a % b == 0 for a, b in zip(array.qvalue.shape, array.zero_point.shape)
-    ):
+    if not _is_broadcastable_shape(array.qvalue.shape, array.zero_point.shape):
       raise ValueError(
           f'Zero point {array.zero_point.shape} should be broadcastable to'
           f' qvalue {array.qvalue.shape}.'

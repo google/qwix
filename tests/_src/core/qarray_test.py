@@ -295,6 +295,37 @@ class QArrayTest(parameterized.TestCase):
           )
       )
 
+    with self.subTest('validate_zero_size'):
+      qarray.validate_qarray(
+          qarray.QArray(
+              qvalue=jnp.zeros((0, 4), jnp.int8),
+              scale=jnp.zeros((0, 1), jnp.float32),
+          )
+      )
+      qarray.validate_qarray(
+          qarray.QArray(
+              qvalue=jnp.zeros((0, 4), jnp.int8),
+              scale=jnp.ones((1, 1), jnp.float32),
+          )
+      )
+      for bad_qa in (
+          qarray.QArray(
+              qvalue=jnp.zeros((4, 4), jnp.int8),
+              scale=jnp.zeros((0, 1), jnp.float32),
+          ),
+          qarray.QArray(
+              qvalue=jnp.zeros((0, 4), jnp.int8),
+              scale=jnp.ones((2, 1), jnp.float32),
+          ),
+          qarray.QArray(
+              qvalue=jnp.zeros((4, 4), jnp.int8),
+              scale=jnp.ones((1, 1), jnp.float32),
+              zero_point=jnp.zeros((0, 1), jnp.int8),
+          ),
+      ):
+        with self.assertRaisesRegex(ValueError, 'broadcastable'):
+          qarray.validate_qarray(bad_qa)
+
     with self.subTest('swapaxes'):
       swapaxes_array = q_array.swapaxes(1, 2)
       self.assertEqual(swapaxes_array.shape, (2, 6, 2))
