@@ -484,7 +484,9 @@ def loop_dot_general(
     lhs: The left-hand side input (spatially sharded).
     rhs: The right-hand side input (spatially sharded).
     dimension_numbers: The contracting/batch dims.
-    preferred_element_type: Accumulator dtype.
+    preferred_element_type: Sets the result dtype; floating types narrower than
+      32 bits still accumulate in ``float32`` (Mosaic needs a 32-bit
+      accumulator) and are cast at the end.
     **kwargs: Extra args for jax.lax.dot_general.
 
   Returns:
@@ -530,6 +532,12 @@ def loop_dot_general(
   preferred_element_type, result_type = qarray.get_accumulator_and_result_type(
       lhs, rhs, preferred_element_type=preferred_element_type
   )
+  if (
+      jnp.issubdtype(preferred_element_type, jnp.floating)
+      and jnp.finfo(preferred_element_type).bits < 32
+  ):
+    # Mosaic's tpu.matmul needs a 32-bit accumulator.
+    preferred_element_type = jnp.float32
 
   lhs_scale_transpose, rhs_scale_transpose = _get_scale_transpose(
       dimension_numbers, (len(lhs_value.shape), len(rhs_value.shape))
